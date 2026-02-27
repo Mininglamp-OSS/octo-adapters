@@ -118,11 +118,13 @@ curl -s -X POST {SERVER_URL}/v1/bot/heartbeat \
 
 ### Read Receipt
 
+Mark messages as read (shows double-checkmark to the sender). Pass `message_ids` as **string array** to avoid large-number precision loss:
+
 ```bash
 curl -s -X POST {SERVER_URL}/v1/bot/readReceipt \
   -H "Authorization: Bearer {BOT_TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"channel_id": "{CHANNEL_ID}", "channel_type": 1}'
+  -d '{"channel_id": "{CHANNEL_ID}", "channel_type": 1, "message_ids": ["{MESSAGE_ID}"]}'
 ```
 
 ## Event Format (CRITICAL)
