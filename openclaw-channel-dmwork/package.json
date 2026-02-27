@@ -1,0 +1,31 @@
+{
+  "name": "openclaw-channel-dmwork",
+  "version": "0.1.0",
+  "description": "DMWork (唐僧叨叨) channel plugin for OpenClaw via WuKongIM WebSocket",
+  "main": "index.ts",
+  "type": "module",
+  "files": [
+    "index.ts",
+    "src",
+    "openclaw.plugin.json"
+  ],
+  "scripts": {
+    "start": "npx tsx index.ts",
+    "build": "tsc",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint index.ts src/"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "ws": "^8.16.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "openclaw": ">=0.1.0"
+  }
+}
