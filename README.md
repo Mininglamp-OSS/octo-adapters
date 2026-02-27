@@ -1,6 +1,6 @@
 # DMWork Adapters
 
-[DMWork](https://github.com/TangSengDaoDao/TangSengDaoDaoServer) 即时通讯平台的 AI 适配器集合，让 AI Agent 和聊天机器人能够通过 DMWork Bot API 进行通信。
+DMWork 即时通讯平台的 AI 适配器集合，让 AI Agent 和聊天机器人能够通过 DMWork Bot API 进行通信。
 
 ## 适配器列表
 
