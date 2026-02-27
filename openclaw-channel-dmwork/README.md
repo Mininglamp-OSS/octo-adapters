@@ -7,40 +7,30 @@ Repository: https://github.com/Mininglamp-OSS/octo-adapters
 ## Prerequisites
 
 - Node.js >= 18
+- OpenClaw installed and configured
 - A bot created via BotFather in DMWork (send `/newbot` to BotFather)
 
-## Install
+## Install as OpenClaw Extension
 
 ```bash
 git clone https://github.com/Mininglamp-OSS/octo-adapters.git
-cd dmwork-adapters/openclaw-channel-dmwork
-npm install
+cp -r dmwork-adapters/openclaw-channel-dmwork ~/.openclaw/extensions/dmwork
+cd ~/.openclaw/extensions/dmwork && npm install
 ```
 
 ## Configure
 
-Set environment variables:
+Add to your `~/.openclaw/config.yaml`:
 
-```bash
-export OCTO_BOT_TOKEN="bf_your_token_here"   # Bot token from BotFather
-export OCTO_API_URL="http://your-server:8090" # DMWork server API URL
+```yaml
+channels:
+  dmwork:
+    botToken: "bf_your_token_here"   # Bot token from BotFather
+    apiUrl: "http://your-server:8090" # DMWork server API URL
+    # wsUrl: "ws://your-server:5200" # Optional — auto-detected from register if omitted
 ```
 
-Or configure in `openclaw.plugin.json`:
-
-```json
-{
-  "id": "dmwork",
-  "channels": ["dmwork"],
-  "configSchema": {
-    "properties": {
-      "botToken": { "type": "string" },
-      "apiUrl": { "type": "string" },
-      "wsUrl": { "type": "string" }
-    }
-  }
-}
-```
+Configuration fields:
 
 - `botToken` (required): Bot token from BotFather (`bf_` prefix)
 - `apiUrl` (required): DMWork server API URL, e.g. `http://192.168.1.100:8090`
@@ -49,8 +39,10 @@ Or configure in `openclaw.plugin.json`:
 ## Run
 
 ```bash
-npm start
+openclaw gateway restart
 ```
+
+The plugin is loaded automatically by OpenClaw when the gateway starts.
 
 ## What it does
 
@@ -63,11 +55,17 @@ npm start
 
 ## As an OpenClaw Plugin
 
-When loaded by OpenClaw, the `register(api)` function in `index.ts` is called automatically. The plugin:
+The `index.ts` exports a standard OpenClaw plugin object. When loaded by OpenClaw:
 
-- Calls `api.getConfig()` to read `botToken` and `apiUrl`
-- Calls `api.onMessage()` to register the inbound message handler
-- Manages the WebSocket lifecycle internally
+- `register(api)` is called automatically
+- `api.runtime` is injected for logging and lifecycle management
+- `api.registerChannel()` registers the DMWork channel plugin
+- Configuration is read from `channels.dmwork` in OpenClaw's config
+
+The plugin uses the `ChannelPlugin` SDK interface with support for:
+- Direct messages and group chats
+- Multi-account configuration via `channels.dmwork.accounts`
+- Config hot-reload on `channels.dmwork` prefix changes
 
 ## Disconnect
 
