@@ -67,6 +67,21 @@ export async function sendTyping(params: {
   }, params.signal);
 }
 
+export async function sendReadReceipt(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  messageIds?: string[];
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/readReceipt", {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    ...(params.messageIds && params.messageIds.length > 0 ? { message_ids: params.messageIds } : {}),
+  }, params.signal);
+}
+
 export async function sendHeartbeat(params: {
   apiUrl: string;
   botToken: string;

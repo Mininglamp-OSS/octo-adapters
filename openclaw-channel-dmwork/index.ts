@@ -6,7 +6,6 @@
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { dmworkPlugin } from "./src/channel.js";
 import { setDmworkRuntime } from "./src/runtime.js";
 
@@ -14,13 +13,11 @@ const plugin: {
   id: string;
   name: string;
   description: string;
-  configSchema: ReturnType<typeof emptyPluginConfigSchema>;
   register: (api: OpenClawPluginApi) => void;
 } = {
   id: "dmwork",
   name: "DMWork",
   description: "OpenClaw DMWork channel plugin via WuKongIM WebSocket",
-  configSchema: emptyPluginConfigSchema(),
   register(api) {
     setDmworkRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });

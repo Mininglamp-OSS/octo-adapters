@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -109,6 +109,19 @@ export async function handleInboundMessage(params: {
   });
 
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
+
+  const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
+  const replyChannelType = isGroup ? ChannelType.Group : ChannelType.DM;
+
+  // 已读回执 + 正在输入 — fire-and-forget，失败不影响主流程
+  log?.info?.(`dmwork: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
+  const messageIds = message.message_id ? [message.message_id] : [];
+  sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
+    .then(() => log?.info?.("dmwork: readReceipt sent OK"))
+    .catch((err) => log?.error?.(`dmwork: readReceipt failed: ${String(err)}`));
+  sendTyping({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType })
+    .then(() => log?.info?.("dmwork: typing sent OK"))
+    .catch((err) => log?.error?.(`dmwork: typing failed: ${String(err)}`));
 
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,

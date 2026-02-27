@@ -46,7 +46,7 @@ export interface BotEvent {
 }
 
 export interface BotMessage {
-  message_id: number;
+  message_id: string;
   message_seq: number;
   from_uid: string;
   channel_id?: string;
@@ -108,45 +108,3 @@ export interface DMWorkConfig {
   wsUrl?: string;
 }
 
-/** WuKongIM WebSocket protocol types */
-export interface WKConnectPacket {
-  type: 1; // CONNECT
-  version: number;
-  client_key: string;
-  client_timestamp: string;
-  uid: string;
-  token: string;
-}
-
-export interface WKConnAckPacket {
-  type: 2; // CONNACK
-  time_diff: number;
-  reason_code: number; // 0 = success
-}
-
-export interface WKRecvPacket {
-  type: 5; // RECV
-  setting: number;
-  msg_key: string;
-  from_uid: string;
-  channel_id: string;
-  channel_type: number;
-  message_id: number;
-  message_seq: number;
-  timestamp: number;
-  payload: string; // base64 encoded JSON
-}
-
-export interface WKRecvAckPacket {
-  type: 6; // RECVACK
-  message_id: number;
-  message_seq: number;
-}
-
-export interface WKPingPacket {
-  type: 3; // PING
-}
-
-export interface WKPongPacket {
-  type: 4; // PONG
-}
