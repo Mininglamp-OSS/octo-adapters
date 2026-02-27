@@ -1,7 +1,7 @@
 {
   "name": "openclaw-channel-dmwork",
   "version": "0.1.0",
-  "description": "DMWork (唐僧叨叨) channel plugin for OpenClaw via WuKongIM WebSocket",
+  "description": "DMWork channel plugin for OpenClaw via WuKongIM WebSocket",
   "main": "index.ts",
   "type": "module",
   "files": [

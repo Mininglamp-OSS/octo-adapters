@@ -1,7 +1,7 @@
 /**
  * openclaw-channel-dmwork
  *
- * OpenClaw channel plugin for DMWork (唐僧叨叨) messaging platform.
+ * OpenClaw channel plugin for DMWork messaging platform.
  * Connects via WuKongIM WebSocket for real-time messaging.
  *
  * Usage:
