@@ -1,8 +1,8 @@
-# dmchat
+# openclaw-channel-dmwork
 
 DMWork channel plugin for OpenClaw. Connects via WuKongIM WebSocket for real-time messaging.
 
-Repository: https://code.mlamp.cn/yujiawei/dmchat
+Repository: https://github.com/Mininglamp-OSS/octo-adapters
 
 ## Prerequisites
 
@@ -12,8 +12,8 @@ Repository: https://code.mlamp.cn/yujiawei/dmchat
 ## Install
 
 ```bash
-git clone https://code.mlamp.cn/yujiawei/dmchat.git
-cd dmchat
+git clone https://github.com/Mininglamp-OSS/octo-adapters.git
+cd dmwork-adapters/openclaw-channel-dmwork
 npm install
 ```
 
