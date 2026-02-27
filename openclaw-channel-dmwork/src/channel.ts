@@ -73,7 +73,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       }
       const content = ctx.text?.trim();
       if (!content) {
-        return { channel: "dmwork", to: ctx.to };
+        return { channel: "dmwork", to: ctx.to, messageId: "" };
       }
 
       await sendMessage({
@@ -84,7 +84,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         content,
       });
 
-      return { channel: "dmwork", to: ctx.to };
+      return { channel: "dmwork", to: ctx.to, messageId: "" };
     },
   },
   status: {

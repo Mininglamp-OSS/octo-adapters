@@ -51,7 +51,7 @@ export async function handleInboundMessage(params: {
     channel: "dmwork",
     accountId: account.accountId,
     peer: {
-      kind: isGroup ? "group" : "dm",
+      kind: isGroup ? "group" : "direct",
       id: sessionId,
     },
   });
