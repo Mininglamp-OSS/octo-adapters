@@ -55,10 +55,16 @@ export interface BotMessage {
   payload: MessagePayload;
 }
 
+export interface MentionPayload {
+  uids?: string[];
+  all?: number; // 1 = @all
+}
+
 export interface MessagePayload {
   type: MessageType;
   content?: string;
   url?: string;
+  mention?: MentionPayload;
   [key: string]: unknown;
 }
 
@@ -102,9 +108,17 @@ export enum MessageType {
 }
 
 /** Plugin config */
+export interface DMWorkGroupConfig {
+  requireMention?: boolean;
+  enabled?: boolean;
+}
+
 export interface DMWorkConfig {
   botToken: string;
   apiUrl: string;
   wsUrl?: string;
+  groupPolicy?: "open" | "allowlist" | "disabled";
+  requireMention?: boolean;
+  groups?: Record<string, DMWorkGroupConfig>;
 }
 

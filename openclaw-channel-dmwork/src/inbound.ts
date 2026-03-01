@@ -1,4 +1,9 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
+import {
+  buildPendingHistoryContextFromMap,
+  clearHistoryEntriesIfEnabled,
+  type HistoryEntry,
+} from "openclaw/plugin-sdk";
 import { sendMessage, sendReadReceipt, sendTyping } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
@@ -23,8 +28,10 @@ export async function handleInboundMessage(params: {
   message: BotMessage;
   log?: ChannelLogSink;
   statusSink?: DmworkStatusSink;
+  groupHistories?: Map<string, HistoryEntry[]>;
+  historyLimit?: number;
 }) {
-  const { account, message, log, statusSink } = params;
+  const { account, message, log, statusSink, groupHistories, historyLimit } = params;
 
   const isGroup =
     typeof message.channel_id === "string" &&
@@ -70,13 +77,33 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
+  // Build group history context (messages where bot wasn't mentioned)
+  let historyContext = "";
+  if (isGroup && groupHistories && message.channel_id) {
+    historyContext = buildPendingHistoryContextFromMap({
+      historyMap: groupHistories,
+      historyKey: message.channel_id!,
+      limit: historyLimit ?? 20,
+      currentMessage: rawBody,
+      formatEntry: (entry) => entry.body,
+    });
+    // Clear consumed history
+    clearHistoryEntriesIfEnabled({
+      historyMap: groupHistories,
+      historyKey: message.channel_id!,
+      limit: historyLimit ?? 20,
+    });
+  }
+
+  const effectiveBody = historyContext ? `${historyContext}\n\n${rawBody}` : rawBody;
+
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
     from: fromLabel,
     timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     previousTimestamp,
     envelope: envelopeOptions,
-    body: rawBody,
+    body: effectiveBody,
   });
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
@@ -113,7 +140,7 @@ export async function handleInboundMessage(params: {
   const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
   const replyChannelType = isGroup ? ChannelType.Group : ChannelType.DM;
 
-  // 已读回执 + 正在输入 — fire-and-forget，失败不影响主流程
+  // 已读回执 + 正在输入 — fire-and-forget
   log?.info?.(`dmwork: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
   const messageIds = message.message_id ? [message.message_id] : [];
   sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
