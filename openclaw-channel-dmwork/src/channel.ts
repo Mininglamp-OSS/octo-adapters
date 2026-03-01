@@ -161,7 +161,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // 3. Start heartbeat timer
       let heartbeatTimer: NodeJS.Timeout | null = null;
       let stopped = false;
-      let greetingSent = false;
 
       const startHeartbeat = () => {
         // Clear existing heartbeat to prevent duplicates on reconnect
@@ -213,19 +212,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           statusSink({ lastError: null });
           startHeartbeat();
 
-          // Send greeting only on first connect, not on reconnects
-          if (!greetingSent) {
-            greetingSent = true;
-            sendMessage({
-              apiUrl: account.config.apiUrl,
-              botToken: account.config.botToken!,
-              channelId: credentials.owner_uid,
-              channelType: ChannelType.DM,
-              content: "I'm online and ready!",
-            }).catch((err) => {
-              log?.warn?.(`dmwork: failed to send greeting: ${String(err)}`);
-            });
-          }
+          // No greeting on connect — bot stays silent until user sends a message
         },
 
         onDisconnected: () => {
