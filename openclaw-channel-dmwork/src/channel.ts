@@ -3,9 +3,6 @@ import {
   DEFAULT_ACCOUNT_ID,
   type ChannelOutboundContext,
   type ChannelPlugin,
-  recordPendingHistoryEntryIfEnabled,
-  DEFAULT_GROUP_HISTORY_LIMIT,
-  type HistoryEntry,
 } from "openclaw/plugin-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 import { DmworkConfigSchema } from "./config-schema.js";
@@ -29,72 +26,6 @@ const meta = {
   blurb: "WuKongIM gateway for DMWork",
   order: 90,
 };
-
-/**
- * Check if the bot was mentioned in a group message.
- * Uses the structured mention.uids field from WuKongIM payload.
- */
-function checkBotMentioned(payload: MessagePayload | undefined, botUid: string): boolean {
-  if (!payload?.mention) return false;
-  // @all
-  if (payload.mention.all === 1) return true;
-  // @specific bot
-  if (payload.mention.uids?.includes(botUid)) return true;
-  return false;
-}
-
-/**
- * Resolve whether mention is required for a group.
- * Checks group-specific config, then global config. Default: true.
- */
-function resolveRequireMention(
-  dmworkConfig: Record<string, unknown> | undefined,
-  groupId: string | undefined,
-): boolean {
-  const cfg = dmworkConfig as {
-    requireMention?: boolean;
-    groups?: Record<string, { requireMention?: boolean; enabled?: boolean }>;
-  } | undefined;
-
-  // Group-specific override
-  if (groupId && cfg?.groups) {
-    const groupConfig = cfg.groups[groupId] ?? cfg.groups["*"];
-    if (typeof groupConfig?.requireMention === "boolean") {
-      return groupConfig.requireMention;
-    }
-  }
-
-  // Global default
-  if (typeof cfg?.requireMention === "boolean") {
-    return cfg.requireMention;
-  }
-
-  // Default: require mention (same as Telegram/Feishu/Discord)
-  return true;
-}
-
-/**
- * Check if a group is allowed based on groupPolicy.
- */
-function isGroupAllowed(
-  dmworkConfig: Record<string, unknown> | undefined,
-  groupId: string | undefined,
-): boolean {
-  const cfg = dmworkConfig as {
-    groupPolicy?: string;
-    groups?: Record<string, { enabled?: boolean }>;
-  } | undefined;
-
-  const policy = cfg?.groupPolicy ?? "open";
-
-  if (policy === "disabled") return false;
-  if (policy === "open") return true;
-
-  // allowlist mode
-  if (!groupId || !cfg?.groups) return false;
-  const groupConfig = cfg.groups[groupId] ?? cfg.groups["*"];
-  return groupConfig?.enabled !== false && groupConfig !== undefined;
-}
 
 export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   id: "dmwork",
@@ -122,15 +53,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       botToken: account.config.botToken ? "[set]" : "[missing]",
       wsUrl: account.config.wsUrl ?? "[auto-detect]",
     }),
-  },
-  groups: {
-    resolveRequireMention: (params) => {
-      const dmworkConfig = params.cfg?.channels?.dmwork as Record<string, unknown> | undefined;
-      return resolveRequireMention(dmworkConfig, params.groupId ?? undefined);
-    },
-  },
-  mentions: {
-    stripPatterns: () => ["@\\S+"],
   },
   messaging: {
     normalizeTarget: (target) => target.trim(),
@@ -238,8 +160,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // 3. Start heartbeat timer
       let heartbeatTimer: NodeJS.Timeout | null = null;
       let stopped = false;
+      let greetingSent = false;
 
       const startHeartbeat = () => {
+        // Clear existing heartbeat to prevent duplicates on reconnect
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
         heartbeatTimer = setInterval(() => {
           if (stopped) return;
           sendHeartbeat({
@@ -250,11 +175,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           });
         }, account.config.heartbeatIntervalMs);
       };
-
-      // Group message history (for context when bot is not mentioned)
-      const groupHistories = new Map<string, HistoryEntry[]>();
-      const historyLimit = DEFAULT_GROUP_HISTORY_LIMIT;
-      const dmworkConfig = (ctx.cfg as OpenClawConfig)?.channels?.dmwork as Record<string, unknown> | undefined;
 
       // 4. Connect WebSocket
       const socket = new WKSocket({
@@ -268,46 +188,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           // Skip non-text for now
           if (!msg.payload || msg.payload.type !== MessageType.Text) return;
 
-          const isGroup = msg.channel_type === ChannelType.Group && !!msg.channel_id;
-
-          // --- Group message filtering ---
-          if (isGroup) {
-            // Check group policy
-            if (!isGroupAllowed(dmworkConfig, msg.channel_id)) {
-              log?.info?.(
-                `dmwork: group ${msg.channel_id} not allowed by groupPolicy, skipping`,
-              );
-              return;
-            }
-
-            // Check mention requirement
-            const needsMention = resolveRequireMention(dmworkConfig, msg.channel_id);
-            const mentioned = checkBotMentioned(msg.payload, credentials.robot_id);
-
-            if (needsMention && !mentioned) {
-              // Not mentioned — record to history for context, don't trigger AI
-              log?.info?.(
-                `dmwork: group ${msg.channel_id} message from ${msg.from_uid} — no mention, storing as context`,
-              );
-              recordPendingHistoryEntryIfEnabled({
-                historyMap: groupHistories,
-                historyKey: msg.channel_id!,
-                limit: historyLimit,
-                entry: {
-                  sender: msg.from_uid,
-                  body: `${msg.from_uid}: ${msg.payload.content ?? ""}`,
-                  timestamp: Date.now(),
-                  messageId: msg.message_id,
-                },
-              });
-              return;
-            }
-
-            log?.info?.(
-              `dmwork: group ${msg.channel_id} message from ${msg.from_uid} — mentioned=${mentioned}, processing`,
-            );
-          }
-
           log?.info?.(
             `dmwork: recv message from=${msg.from_uid} channel=${msg.channel_id ?? "DM"} type=${msg.channel_type ?? 1}`,
           );
@@ -315,10 +195,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           handleInboundMessage({
             account,
             message: msg,
+            botUid: credentials.robot_id,
             log,
             statusSink,
-            groupHistories,
-            historyLimit,
           }).catch((err) => {
             log?.error?.(`dmwork: inbound handler failed: ${String(err)}`);
           });
@@ -329,16 +208,19 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           statusSink({ lastError: null });
           startHeartbeat();
 
-          // Send greeting to owner
-          sendMessage({
-            apiUrl: account.config.apiUrl,
-            botToken: account.config.botToken!,
-            channelId: credentials.owner_uid,
-            channelType: ChannelType.DM,
-            content: "I'm online and ready!",
-          }).catch((err) => {
-            log?.warn?.(`dmwork: failed to send greeting: ${String(err)}`);
-          });
+          // Send greeting only on first connect, not on reconnects
+          if (!greetingSent) {
+            greetingSent = true;
+            sendMessage({
+              apiUrl: account.config.apiUrl,
+              botToken: account.config.botToken!,
+              channelId: credentials.owner_uid,
+              channelType: ChannelType.DM,
+              content: "I'm online and ready!",
+            }).catch((err) => {
+              log?.warn?.(`dmwork: failed to send greeting: ${String(err)}`);
+            });
+          }
         },
 
         onDisconnected: () => {

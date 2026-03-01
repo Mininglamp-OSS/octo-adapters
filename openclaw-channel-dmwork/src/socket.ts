@@ -16,10 +16,15 @@ interface WKSocketOptions {
  * WuKongIM WebSocket client for bot connections.
  * Thin wrapper around wukongimjssdk — the SDK handles binary encoding,
  * DH key exchange, encryption, heartbeat, reconnect, and RECVACK.
+ *
+ * NOTE: WKSDK.shared() is a singleton. Each WKSocket must fully
+ * disconnect before connecting to avoid connection leaks and msgKey
+ * mismatch errors from concurrent WebSocket sessions.
  */
 export class WKSocket extends EventEmitter {
   private statusListener: ((status: ConnectStatus, reasonCode?: number) => void) | null = null;
   private messageListener: ((message: Message) => void) | null = null;
+  private connected = false;
 
   constructor(private opts: WKSocketOptions) {
     super();
@@ -28,26 +33,44 @@ export class WKSocket extends EventEmitter {
   /** Connect to WuKongIM WebSocket */
   connect(): void {
     const im = WKSDK.shared();
+
+    // Ensure clean state — disconnect any prior session first
+    try { im.disconnect(); } catch { /* ignore */ }
+
     im.config.addr = this.opts.wsUrl;
     im.config.uid = this.opts.uid;
     im.config.token = this.opts.token;
-    im.config.deviceFlag = 0; // APP — 与服务端 bot 注册时使用的 device flag 一致
+    im.config.deviceFlag = 0; // APP — matches bot registration device flag
+
+    // Remove any stale listeners before adding new ones
+    if (this.statusListener) {
+      im.connectManager.removeConnectStatusListener(this.statusListener);
+    }
+    if (this.messageListener) {
+      im.chatManager.removeMessageListener(this.messageListener);
+    }
 
     // Listen for connection status changes
     this.statusListener = (status: ConnectStatus, reasonCode?: number) => {
       switch (status) {
         case ConnectStatus.Connected:
+          this.connected = true;
           this.opts.onConnected?.();
           break;
         case ConnectStatus.Disconnect:
-          this.opts.onDisconnected?.();
+          if (this.connected) {
+            this.connected = false;
+            this.opts.onDisconnected?.();
+          }
           break;
         case ConnectStatus.ConnectFail:
+          this.connected = false;
           this.opts.onError?.(
             new Error(`Connect failed: reasonCode=${reasonCode ?? "unknown"}`),
           );
           break;
         case ConnectStatus.ConnectKick:
+          this.connected = false;
           this.opts.onError?.(new Error("Kicked by server"));
           this.opts.onDisconnected?.();
           break;
@@ -83,6 +106,7 @@ export class WKSocket extends EventEmitter {
   /** Gracefully disconnect */
   disconnect(): void {
     const im = WKSDK.shared();
+    this.connected = false;
     if (this.statusListener) {
       im.connectManager.removeConnectStatusListener(this.statusListener);
       this.statusListener = null;
@@ -91,6 +115,6 @@ export class WKSocket extends EventEmitter {
       im.chatManager.removeMessageListener(this.messageListener);
       this.messageListener = null;
     }
-    im.disconnect();
+    try { im.disconnect(); } catch { /* ignore */ }
   }
 }

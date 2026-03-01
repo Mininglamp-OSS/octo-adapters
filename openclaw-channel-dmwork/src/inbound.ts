@@ -1,14 +1,15 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import {
-  buildPendingHistoryContextFromMap,
-  clearHistoryEntriesIfEnabled,
-  type HistoryEntry,
-} from "openclaw/plugin-sdk";
 import { sendMessage, sendReadReceipt, sendTyping } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
+import {
+  recordPendingHistoryEntryIfEnabled,
+  buildPendingHistoryContextFromMap,
+  clearHistoryEntriesIfEnabled,
+  DEFAULT_GROUP_HISTORY_LIMIT,
+} from "openclaw/plugin-sdk";
 
 export type DmworkStatusSink = (patch: {
   lastInboundAt?: number;
@@ -26,12 +27,11 @@ function resolveContent(payload: BotMessage["payload"]): string {
 export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
+  botUid: string;
   log?: ChannelLogSink;
   statusSink?: DmworkStatusSink;
-  groupHistories?: Map<string, HistoryEntry[]>;
-  historyLimit?: number;
 }) {
-  const { account, message, log, statusSink, groupHistories, historyLimit } = params;
+  const { account, message, botUid, log, statusSink } = params;
 
   const isGroup =
     typeof message.channel_id === "string" &&
@@ -48,6 +48,48 @@ export async function handleInboundMessage(params: {
       `dmwork: inbound dropped session=${sessionId} reason=empty-content`,
     );
     return;
+  }
+
+  // --- Mention gating for group messages ---
+  // In groups, only respond when the bot is explicitly @mentioned via
+  // payload.mention.uids (structured mention from WuKongIM).
+  // Unmentioned messages are recorded as history context for when the bot
+  // IS mentioned later.
+  // botUid comes from channel.ts credentials.robot_id
+  const requireMention = account.config.requireMention !== false; // default true
+
+  if (isGroup && requireMention) {
+    const mentionUids: string[] = message.payload?.mention?.uids ?? [];
+    const isMentioned = mentionUids.includes(botUid);
+
+    if (!isMentioned) {
+      // Record as pending history for future context
+      recordPendingHistoryEntryIfEnabled({
+        channelId: "dmwork",
+        groupId: sessionId,
+        entry: {
+          from: message.from_uid,
+          body: rawBody,
+          ts: message.timestamp ? message.timestamp * 1000 : Date.now(),
+        },
+        limit: DEFAULT_GROUP_HISTORY_LIMIT,
+      });
+      log?.info?.(
+        `dmwork: group message not mentioning bot, recorded as history context`,
+      );
+      return;
+    }
+
+    // Bot IS mentioned — prepend history context
+    const historyContext = buildPendingHistoryContextFromMap({
+      channelId: "dmwork",
+      groupId: sessionId,
+    });
+    if (historyContext) {
+      log?.info?.(`dmwork: prepending ${historyContext.split("\n").length} history entries`);
+    }
+    // Clear history after consuming
+    clearHistoryEntriesIfEnabled({ channelId: "dmwork", groupId: sessionId });
   }
 
   const core = getDmworkRuntime();
@@ -77,33 +119,13 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
-  // Build group history context (messages where bot wasn't mentioned)
-  let historyContext = "";
-  if (isGroup && groupHistories && message.channel_id) {
-    historyContext = buildPendingHistoryContextFromMap({
-      historyMap: groupHistories,
-      historyKey: message.channel_id!,
-      limit: historyLimit ?? 20,
-      currentMessage: rawBody,
-      formatEntry: (entry) => entry.body,
-    });
-    // Clear consumed history
-    clearHistoryEntriesIfEnabled({
-      historyMap: groupHistories,
-      historyKey: message.channel_id!,
-      limit: historyLimit ?? 20,
-    });
-  }
-
-  const effectiveBody = historyContext ? `${historyContext}\n\n${rawBody}` : rawBody;
-
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
     from: fromLabel,
     timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     previousTimestamp,
     envelope: envelopeOptions,
-    body: effectiveBody,
+    body: rawBody,
   });
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
@@ -140,7 +162,7 @@ export async function handleInboundMessage(params: {
   const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
   const replyChannelType = isGroup ? ChannelType.Group : ChannelType.DM;
 
-  // 已读回执 + 正在输入 — fire-and-forget
+  // 已读回执 + 正在输入 — fire-and-forget，失败不影响主流程
   log?.info?.(`dmwork: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
   const messageIds = message.message_id ? [message.message_id] : [];
   sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
