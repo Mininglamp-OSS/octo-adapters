@@ -9,6 +9,7 @@ import {
   buildPendingHistoryContextFromMap,
   clearHistoryEntriesIfEnabled,
   DEFAULT_GROUP_HISTORY_LIMIT,
+  type HistoryEntry,
 } from "openclaw/plugin-sdk";
 
 export type DmworkStatusSink = (patch: {
@@ -28,10 +29,11 @@ export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
   botUid: string;
+  groupHistories: Map<string, HistoryEntry[]>;
   log?: ChannelLogSink;
   statusSink?: DmworkStatusSink;
 }) {
-  const { account, message, botUid, log, statusSink } = params;
+  const { account, message, botUid, groupHistories, log, statusSink } = params;
 
   const isGroup =
     typeof message.channel_id === "string" &&
@@ -82,16 +84,22 @@ export async function handleInboundMessage(params: {
     }
 
     // Bot IS mentioned — prepend history context
-    const historyContext = buildPendingHistoryContextFromMap({
-      channelId: "dmwork",
-      groupId: sessionId,
+    const enrichedBody = buildPendingHistoryContextFromMap({
+      historyMap: groupHistories,
+      historyKey: sessionId,
+      currentMessage: rawBody,
+      limit: DEFAULT_GROUP_HISTORY_LIMIT,
     });
-    if (historyContext) {
-      historyPrefix = historyContext + "\n\n";
-      log?.info?.(`dmwork: prepending history context (${historyContext.length} chars)`);
+    if (enrichedBody !== rawBody) {
+      historyPrefix = enrichedBody.slice(0, enrichedBody.length - rawBody.length);
+      log?.info?.(`dmwork: prepending history context (${historyPrefix.length} chars)`);
     }
     // Clear history after consuming
-    clearHistoryEntriesIfEnabled({ channelId: "dmwork", groupId: sessionId });
+    clearHistoryEntriesIfEnabled({
+      historyMap: groupHistories,
+      historyKey: sessionId,
+      limit: DEFAULT_GROUP_HISTORY_LIMIT,
+    });
   }
 
   const core = getDmworkRuntime();

@@ -16,6 +16,7 @@ import { registerBot, sendMessage, sendHeartbeat } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
+import { DEFAULT_GROUP_HISTORY_LIMIT, type HistoryEntry } from "openclaw/plugin-sdk";
 
 const meta = {
   id: "dmwork",
@@ -176,7 +177,10 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         }, account.config.heartbeatIntervalMs);
       };
 
-      // 4. Connect WebSocket
+      // 4. Group history map for mention gating context
+      const groupHistories = new Map<string, HistoryEntry[]>();
+
+      // 5. Connect WebSocket
       const socket = new WKSocket({
         wsUrl,
         uid: credentials.robot_id,
@@ -196,6 +200,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             account,
             message: msg,
             botUid: credentials.robot_id,
+            groupHistories,
             log,
             statusSink,
           }).catch((err) => {
