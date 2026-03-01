@@ -17,6 +17,7 @@ export type ResolvedDmworkAccount = {
     wsUrl?: string;
     pollIntervalMs: number;
     heartbeatIntervalMs: number;
+    requireMention?: boolean;
   };
 };
 
@@ -71,6 +72,7 @@ export function resolveDmworkAccount(params: {
       wsUrl,
       pollIntervalMs,
       heartbeatIntervalMs,
+      requireMention: accountConfig.requireMention ?? channel.requireMention,
     },
   };
 }

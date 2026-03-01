@@ -55,12 +55,13 @@ export async function handleInboundMessage(params: {
   // payload.mention.uids (structured mention from WuKongIM).
   // Unmentioned messages are recorded as history context for when the bot
   // IS mentioned later.
-  // botUid comes from channel.ts credentials.robot_id
   const requireMention = account.config.requireMention !== false; // default true
+  let historyPrefix = "";
 
   if (isGroup && requireMention) {
     const mentionUids: string[] = message.payload?.mention?.uids ?? [];
-    const isMentioned = mentionUids.includes(botUid);
+    const mentionAll: boolean = message.payload?.mention?.all === true;
+    const isMentioned = mentionAll || mentionUids.includes(botUid);
 
     if (!isMentioned) {
       // Record as pending history for future context
@@ -68,9 +69,9 @@ export async function handleInboundMessage(params: {
         channelId: "dmwork",
         groupId: sessionId,
         entry: {
-          from: message.from_uid,
-          body: rawBody,
-          ts: message.timestamp ? message.timestamp * 1000 : Date.now(),
+          sender: message.from_uid,
+          body: historyPrefix + rawBody,
+          timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
         },
         limit: DEFAULT_GROUP_HISTORY_LIMIT,
       });
@@ -86,7 +87,8 @@ export async function handleInboundMessage(params: {
       groupId: sessionId,
     });
     if (historyContext) {
-      log?.info?.(`dmwork: prepending ${historyContext.split("\n").length} history entries`);
+      historyPrefix = historyContext + "\n\n";
+      log?.info?.(`dmwork: prepending history context (${historyContext.length} chars)`);
     }
     // Clear history after consuming
     clearHistoryEntriesIfEnabled({ channelId: "dmwork", groupId: sessionId });
