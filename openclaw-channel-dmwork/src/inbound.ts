@@ -165,6 +165,13 @@ export async function handleInboundMessage(params: {
   }
 
   const core = getDmworkRuntime();
+  if (!core?.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher) {
+    log?.error?.(`dmwork: OpenClaw runtime missing required functions. Available: config=${!!core?.config}, channel=${!!core?.channel}, reply=${!!core?.channel?.reply}, routing=${!!core?.channel?.routing}, session=${!!core?.channel?.session}`);
+    log?.error?.(`dmwork: reply methods: ${core?.channel?.reply ? Object.keys(core.channel.reply).join(",") : "N/A"}`);
+    log?.error?.(`dmwork: session methods: ${core?.channel?.session ? Object.keys(core.channel.session).join(",") : "N/A"}`);
+    log?.error?.(`dmwork: routing methods: ${core?.channel?.routing ? Object.keys(core.channel.routing).join(",") : "N/A"}`);
+    return;
+  }
   const config = core.config.loadConfig() as OpenClawConfig;
 
   const route = core.channel.routing.resolveAgentRoute({

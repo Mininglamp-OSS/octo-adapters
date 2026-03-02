@@ -1,6 +1,8 @@
 {
   "id": "dmwork",
-  "channels": ["dmwork"],
+  "channels": [
+    "dmwork"
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
