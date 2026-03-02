@@ -89,12 +89,30 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         return { channel: "dmwork", to: ctx.to, messageId: "" };
       }
 
+      // Parse target: "group:channel_id" for groups, "group:channel_id@uid1,uid2" for @mentions
+      let channelId = ctx.to;
+      let channelType = ChannelType.DM;
+      let mentionUids: string[] = [];
+
+      if (ctx.to.startsWith("group:")) {
+        const groupPart = ctx.to.slice(6);
+        const atIdx = groupPart.indexOf("@");
+        if (atIdx >= 0) {
+          channelId = groupPart.slice(0, atIdx);
+          mentionUids = groupPart.slice(atIdx + 1).split(",").filter(Boolean);
+        } else {
+          channelId = groupPart;
+        }
+        channelType = ChannelType.Group;
+      }
+
       await sendMessage({
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken,
-        channelId: ctx.to,
-        channelType: ChannelType.DM,
+        channelId,
+        channelType,
         content,
+        ...(mentionUids.length > 0 ? { mentionUids } : {}),
       });
 
       return { channel: "dmwork", to: ctx.to, messageId: "" };
