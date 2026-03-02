@@ -6,8 +6,7 @@ import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
 
 // Defensive imports — these may not exist in older OpenClaw versions
-let recordPendingHistoryEntryIfEnabled: any;
-let buildPendingHistoryContextFromMap: any;
+// History context managed manually for cross-SDK compatibility
 let clearHistoryEntriesIfEnabled: any;
 let DEFAULT_GROUP_HISTORY_LIMIT = 20;
 let _sdkLoaded = false;
@@ -17,12 +16,8 @@ async function ensureSdkLoaded() {
   _sdkLoaded = true;
   try {
     const sdk = await import("openclaw/plugin-sdk");
-    if (typeof sdk.recordPendingHistoryEntryIfEnabled === "function") {
-      recordPendingHistoryEntryIfEnabled = sdk.recordPendingHistoryEntryIfEnabled;
-    }
-    if (typeof sdk.buildPendingHistoryContextFromMap === "function") {
-      buildPendingHistoryContextFromMap = sdk.buildPendingHistoryContextFromMap;
-    }
+    // History context managed manually (SDK buildPendingHistoryContextFromMap
+    // has incompatible entry format expectations across versions)
     if (typeof sdk.clearHistoryEntriesIfEnabled === "function") {
       clearHistoryEntriesIfEnabled = sdk.clearHistoryEntriesIfEnabled;
     }
@@ -95,33 +90,18 @@ export async function handleInboundMessage(params: {
     const isMentioned = mentionAll || mentionUids.includes(botUid);
 
     if (!isMentioned) {
-      // Record as pending history — with fallback for older SDK
-      if (typeof recordPendingHistoryEntryIfEnabled === "function") {
-        recordPendingHistoryEntryIfEnabled({
-          historyMap: groupHistories,
-          historyKey: sessionId,
-          entry: {
-            sender: message.from_uid,
-            body: rawBody,
-            timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
-          },
-          limit: DEFAULT_GROUP_HISTORY_LIMIT,
-        });
-      } else {
-        // Manual fallback: store history in the map directly
-        if (!groupHistories.has(sessionId)) {
-          groupHistories.set(sessionId, []);
-        }
-        const entries = groupHistories.get(sessionId)!;
-        entries.push({
-          sender: message.from_uid,
-          body: rawBody,
-          timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
-        });
-        // Trim to limit
-        while (entries.length > DEFAULT_GROUP_HISTORY_LIMIT) {
-          entries.shift();
-        }
+      // Record as pending history context (manual — avoids SDK format incompatibility)
+      if (!groupHistories.has(sessionId)) {
+        groupHistories.set(sessionId, []);
+      }
+      const entries = groupHistories.get(sessionId)!;
+      entries.push({
+        sender: message.from_uid,
+        body: rawBody,
+        timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
+      });
+      while (entries.length > DEFAULT_GROUP_HISTORY_LIMIT) {
+        entries.shift();
       }
       log?.info?.(
         `dmwork: group message not mentioning bot, recorded as history context`,
@@ -129,26 +109,14 @@ export async function handleInboundMessage(params: {
       return;
     }
 
-    // Bot IS mentioned — prepend history context
-    if (typeof buildPendingHistoryContextFromMap === "function") {
-      const enrichedBody = buildPendingHistoryContextFromMap({
-        historyMap: groupHistories,
-        historyKey: sessionId,
-        currentMessage: rawBody,
-        limit: DEFAULT_GROUP_HISTORY_LIMIT,
-      });
-      if (enrichedBody !== rawBody) {
-        historyPrefix = enrichedBody.slice(0, enrichedBody.length - rawBody.length);
-        log?.info?.(`dmwork: prepending history context (${historyPrefix.length} chars)`);
-      }
-    } else {
-      // Manual fallback: build history prefix
+    // Bot IS mentioned — prepend history context (manual — avoids SDK format incompatibility)
+    {
       const entries = groupHistories.get(sessionId) ?? [];
       if (entries.length > 0) {
         historyPrefix = entries
           .map((e: any) => `[${e.sender}]: ${e.body}`)
           .join("\n") + "\n---\n";
-        log?.info?.(`dmwork: prepending history context (${historyPrefix.length} chars, fallback)`);
+        log?.info?.(`dmwork: prepending history context (${historyPrefix.length} chars)`);
       }
     }
 
