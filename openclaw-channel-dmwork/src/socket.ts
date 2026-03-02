@@ -103,6 +103,12 @@ export class WKSocket extends EventEmitter {
     im.connect();
   }
 
+  /** Update credentials for reconnection (e.g. after token refresh) */
+  updateCredentials(uid: string, token: string): void {
+    this.opts.uid = uid;
+    this.opts.token = token;
+  }
+
   /** Gracefully disconnect */
   disconnect(): void {
     const im = WKSDK.shared();

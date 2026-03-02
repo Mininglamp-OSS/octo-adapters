@@ -35,11 +35,6 @@ export interface BotEventsReq {
   limit?: number;
 }
 
-export interface BotEventsResp {
-  status: number;
-  results: BotEvent[];
-}
-
 export interface BotEvent {
   event_id: number;
   message?: BotMessage;
