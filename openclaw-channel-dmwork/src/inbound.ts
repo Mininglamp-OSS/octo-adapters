@@ -68,11 +68,11 @@ export async function handleInboundMessage(params: {
     if (!isMentioned) {
       // Record as pending history for future context
       recordPendingHistoryEntryIfEnabled({
-        channelId: "dmwork",
-        groupId: sessionId,
+        historyMap: groupHistories,
+        historyKey: sessionId,
         entry: {
           sender: message.from_uid,
-          body: historyPrefix + rawBody,
+          body: rawBody,
           timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
         },
         limit: DEFAULT_GROUP_HISTORY_LIMIT,
