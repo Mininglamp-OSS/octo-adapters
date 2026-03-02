@@ -16,7 +16,9 @@ import { registerBot, sendMessage, sendHeartbeat } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
-import { DEFAULT_GROUP_HISTORY_LIMIT, type HistoryEntry } from "openclaw/plugin-sdk";
+// HistoryEntry type - compatible with any version
+type HistoryEntry = { sender: string; body: string; timestamp: number };
+const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 
 const meta = {
   id: "dmwork",
@@ -176,7 +178,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       };
 
       // 4. Group history map for mention gating context
-      const groupHistories = new Map<string, HistoryEntry[]>();
+      const groupHistories = new Map<string, any[]>();
 
       // 5. Token refresh state — detect stale cached token
       let hasRefreshedToken = false;
