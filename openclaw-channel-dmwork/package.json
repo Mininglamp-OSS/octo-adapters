@@ -1,6 +1,6 @@
 {
   "name": "openclaw-channel-dmwork",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "DMWork channel plugin for OpenClaw via WuKongIM WebSocket",
   "main": "index.ts",
   "type": "module",
@@ -16,11 +16,11 @@
   "dependencies": {
     "axios": "^1.7.0",
     "ws": "^8.16.0",
-    "wukongimjssdk": "^1.3.4",
-    "zod": "^4.0.0"
+    "wukongimjssdk": "^1.3.4"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.2.0"
+    "openclaw": ">=2026.2.0",
+    "zod": ">=3.0.0"
   },
   "devDependencies": {
     "@types/ws": "^8.5.10",
