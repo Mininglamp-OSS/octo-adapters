@@ -1,11 +1,10 @@
 import {
-  buildChannelConfigSchema,
   DEFAULT_ACCOUNT_ID,
   type ChannelOutboundContext,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { DmworkConfigSchema } from "./config-schema.js";
+import { DmworkConfigJsonSchema } from "./config-schema.js";
 import {
   listDmworkAccountIds,
   resolveDefaultDmworkAccountId,
@@ -51,7 +50,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     threads: false,
   },
   reload: { configPrefixes: ["channels.dmwork"] },
-  configSchema: buildChannelConfigSchema(DmworkConfigSchema),
+  configSchema: DmworkConfigJsonSchema,
   config: {
     listAccountIds: (cfg) => listDmworkAccountIds(cfg),
     resolveAccount: (cfg, accountId) => resolveDmworkAccount({ cfg, accountId }),

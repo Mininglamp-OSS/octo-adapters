@@ -1,28 +1,57 @@
-import { z } from "zod";
+// Plain config types — no external dependencies
 
-const DmworkAccountSchema = z.strictObject({
-  name: z.string().optional(),
-  enabled: z.boolean().optional(),
-  botToken: z.string().optional(),
-  apiUrl: z.string().optional(),
-  wsUrl: z.string().optional(),
-  pollIntervalMs: z.number().int().min(500).optional(),
-  heartbeatIntervalMs: z.number().int().min(5000).optional(),
-  requireMention: z.boolean().optional(),
-  botUid: z.string().optional(),
-});
+export interface DmworkAccountConfig {
+  name?: string;
+  enabled?: boolean;
+  botToken?: string;
+  apiUrl?: string;
+  wsUrl?: string;
+  pollIntervalMs?: number;
+  heartbeatIntervalMs?: number;
+  requireMention?: boolean;
+  botUid?: string;
+}
 
-export const DmworkConfigSchema = z.strictObject({
-  name: z.string().optional(),
-  enabled: z.boolean().optional(),
-  botToken: z.string().optional(),
-  apiUrl: z.string().optional(),
-  wsUrl: z.string().optional(),
-  pollIntervalMs: z.number().int().min(500).optional(),
-  heartbeatIntervalMs: z.number().int().min(5000).optional(),
-  requireMention: z.boolean().optional(),
-  botUid: z.string().optional(),
-  accounts: z.record(z.string(), DmworkAccountSchema.optional()).optional(),
-});
+export interface DmworkConfig {
+  name?: string;
+  enabled?: boolean;
+  botToken?: string;
+  apiUrl?: string;
+  wsUrl?: string;
+  pollIntervalMs?: number;
+  heartbeatIntervalMs?: number;
+  requireMention?: boolean;
+  botUid?: string;
+  accounts?: Record<string, DmworkAccountConfig | undefined>;
+}
 
-export type DmworkConfig = z.infer<typeof DmworkConfigSchema>;
+// JSON Schema for OpenClaw plugin config validation
+export const DmworkConfigJsonSchema = {
+  type: "object" as const,
+  properties: {
+    name: { type: "string" },
+    enabled: { type: "boolean" },
+    botToken: { type: "string" },
+    apiUrl: { type: "string" },
+    wsUrl: { type: "string" },
+    pollIntervalMs: { type: "number", minimum: 500 },
+    heartbeatIntervalMs: { type: "number", minimum: 5000 },
+    requireMention: { type: "boolean" },
+    botUid: { type: "string" },
+    accounts: {
+      type: "object",
+      additionalProperties: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          enabled: { type: "boolean" },
+          botToken: { type: "string" },
+          apiUrl: { type: "string" },
+          wsUrl: { type: "string" },
+          requireMention: { type: "boolean" },
+          botUid: { type: "string" },
+        },
+      },
+    },
+  },
+};
