@@ -10,17 +10,28 @@ let recordPendingHistoryEntryIfEnabled: any;
 let buildPendingHistoryContextFromMap: any;
 let clearHistoryEntriesIfEnabled: any;
 let DEFAULT_GROUP_HISTORY_LIMIT = 20;
+let _sdkLoaded = false;
 
-try {
-  const sdk = await import("openclaw/plugin-sdk");
-  recordPendingHistoryEntryIfEnabled = sdk.recordPendingHistoryEntryIfEnabled;
-  buildPendingHistoryContextFromMap = sdk.buildPendingHistoryContextFromMap;
-  clearHistoryEntriesIfEnabled = sdk.clearHistoryEntriesIfEnabled;
-  if (sdk.DEFAULT_GROUP_HISTORY_LIMIT) {
-    DEFAULT_GROUP_HISTORY_LIMIT = sdk.DEFAULT_GROUP_HISTORY_LIMIT;
+async function ensureSdkLoaded() {
+  if (_sdkLoaded) return;
+  _sdkLoaded = true;
+  try {
+    const sdk = await import("openclaw/plugin-sdk");
+    if (typeof sdk.recordPendingHistoryEntryIfEnabled === "function") {
+      recordPendingHistoryEntryIfEnabled = sdk.recordPendingHistoryEntryIfEnabled;
+    }
+    if (typeof sdk.buildPendingHistoryContextFromMap === "function") {
+      buildPendingHistoryContextFromMap = sdk.buildPendingHistoryContextFromMap;
+    }
+    if (typeof sdk.clearHistoryEntriesIfEnabled === "function") {
+      clearHistoryEntriesIfEnabled = sdk.clearHistoryEntriesIfEnabled;
+    }
+    if (sdk.DEFAULT_GROUP_HISTORY_LIMIT) {
+      DEFAULT_GROUP_HISTORY_LIMIT = sdk.DEFAULT_GROUP_HISTORY_LIMIT;
+    }
+  } catch {
+    // Older OpenClaw versions may not export these — fallback implementations used
   }
-} catch {
-  // Older OpenClaw versions may not export these
 }
 
 
@@ -54,6 +65,8 @@ export async function handleInboundMessage(params: {
   statusSink?: DmworkStatusSink;
 }) {
   const { account, message, botUid, groupHistories, log, statusSink } = params;
+
+  await ensureSdkLoaded();
 
   const isGroup =
     typeof message.channel_id === "string" &&
