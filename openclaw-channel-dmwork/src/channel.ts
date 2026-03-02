@@ -217,7 +217,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             log,
             statusSink,
           }).catch((err) => {
-            log?.error?.(`dmwork: inbound handler failed: ${String(err)}`);
+            log?.error?.(`dmwork: inbound handler failed: ${err instanceof Error ? err.stack ?? String(err) : String(err)}`);
           });
         },
 
@@ -262,32 +262,29 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       socket.connect();
 
-      // Handle abort signal
-      const onAbort = () => {
-        stopped = true;
-        socket.disconnect();
-        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-      };
-
-      if (ctx.abortSignal.aborted) {
-        onAbort();
-      } else {
-        ctx.abortSignal.addEventListener("abort", onAbort, { once: true });
-      }
-
-      return {
-        stop: () => {
+      // Keep Promise pending until stopped — gateway treats resolve as "account stopped"
+      return new Promise((resolve) => {
+        const cleanup = () => {
+          if (stopped) return;
           stopped = true;
           socket.disconnect();
           if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-            ctx.abortSignal.removeEventListener("abort", onAbort);
           ctx.setStatus({
             accountId: account.accountId,
             running: false,
             lastStopAt: Date.now(),
           });
-        },
-      };
+          resolve({
+            stop: () => { /* already cleaned up */ },
+          });
+        };
+
+        if (ctx.abortSignal.aborted) {
+          cleanup();
+        } else {
+          ctx.abortSignal.addEventListener("abort", cleanup, { once: true });
+        }
+      });
     },
   },
 };
