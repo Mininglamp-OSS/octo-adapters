@@ -80,6 +80,19 @@ export async function handleInboundMessage(params: {
     return;
   }
 
+  // Extract quoted/replied message content if present
+  let quotePrefix = "";
+  const replyData = message.payload?.reply;
+  if (replyData) {
+    const replyPayload = replyData.payload;
+    const replyContent = replyPayload?.content ?? resolveContent(replyPayload);
+    const replyFrom = replyData.from_uid ?? replyData.from_name ?? "unknown";
+    if (replyContent) {
+      quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
+      log?.info?.(`dmwork: message quotes a reply (${quotePrefix.length} chars)`);
+    }
+  }
+
   // --- Mention gating for group messages ---
   const requireMention = account.config.requireMention !== false;
   let historyPrefix = "";
@@ -174,7 +187,7 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
-  const finalBody = historyPrefix ? historyPrefix + rawBody : rawBody;
+  const finalBody = (historyPrefix || quotePrefix) ? (historyPrefix + quotePrefix + rawBody) : rawBody;
 
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
