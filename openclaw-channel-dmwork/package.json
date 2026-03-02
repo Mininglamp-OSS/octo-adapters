@@ -1,6 +1,6 @@
 {
   "name": "openclaw-channel-dmwork",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DMWork channel plugin for OpenClaw via WuKongIM WebSocket",
   "main": "index.ts",
   "type": "module",
@@ -28,20 +28,7 @@
     "typescript": "^5.9.3"
   },
   "openclaw": {
-    "extensions": [
-      "./index.ts"
-    ],
-    "channel": {
-      "id": "dmwork",
-      "label": "DMWork",
-      "selectionLabel": "DMWork (WuKongIM)",
-      "docsLabel": "dmwork",
-      "blurb": "WuKongIM gateway for DMWork",
-      "order": 90
-    },
-    "install": {
-      "localPath": "extensions/dmwork",
-      "defaultChoice": "local"
-    }
+    "id": "dmwork",
+    "type": "channel"
   }
 }
