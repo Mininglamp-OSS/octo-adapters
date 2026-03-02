@@ -20,6 +20,17 @@ import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
 
+// Module-level history storage — survives auto-restarts
+const _historyMaps = new Map<string, Map<string, any[]>>();
+function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
+  let m = _historyMaps.get(accountId);
+  if (!m) {
+    m = new Map<string, any[]>();
+    _historyMaps.set(accountId, m);
+  }
+  return m;
+}
+
 const meta = {
   id: "dmwork",
   label: "DMWork",
@@ -177,8 +188,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         }, account.config.heartbeatIntervalMs);
       };
 
-      // 4. Group history map for mention gating context
-      const groupHistories = new Map<string, any[]>();
+      // 4. Group history map — persists across auto-restarts (module-level)
+      const groupHistories = getOrCreateHistoryMap(account.accountId);
 
       // 5. Token refresh state — detect stale cached token
       let hasRefreshedToken = false;
