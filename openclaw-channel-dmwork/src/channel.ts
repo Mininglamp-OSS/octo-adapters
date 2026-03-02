@@ -189,6 +189,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       let receivedAnyWsMessage = false;
       let tokenRefreshTimer: NodeJS.Timeout | null = null;
       let hasRefreshedToken = false;
+      let isRefreshing = false;
 
       // 6. Connect WebSocket — pure real-time via WuKongIM SDK
       const socket = new WKSocket({
@@ -246,9 +247,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
                 log?.info?.(
                   `dmwork: got fresh IM token, reconnecting WS...`,
                 );
+                isRefreshing = true;
                 socket.disconnect();
                 socket.updateCredentials(fresh.robot_id, fresh.im_token);
                 socket.connect();
+                isRefreshing = false;
               } catch (err) {
                 log?.error?.(
                   `dmwork: token refresh failed: ${String(err)}`,
@@ -259,6 +262,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         },
 
         onDisconnected: () => {
+          if (isRefreshing) return; // Skip during token refresh reconnect
           log?.warn?.("dmwork: WebSocket disconnected, will reconnect...");
           statusSink({ lastError: "disconnected" });
         },
