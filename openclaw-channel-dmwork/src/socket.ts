@@ -13,13 +13,19 @@ interface WKSocketOptions {
 }
 
 /**
+ * Module-level singleton tracking — ensures only one set of SDK listeners
+ * exists at any time, even if startAccount is called multiple times
+ * (e.g. during auto-restart).
+ */
+let activeSocket: WKSocket | null = null;
+
+/**
  * WuKongIM WebSocket client for bot connections.
  * Thin wrapper around wukongimjssdk — the SDK handles binary encoding,
  * DH key exchange, encryption, heartbeat, reconnect, and RECVACK.
  *
- * NOTE: WKSDK.shared() is a singleton. Each WKSocket must fully
- * disconnect before connecting to avoid connection leaks and msgKey
- * mismatch errors from concurrent WebSocket sessions.
+ * Only one WKSocket can be active at a time (WKSDK is a singleton).
+ * Creating a new connection automatically cleans up the previous one.
  */
 export class WKSocket extends EventEmitter {
   private statusListener: ((status: ConnectStatus, reasonCode?: number) => void) | null = null;
@@ -32,26 +38,37 @@ export class WKSocket extends EventEmitter {
 
   /** Connect to WuKongIM WebSocket */
   connect(): void {
+    // If another WKSocket was active, fully clean it up first
+    if (activeSocket && activeSocket !== this) {
+      activeSocket.disconnect();
+    }
+    activeSocket = this;
+
     const im = WKSDK.shared();
 
-    // Ensure clean state — disconnect any prior session first
+    // Ensure clean state — disconnect any prior SDK session
     try { im.disconnect(); } catch { /* ignore */ }
 
     im.config.addr = this.opts.wsUrl;
     im.config.uid = this.opts.uid;
     im.config.token = this.opts.token;
-    im.config.deviceFlag = 0; // APP — matches bot registration device flag
+    im.config.deviceFlag = 0;
 
-    // Remove any stale listeners before adding new ones
+    // Remove own stale listeners (safety — should already be null)
     if (this.statusListener) {
       im.connectManager.removeConnectStatusListener(this.statusListener);
+      this.statusListener = null;
     }
     if (this.messageListener) {
       im.chatManager.removeMessageListener(this.messageListener);
+      this.messageListener = null;
     }
 
-    // Listen for connection status changes
+    // Register exactly one status listener
     this.statusListener = (status: ConnectStatus, reasonCode?: number) => {
+      // Ignore events if we're no longer the active socket
+      if (activeSocket !== this) return;
+
       switch (status) {
         case ConnectStatus.Connected:
           this.connected = true;
@@ -78,8 +95,10 @@ export class WKSocket extends EventEmitter {
     };
     im.connectManager.addConnectStatusListener(this.statusListener);
 
-    // Listen for incoming messages — SDK auto-decrypts and sends RECVACK
+    // Register exactly one message listener
     this.messageListener = (message: Message) => {
+      if (activeSocket !== this) return;
+
       const content = message.content;
       const payload: MessagePayload = {
         type: content?.contentType ?? 0,
@@ -113,6 +132,9 @@ export class WKSocket extends EventEmitter {
   disconnect(): void {
     const im = WKSDK.shared();
     this.connected = false;
+    if (activeSocket === this) {
+      activeSocket = null;
+    }
     if (this.statusListener) {
       im.connectManager.removeConnectStatusListener(this.statusListener);
       this.statusListener = null;
