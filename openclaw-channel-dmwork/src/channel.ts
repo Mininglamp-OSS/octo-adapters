@@ -28,13 +28,6 @@ const meta = {
   order: 90,
 };
 
-/**
- * Token refresh delay — if no WS message (including CMD) is received within
- * this window after connect, we assume the cached IM token is stale and
- * re-register with force_refresh=true to obtain a fresh token from WuKongIM.
- */
-const TOKEN_REFRESH_TIMEOUT_MS = 10_000;
-
 export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   id: "dmwork",
   meta,
@@ -186,10 +179,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       const groupHistories = new Map<string, HistoryEntry[]>();
 
       // 5. Token refresh state — detect stale cached token
-      let receivedAnyWsMessage = false;
-      let tokenRefreshTimer: NodeJS.Timeout | null = null;
       let hasRefreshedToken = false;
-      let isRefreshing = false;
 
       // 6. Connect WebSocket — pure real-time via WuKongIM SDK
       const socket = new WKSocket({
@@ -198,8 +188,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         token: credentials.im_token,
 
         onMessage: (msg: BotMessage) => {
-          receivedAnyWsMessage = true;
-
           // Skip self messages
           if (msg.from_uid === credentials.robot_id) return;
           // Skip non-text for now
@@ -225,51 +213,38 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           log?.info?.(`dmwork: WebSocket connected to ${wsUrl}`);
           statusSink({ lastError: null });
           startHeartbeat();
-
-          // Start token freshness check — if no WS messages arrive within
-          // TOKEN_REFRESH_TIMEOUT_MS, the cached IM token is likely stale
-          // (e.g. after WuKongIM restart). Re-register with force_refresh
-          // to get a new token and reconnect.
-          if (!hasRefreshedToken) {
-            tokenRefreshTimer = setTimeout(async () => {
-              if (stopped || receivedAnyWsMessage || hasRefreshedToken) return;
-              log?.warn?.(
-                "dmwork: no WS messages received — cached IM token may be stale, refreshing...",
-              );
-              hasRefreshedToken = true;
-              try {
-                const fresh = await registerBot({
-                  apiUrl: account.config.apiUrl,
-                  botToken: account.config.botToken!,
-                  forceRefresh: true,
-                });
-                credentials = fresh;
-                log?.info?.(
-                  `dmwork: got fresh IM token, reconnecting WS...`,
-                );
-                isRefreshing = true;
-                socket.disconnect();
-                socket.updateCredentials(fresh.robot_id, fresh.im_token);
-                socket.connect();
-                isRefreshing = false;
-              } catch (err) {
-                log?.error?.(
-                  `dmwork: token refresh failed: ${String(err)}`,
-                );
-              }
-            }, TOKEN_REFRESH_TIMEOUT_MS);
-          }
+          // WS connected successfully = WuKongIM accepted the token
         },
 
         onDisconnected: () => {
-          if (isRefreshing) return; // Skip during token refresh reconnect
           log?.warn?.("dmwork: WebSocket disconnected, will reconnect...");
           statusSink({ lastError: "disconnected" });
         },
 
-        onError: (err: Error) => {
+        onError: async (err: Error) => {
           log?.error?.(`dmwork: WebSocket error: ${err.message}`);
           statusSink({ lastError: err.message });
+
+          // If kicked or connect failed, try refreshing the IM token once
+          if (!hasRefreshedToken && !stopped &&
+              (err.message.includes("Kicked") || err.message.includes("Connect failed"))) {
+            hasRefreshedToken = true;
+            log?.warn?.("dmwork: connection rejected — refreshing IM token...");
+            try {
+              const fresh = await registerBot({
+                apiUrl: account.config.apiUrl,
+                botToken: account.config.botToken!,
+                forceRefresh: true,
+              });
+              credentials = fresh;
+              log?.info?.("dmwork: got fresh IM token, reconnecting WS...");
+              socket.disconnect();
+              socket.updateCredentials(fresh.robot_id, fresh.im_token);
+              socket.connect();
+            } catch (refreshErr) {
+              log?.error?.(`dmwork: token refresh failed: ${String(refreshErr)}`);
+            }
+          }
         },
       });
 
@@ -280,7 +255,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         stopped = true;
         socket.disconnect();
         if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-        if (tokenRefreshTimer) { clearTimeout(tokenRefreshTimer); tokenRefreshTimer = null; }
       };
 
       if (ctx.abortSignal.aborted) {
@@ -294,8 +268,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           stopped = true;
           socket.disconnect();
           if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
-          if (tokenRefreshTimer) { clearTimeout(tokenRefreshTimer); tokenRefreshTimer = null; }
-          ctx.abortSignal.removeEventListener("abort", onAbort);
+            ctx.abortSignal.removeEventListener("abort", onAbort);
           ctx.setStatus({
             accountId: account.accountId,
             running: false,
