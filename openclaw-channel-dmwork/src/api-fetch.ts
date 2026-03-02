@@ -43,14 +43,31 @@ export async function sendMessage(params: {
   channelId: string;
   channelType: ChannelType;
   content: string;
+  mentionUids?: string[];
+  mentionAll?: boolean;
   streamNo?: string;
   signal?: AbortSignal;
 }): Promise<void> {
+  const payload: Record<string, unknown> = {
+    type: MessageType.Text,
+    content: params.content,
+  };
+  // Add mention field if any UIDs specified or mentionAll
+  if ((params.mentionUids && params.mentionUids.length > 0) || params.mentionAll) {
+    const mention: Record<string, unknown> = {};
+    if (params.mentionUids && params.mentionUids.length > 0) {
+      mention.uids = params.mentionUids;
+    }
+    if (params.mentionAll) {
+      mention.all = true;
+    }
+    payload.mention = mention;
+  }
   await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
     ...(params.streamNo ? { stream_no: params.streamNo } : {}),
-    payload: { type: MessageType.Text, content: params.content },
+    payload,
   }, params.signal);
 }
 

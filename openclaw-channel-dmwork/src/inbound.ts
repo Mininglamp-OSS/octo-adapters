@@ -279,6 +279,8 @@ export async function handleInboundMessage(params: {
           channelId: replyChannelId,
           channelType: replyChannelType,
           content,
+          // In group replies, @mention the original sender
+          ...(isGroup ? { mentionUids: [message.from_uid] } : {}),
         });
 
         statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
