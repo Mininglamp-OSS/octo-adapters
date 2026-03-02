@@ -173,10 +173,6 @@ export async function handleInboundMessage(params: {
     return;
   }
   
-  // Log available SDK functions for debugging version compatibility
-  log?.info?.(`dmwork: SDK check - resolveEnvelopeFormatOptions=${typeof core.channel.reply.resolveEnvelopeFormatOptions}, formatAgentEnvelope=${typeof core.channel.reply.formatAgentEnvelope}, finalizeInboundContext=${typeof core.channel.reply.finalizeInboundContext}`);
-  log?.info?.(`dmwork: SDK check - resolveStorePath=${typeof core.channel.session.resolveStorePath}, readSessionUpdatedAt=${typeof core.channel.session.readSessionUpdatedAt}, recordInboundSession=${typeof core.channel.session.recordInboundSession}`);
-  
   const config = core.config.loadConfig() as OpenClawConfig;
 
   let route;
