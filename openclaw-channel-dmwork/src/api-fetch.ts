@@ -3,7 +3,7 @@
  * These are used by inbound/outbound where the full DMWorkAPI class is not available.
  */
 
-import { ChannelType, MessageType } from "./types.js";
+import { ChannelType, MessageType, type BotEventsResp } from "./types.js";
 
 const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
@@ -88,6 +88,28 @@ export async function sendHeartbeat(params: {
   signal?: AbortSignal;
 }): Promise<void> {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/heartbeat", {}, params.signal);
+}
+
+export async function fetchEvents(params: {
+  apiUrl: string;
+  botToken: string;
+  lastEventId: number;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<BotEventsResp> {
+  return postJson(params.apiUrl, params.botToken, "/v1/bot/events", {
+    event_id: params.lastEventId,
+    limit: params.limit ?? 50,
+  }, params.signal);
+}
+
+export async function ackEvent(params: {
+  apiUrl: string;
+  botToken: string;
+  eventId: number;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(params.apiUrl, params.botToken, `/v1/bot/events/${params.eventId}/ack`, {}, params.signal);
 }
 
 export async function registerBot(params: {

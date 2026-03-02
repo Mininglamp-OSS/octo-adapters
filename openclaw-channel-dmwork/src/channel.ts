@@ -12,7 +12,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, fetchEvents, ackEvent } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -228,6 +228,77 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       socket.connect();
 
+      // 6. Events polling fallback for reliable message delivery
+      let lastEventId = 0;
+      const seenMessageIds = new Set<string>();
+      let pollTimer: NodeJS.Timeout | null = null;
+      let pollInFlight = false;
+
+      const pollEvents = async () => {
+        if (stopped || pollInFlight) return;
+        pollInFlight = true;
+        try {
+          const resp = await fetchEvents({
+            apiUrl: account.config.apiUrl,
+            botToken: account.config.botToken!,
+            lastEventId,
+            limit: 50,
+          });
+          for (const event of resp.results ?? []) {
+            if (event.event_id > lastEventId) {
+              lastEventId = event.event_id;
+            }
+            const msg = event.message;
+            if (!msg) continue;
+            // Always ack the event regardless of dedup
+            ackEvent({
+              apiUrl: account.config.apiUrl,
+              botToken: account.config.botToken!,
+              eventId: event.event_id,
+            }).catch((err) => {
+              log?.error?.(`dmwork: ack event ${event.event_id} failed: ${String(err)}`);
+            });
+            // Dedup by message_id
+            if (seenMessageIds.has(msg.message_id)) continue;
+            seenMessageIds.add(msg.message_id);
+            if (seenMessageIds.size > 1000) {
+              const oldest = seenMessageIds.values().next().value!;
+              seenMessageIds.delete(oldest);
+            }
+            // Skip self and non-text
+            if (msg.from_uid === credentials.robot_id) continue;
+            if (!msg.payload || msg.payload.type !== MessageType.Text) continue;
+            // DM events may omit channel_id — default to sender uid
+            const normalizedMsg: BotMessage = {
+              ...msg,
+              channel_id: msg.channel_id ?? msg.from_uid,
+              channel_type: msg.channel_type ?? ChannelType.DM,
+            };
+            log?.info?.(
+              `dmwork: poll recv message_id=${msg.message_id} from=${msg.from_uid} channel=${normalizedMsg.channel_id} type=${normalizedMsg.channel_type}`,
+            );
+            handleInboundMessage({
+              account,
+              message: normalizedMsg,
+              botUid: credentials.robot_id,
+              groupHistories,
+              log,
+              statusSink,
+            }).catch((err) => {
+              log?.error?.(`dmwork: poll inbound handler failed: ${String(err)}`);
+            });
+          }
+        } catch (err) {
+          if (!stopped) {
+            log?.warn?.(`dmwork: events poll failed: ${String(err)}`);
+          }
+        } finally {
+          pollInFlight = false;
+        }
+      };
+
+      pollTimer = setInterval(() => { pollEvents(); }, 2000);
+
       // Handle abort signal
       const onAbort = () => {
         stopped = true;
@@ -235,6 +306,10 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         if (heartbeatTimer) {
           clearInterval(heartbeatTimer);
           heartbeatTimer = null;
+        }
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
         }
       };
 
@@ -251,6 +326,10 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           if (heartbeatTimer) {
             clearInterval(heartbeatTimer);
             heartbeatTimer = null;
+          }
+          if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
           }
           ctx.abortSignal.removeEventListener("abort", onAbort);
           ctx.setStatus({
