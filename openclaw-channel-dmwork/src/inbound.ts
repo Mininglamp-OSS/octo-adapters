@@ -172,9 +172,16 @@ export async function handleInboundMessage(params: {
     log?.error?.(`dmwork: routing methods: ${core?.channel?.routing ? Object.keys(core.channel.routing).join(",") : "N/A"}`);
     return;
   }
+  
+  // Log available SDK functions for debugging version compatibility
+  log?.info?.(`dmwork: SDK check - resolveEnvelopeFormatOptions=${typeof core.channel.reply.resolveEnvelopeFormatOptions}, formatAgentEnvelope=${typeof core.channel.reply.formatAgentEnvelope}, finalizeInboundContext=${typeof core.channel.reply.finalizeInboundContext}`);
+  log?.info?.(`dmwork: SDK check - resolveStorePath=${typeof core.channel.session.resolveStorePath}, readSessionUpdatedAt=${typeof core.channel.session.readSessionUpdatedAt}, recordInboundSession=${typeof core.channel.session.recordInboundSession}`);
+  
   const config = core.config.loadConfig() as OpenClawConfig;
 
-  const route = core.channel.routing.resolveAgentRoute({
+  let route;
+  try {
+    route = core.channel.routing.resolveAgentRoute({
     cfg: config,
     channel: "dmwork",
     accountId: account.accountId,
@@ -183,6 +190,11 @@ export async function handleInboundMessage(params: {
       id: sessionId,
     },
   });
+
+  } catch (routeErr) {
+    log?.error?.(`dmwork: resolveAgentRoute failed: ${String(routeErr)}`);
+    return;
+  }
 
   const fromLabel = isGroup
     ? `group:${message.channel_id}`

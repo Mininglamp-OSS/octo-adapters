@@ -127,3 +127,22 @@ export async function registerBot(params: {
     : "/v1/bot/register";
   return postJson(params.apiUrl, params.botToken, path, {}, params.signal);
 }
+
+// Fetch the groups the bot belongs to
+export async function fetchBotGroups(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<Array<{ group_no: string; name: string }>> {
+  const url = `${params.apiUrl}/v1/bot/groups`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Authorization": `Bearer ${params.botToken}`,
+    },
+  });
+  if (!resp.ok) {
+    // Fallback: return empty if API not available
+    return [];
+  }
+  return resp.json();
+}
