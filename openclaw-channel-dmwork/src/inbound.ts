@@ -64,7 +64,7 @@ function resolveContent(payload: BotMessage["payload"]): ResolvedContent {
     case MessageType.Video:
       return { text: "[视频]", mediaUrl: payload.url, mediaType: "video" };
     case MessageType.File:
-      return { text: `[文件: ${(payload as any).name ?? "未知文件"}]`, mediaUrl: payload.url };
+      return { text: `[文件: ${payload.name ?? "未知文件"}]`, mediaUrl: payload.url };
     case MessageType.Location:
       return { text: "[位置信息]" };
     case MessageType.Card:
@@ -77,6 +77,20 @@ function resolveContent(payload: BotMessage["payload"]): ResolvedContent {
 /** Extract text-only content for history/quotes (no mediaUrl) */
 function resolveContentText(payload: BotMessage["payload"]): string {
   return resolveContent(payload).text;
+}
+
+/** Placeholder text for non-text API history messages */
+function resolveApiMessagePlaceholder(type?: number, name?: string): string {
+  switch (type) {
+    case MessageType.Image: return "[图片]";
+    case MessageType.GIF: return "[GIF]";
+    case MessageType.Voice: return "[语音消息]";
+    case MessageType.Video: return "[视频]";
+    case MessageType.File: return `[文件: ${name ?? "未知文件"}]`;
+    case MessageType.Location: return "[位置信息]";
+    case MessageType.Card: return "[名片]";
+    default: return "[消息]";
+  }
 }
 
 // Cache expiry time: 1 hour
@@ -275,7 +289,7 @@ export async function handleInboundMessage(params: {
           .slice(-historyLimit)
           .map((m: any) => ({
             sender: m.from_uid,
-            body: m.content || (m.type === 2 ? "[图片]" : m.type === 8 ? `[文件: ${m.name ?? "未知文件"}]` : m.type === 4 ? "[语音消息]" : m.type === 5 ? "[视频]" : "[消息]"),
+            body: m.content || resolveApiMessagePlaceholder(m.type, m.name),
             timestamp: m.timestamp * 1000,
           }));
         log?.info?.(`dmwork: [MENTION] 从API获取到 ${entries.length} 条历史消息`);

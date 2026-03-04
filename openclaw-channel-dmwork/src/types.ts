@@ -59,6 +59,7 @@ export interface MessagePayload {
   type: MessageType;
   content?: string;
   url?: string;
+  name?: string;
   mention?: MentionPayload;
   [key: string]: unknown;
 }
