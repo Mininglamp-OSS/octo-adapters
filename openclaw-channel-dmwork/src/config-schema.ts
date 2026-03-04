@@ -10,6 +10,7 @@ export interface DmworkAccountConfig {
   heartbeatIntervalMs?: number;
   requireMention?: boolean;
   botUid?: string;
+  historyLimit?: number;  // 群聊历史消息条数限制（默认20）
 }
 
 export interface DmworkConfig {
@@ -22,6 +23,7 @@ export interface DmworkConfig {
   heartbeatIntervalMs?: number;
   requireMention?: boolean;
   botUid?: string;
+  historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   accounts?: Record<string, DmworkAccountConfig | undefined>;
 }
 
@@ -38,6 +40,7 @@ export const DmworkConfigJsonSchema = {
     heartbeatIntervalMs: { type: "number", minimum: 5000 },
     requireMention: { type: "boolean" },
     botUid: { type: "string" },
+    historyLimit: { type: "number", minimum: 1, maximum: 100 },
     accounts: {
       type: "object",
       additionalProperties: {
@@ -50,6 +53,7 @@ export const DmworkConfigJsonSchema = {
           wsUrl: { type: "string" },
           requireMention: { type: "boolean" },
           botUid: { type: "string" },
+          historyLimit: { type: "number", minimum: 1, maximum: 100 },
         },
       },
     },

@@ -18,6 +18,7 @@ export type ResolvedDmworkAccount = {
     pollIntervalMs: number;
     heartbeatIntervalMs: number;
     requireMention?: boolean;
+    historyLimit?: number;  // 群聊历史消息条数限制
   };
 };
 
@@ -73,6 +74,7 @@ export function resolveDmworkAccount(params: {
       pollIntervalMs,
       heartbeatIntervalMs,
       requireMention: accountConfig.requireMention ?? channel.requireMention,
+      historyLimit: accountConfig.historyLimit ?? channel.historyLimit ?? 20,
     },
   };
 }

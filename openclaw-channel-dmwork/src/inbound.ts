@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -113,36 +113,72 @@ export async function handleInboundMessage(params: {
         body: rawBody,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
       });
-      while (entries.length > DEFAULT_GROUP_HISTORY_LIMIT) {
+      const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
+      while (entries.length > historyLimit) {
         entries.shift();
       }
       log?.info?.(
-        `dmwork: group message not mentioning bot, recorded as history context`,
+        `dmwork: [HISTORY] 非@消息已缓存 | from=${message.from_uid} | session=${sessionId} | 当前缓存=${entries.length}条`,
       );
       return;
     }
 
     // Bot IS mentioned — prepend history context (manual — avoids SDK format incompatibility)
-    {
-      const entries = groupHistories.get(sessionId) ?? [];
-      if (entries.length > 0) {
-        historyPrefix = entries
-          .map((e: any) => `[${e.sender}]: ${e.body}`)
-          .join("\n") + "\n---\n";
-        log?.info?.(`dmwork: prepending history context (${historyPrefix.length} chars)`);
+    // Sliding window: always include the most recent historyLimit messages
+    const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
+    let entries = groupHistories.get(sessionId) ?? [];
+    // Take last N entries (sliding window)
+    if (entries.length > historyLimit) {
+      entries = entries.slice(-historyLimit);
+      groupHistories.set(sessionId, entries);  // Persist trimmed entries
+    }
+    const historyCountBefore = entries.length;
+    log?.info?.(`dmwork: [MENTION] 收到@消息 | from=${message.from_uid} | 缓存=${historyCountBefore}条 | historyLimit=${historyLimit} | session=${sessionId}`);
+
+    // If memory cache is empty, try fetching from API
+    if (entries.length === 0 && account.config.botToken) {
+      log?.info?.(`dmwork: [MENTION] 内存缓存为空，尝试从API获取历史...`);
+      try {
+        const fetchLimit = Math.min(historyLimit, 100);  // Cap at 100
+        const apiMessages = await getChannelMessages({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken,
+          channelId: message.channel_id!,
+          channelType: ChannelType.Group,
+          limit: fetchLimit,
+          log,
+        });
+        entries = apiMessages
+          .filter((m: any) => m.from_uid !== botUid && m.content && !m.content.includes(`@${botUid}`))
+          .slice(-historyLimit)
+          .map((m: any) => ({
+            sender: m.from_uid,
+            body: m.content,
+            timestamp: m.timestamp * 1000,
+          }));
+        groupHistories.set(sessionId, entries);  // Persist API-fetched entries
+        log?.info?.(`dmwork: [MENTION] 从API获取到 ${entries.length} 条历史消息`);
+      } catch (err) {
+        log?.error?.(`dmwork: [MENTION] 从API获取历史失败: ${err}`);
       }
     }
 
-    // Clear history after consuming
-    if (typeof clearHistoryEntriesIfEnabled === "function") {
-      clearHistoryEntriesIfEnabled({
-        historyMap: groupHistories,
-        historyKey: sessionId,
-        limit: DEFAULT_GROUP_HISTORY_LIMIT,
-      });
+    // Build history context manually (JSON format)
+    if (entries.length > 0) {
+      historyPrefix = "【群聊历史记录】以下是你上次回复后群里其他人说的话（sender 是用户ID，body 是消息内容）：\n```json\n" +
+        JSON.stringify(entries.map((e: any) => ({
+          sender: e.sender,
+          body: e.body,
+        })), null, 2) +
+        "\n```\n请根据这些历史上下文来回复当前的@消息。\n\n";
+      log?.info?.(`dmwork: [MENTION] 已注入历史上下文 | ${historyPrefix.length} chars | ${entries.length}条消息`);
     } else {
-      groupHistories.delete(sessionId);
+      log?.info?.(`dmwork: [MENTION] 无历史上下文可注入`);
     }
+
+    // Sliding window: keep history, don't clear
+    // (entries stay in queue, limited by historyLimit in the caching logic)
+    log?.info?.(`dmwork: [MENTION] 历史滑动窗口 | session=${sessionId} | 队列保留`);
   }
 
   const core = getDmworkRuntime();
@@ -200,6 +236,7 @@ export async function handleInboundMessage(params: {
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
+    BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
     RawBody: rawBody,
     CommandBody: rawBody,
     From: `dmwork:${message.from_uid}`,

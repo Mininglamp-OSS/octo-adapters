@@ -146,3 +146,49 @@ export async function fetchBotGroups(params: {
   }
   return resp.json();
 }
+
+/**
+ * 获取频道历史消息（用于注入上下文）
+ * @param params.log - Optional logger for consistent logging with OpenClaw log system
+ */
+export async function getChannelMessages(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  limit?: number;
+  signal?: AbortSignal;
+  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void };
+}): Promise<Array<{ from_uid: string; content: string; timestamp: number }>> {
+  try {
+    const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/channel/messages`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${params.botToken}`,
+      },
+      body: JSON.stringify({
+        channel_id: params.channelId,
+        channel_type: params.channelType,
+        limit: params.limit ?? 20,
+      }),
+      signal: params.signal,
+    });
+
+    if (!response.ok) {
+      params.log?.info?.(`dmwork: getChannelMessages failed: ${response.status}`);
+      return [];
+    }
+
+    const data = await response.json();
+    return (data.messages ?? data ?? []).map((m: any) => ({
+      from_uid: m.from_uid ?? m.sender_id ?? "unknown",
+      content: m.payload?.content ?? m.content ?? "",
+      timestamp: m.timestamp ?? Math.floor(Date.now() / 1000),  // API timestamps are in seconds
+    }));
+  } catch (err) {
+    params.log?.error?.(`dmwork: getChannelMessages error: ${err}`);
+    return [];
+  }
+}
