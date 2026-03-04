@@ -200,7 +200,7 @@ export async function getChannelMessages(params: {
   limit?: number;
   signal?: AbortSignal;
   log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void };
-}): Promise<Array<{ from_uid: string; content: string; timestamp: number }>> {
+}): Promise<Array<{ from_uid: string; content: string; timestamp: number; type?: number; url?: string; name?: string }>> {
   try {
     const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/channel/messages`;
     const response = await fetch(url, {
@@ -225,6 +225,9 @@ export async function getChannelMessages(params: {
     const data = await response.json();
     return (data.messages ?? data ?? []).map((m: any) => ({
       from_uid: m.from_uid ?? m.sender_id ?? "unknown",
+      type: m.payload?.type ?? undefined,
+      url: m.payload?.url ?? undefined,
+      name: m.payload?.name ?? undefined,
       content: m.payload?.content ?? m.content ?? "",
       timestamp: m.timestamp ?? Math.floor(Date.now() / 1000),  // API timestamps are in seconds
     }));
