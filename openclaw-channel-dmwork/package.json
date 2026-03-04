@@ -27,7 +27,7 @@
     "typescript": "^5.9.3"
   },
   "openclaw": {
-    "id": "dmwork",
+    "id": "openclaw-channel-dmwork",
     "type": "channel",
     "extensions": [
       "index.ts"
