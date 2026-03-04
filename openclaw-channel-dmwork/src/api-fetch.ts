@@ -148,6 +148,47 @@ export async function fetchBotGroups(params: {
 }
 
 /**
+ * 获取群成员列表
+ */
+export interface GroupMember {
+  uid: string;
+  name: string;
+  role?: string;    // admin/member
+  robot?: boolean;  // 是否是机器人
+}
+
+export async function getGroupMembers(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;  // 群 ID (channel_id)
+}): Promise<GroupMember[]> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/members`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${params.botToken}`,
+      },
+    });
+    if (!resp.ok) {
+      console.log(`[dmwork] getGroupMembers failed: ${resp.status}`);
+      return [];
+    }
+    const data = await resp.json();
+    // Normalize to strict array to prevent silent failures
+    const members = Array.isArray(data?.members)
+      ? data.members
+      : Array.isArray(data)
+        ? data
+        : [];
+    return members as GroupMember[];
+  } catch (err) {
+    console.log(`[dmwork] getGroupMembers error: ${err}`);
+    return [];
+  }
+}
+
+/**
  * 获取频道历史消息（用于注入上下文）
  * @param params.log - Optional logger for consistent logging with OpenClaw log system
  */

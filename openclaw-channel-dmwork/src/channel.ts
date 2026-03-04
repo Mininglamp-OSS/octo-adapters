@@ -30,6 +30,41 @@ function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
   return m;
 }
 
+// Module-level member mapping: displayName -> uid
+// Used to resolve @mentions in AI replies
+const _memberMaps = new Map<string, Map<string, string>>();
+function getOrCreateMemberMap(accountId: string): Map<string, string> {
+  let m = _memberMaps.get(accountId);
+  if (!m) {
+    m = new Map<string, string>();
+    _memberMaps.set(accountId, m);
+  }
+  return m;
+}
+
+// Module-level reverse mapping: uid -> displayName
+// Used to show display names instead of uids in replies
+const _uidToNameMaps = new Map<string, Map<string, string>>();
+function getOrCreateUidToNameMap(accountId: string): Map<string, string> {
+  let m = _uidToNameMaps.get(accountId);
+  if (!m) {
+    m = new Map<string, string>();
+    _uidToNameMaps.set(accountId, m);
+  }
+  return m;
+}
+
+// Group member cache timestamps: groupId -> lastFetchedAt (ms)
+const _groupCacheTimestamps = new Map<string, Map<string, number>>();
+function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number> {
+  let m = _groupCacheTimestamps.get(accountId);
+  if (!m) {
+    m = new Map<string, number>();
+    _groupCacheTimestamps.set(accountId, m);
+  }
+  return m;
+}
+
 const meta = {
   id: "dmwork",
   label: "DMWork",
@@ -104,6 +139,22 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           channelId = groupPart;
         }
         channelType = ChannelType.Group;
+
+        // Parse @mentions from message content (e.g., "@chenpipi_bot" -> "chenpipi_bot")
+        // Match @username where username is alphanumeric with underscores (typical uid format)
+        const contentMentions = content.match(/@([a-zA-Z0-9_]+)/g);
+        if (contentMentions) {
+          for (const mention of contentMentions) {
+            const uid = mention.slice(1); // Remove @ prefix
+            if (uid && !mentionUids.includes(uid)) {
+              mentionUids.push(uid);
+              console.log(`[dmwork] parsed @mention from content: ${uid}`);
+            }
+          }
+        }
+        if (mentionUids.length > 0) {
+          console.log(`[dmwork] sending message with mentionUids: ${mentionUids.join(", ")}`);
+        }
       }
 
       await sendMessage({
@@ -207,6 +258,15 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       // 4. Group history map — persists across auto-restarts (module-level)
       const groupHistories = getOrCreateHistoryMap(account.accountId);
+      
+      // 4b. Member name->uid map — for resolving @mentions in replies
+      const memberMap = getOrCreateMemberMap(account.accountId);
+      
+      // 4c. Reverse map uid->name — for showing display names in replies
+      const uidToNameMap = getOrCreateUidToNameMap(account.accountId);
+      
+      // 4d. Group cache timestamps — track when each group's members were last fetched
+      const groupCacheTimestamps = getOrCreateGroupCacheTimestamps(account.accountId);
 
       // 5. Token refresh state — detect stale cached token
       let hasRefreshedToken = false;
@@ -232,6 +292,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             message: msg,
             botUid: credentials.robot_id,
             groupHistories,
+            memberMap,
+            uidToNameMap,
+            groupCacheTimestamps,
             log,
             statusSink,
           }).catch((err) => {
