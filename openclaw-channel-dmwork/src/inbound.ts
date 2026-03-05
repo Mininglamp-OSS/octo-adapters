@@ -276,7 +276,9 @@ export async function handleInboundMessage(params: {
 
   if (isGroup && requireMention) {
     const mentionUids: string[] = message.payload?.mention?.uids ?? [];
-    const mentionAll: boolean = message.payload?.mention?.all === true;
+    // mention.all can be boolean `true` or numeric `1` depending on API version
+    const mentionAllRaw = message.payload?.mention?.all;
+    const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
     const isMentioned = mentionAll || mentionUids.includes(botUid);
     
     // Debug: log received mention info

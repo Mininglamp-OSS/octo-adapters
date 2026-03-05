@@ -52,7 +52,7 @@ export interface BotMessage {
 
 export interface MentionPayload {
   uids?: string[];
-  all?: number; // 1 = @all
+  all?: boolean | number; // true or 1 = @all (API returns either depending on version)
 }
 
 export interface MessagePayload {
