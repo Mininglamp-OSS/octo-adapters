@@ -144,7 +144,7 @@ export async function fetchBotGroups(params: {
     // Fallback: return empty if API not available
     return [];
   }
-  return resp.json();
+  return await resp.json();
 }
 
 /**
