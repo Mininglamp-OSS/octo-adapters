@@ -44,11 +44,53 @@ export type DmworkStatusSink = (patch: {
   lastError?: string | null;
 }) => void;
 
-function resolveContent(payload: BotMessage["payload"]): string {
-  if (!payload) return "";
-  if (typeof payload.content === "string") return payload.content;
-  if (typeof payload.url === "string") return payload.url;
-  return "";
+interface ResolvedContent {
+  text: string;
+  mediaUrl?: string;
+  mediaType?: string;
+}
+
+function resolveContent(payload: BotMessage["payload"]): ResolvedContent {
+  if (!payload) return { text: "" };
+  switch (payload.type) {
+    case MessageType.Text:
+      return { text: payload.content ?? "" };
+    case MessageType.Image:
+      return { text: "[图片]", mediaUrl: payload.url, mediaType: "image" };
+    case MessageType.GIF:
+      return { text: "[GIF]", mediaUrl: payload.url, mediaType: "image" };
+    case MessageType.Voice:
+      return { text: "[语音消息]" };
+    case MessageType.Video:
+      return { text: "[视频]", mediaUrl: payload.url, mediaType: "video" };
+    case MessageType.File:
+      return { text: `[文件: ${payload.name ?? "未知文件"}]`, mediaUrl: payload.url };
+    case MessageType.Location:
+      return { text: "[位置信息]" };
+    case MessageType.Card:
+      return { text: "[名片]" };
+    default:
+      return { text: payload.content ?? payload.url ?? "" };
+  }
+}
+
+/** Extract text-only content for history/quotes (no mediaUrl) */
+function resolveContentText(payload: BotMessage["payload"]): string {
+  return resolveContent(payload).text;
+}
+
+/** Placeholder text for non-text API history messages */
+function resolveApiMessagePlaceholder(type?: number, name?: string): string {
+  switch (type) {
+    case MessageType.Image: return "[图片]";
+    case MessageType.GIF: return "[GIF]";
+    case MessageType.Voice: return "[语音消息]";
+    case MessageType.Video: return "[视频]";
+    case MessageType.File: return `[文件: ${name ?? "未知文件"}]`;
+    case MessageType.Location: return "[位置信息]";
+    case MessageType.Card: return "[名片]";
+    default: return "[消息]";
+  }
 }
 
 // Cache expiry time: 1 hour
@@ -78,7 +120,9 @@ export async function handleInboundMessage(params: {
     ? message.channel_id!
     : message.from_uid;
 
-  const rawBody = resolveContent(message.payload);
+  const resolved = resolveContent(message.payload);
+  const rawBody = resolved.text;
+  const inboundMediaUrl = resolved.mediaUrl;
   if (!rawBody) {
     log?.info?.(
       `dmwork: inbound dropped session=${sessionId} reason=empty-content`,
@@ -91,7 +135,7 @@ export async function handleInboundMessage(params: {
   const replyData = message.payload?.reply;
   if (replyData) {
     const replyPayload = replyData.payload;
-    const replyContent = replyPayload?.content ?? resolveContent(replyPayload);
+    const replyContent = replyPayload?.content ?? resolveContentText(replyPayload);
     const replyFrom = replyData.from_uid ?? replyData.from_name ?? "unknown";
     if (replyContent) {
       quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
@@ -241,11 +285,11 @@ export async function handleInboundMessage(params: {
           log,
         });
         entries = apiMessages
-          .filter((m: any) => m.from_uid !== botUid && m.content && !m.content.includes(`@${botUid}`))
+          .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
           .slice(-historyLimit)
           .map((m: any) => ({
             sender: m.from_uid,
-            body: m.content,
+            body: m.content || resolveApiMessagePlaceholder(m.type, m.name),
             timestamp: m.timestamp * 1000,
           }));
         log?.info?.(`dmwork: [MENTION] 从API获取到 ${entries.length} 条历史消息`);
@@ -330,6 +374,9 @@ export async function handleInboundMessage(params: {
     BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
     RawBody: rawBody,
     CommandBody: rawBody,
+    MediaUrl: inboundMediaUrl,
+    MediaUrls: inboundMediaUrl ? [inboundMediaUrl] : undefined,
+    MediaTypes: resolved.mediaType ? [resolved.mediaType] : undefined,
     From: `dmwork:${message.from_uid}`,
     To: `dmwork:${sessionId}`,
     SessionKey: route.sessionKey,

@@ -80,7 +80,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   meta,
   capabilities: {
     chatTypes: ["direct", "group"],
-    media: false,
+    media: true,
     reactions: false,
     threads: false,
   },
@@ -280,8 +280,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         onMessage: (msg: BotMessage) => {
           // Skip self messages
           if (msg.from_uid === credentials.robot_id) return;
-          // Skip non-text for now
-          if (!msg.payload || msg.payload.type !== MessageType.Text) return;
+          // Skip unsupported message types (Location, Card)
+          const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File];
+          if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;
 
           log?.info?.(
             `dmwork: recv message from=${msg.from_uid} channel=${msg.channel_id ?? "DM"} type=${msg.channel_type ?? 1}`,
