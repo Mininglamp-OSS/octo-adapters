@@ -94,9 +94,15 @@ function cleanupStaleCaches(): void {
   }
 }
 
-const _cleanupTimer = setInterval(cleanupStaleCaches, CACHE_CLEANUP_INTERVAL_MS);
-if (typeof _cleanupTimer === "object" && _cleanupTimer && "unref" in _cleanupTimer) {
-  (_cleanupTimer as NodeJS.Timeout).unref();
+// Singleton timer to prevent accumulation during hot reload (#54)
+let _cleanupTimer: NodeJS.Timeout | null = null;
+
+function ensureCleanupTimer(): void {
+  if (_cleanupTimer) return; // Already running
+  _cleanupTimer = setInterval(cleanupStaleCaches, CACHE_CLEANUP_INTERVAL_MS);
+  if (typeof _cleanupTimer === "object" && _cleanupTimer && "unref" in _cleanupTimer) {
+    _cleanupTimer.unref();
+  }
 }
 
 const meta = {
@@ -224,6 +230,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   },
   gateway: {
     startAccount: async (ctx) => {
+      // Ensure cleanup timer is running (singleton pattern for hot reload safety)
+      ensureCleanupTimer();
+
       const account = ctx.account;
       if (!account.configured || !account.config.botToken) {
         throw new Error(
