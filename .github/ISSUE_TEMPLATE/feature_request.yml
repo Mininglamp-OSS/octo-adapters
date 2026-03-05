@@ -1,46 +1,46 @@
 name: 💡 Feature Request
-description: 提出新功能建议
+description: Suggest a new feature
 labels: ["feature"]
 body:
   - type: markdown
     attributes:
       value: |
-        感谢你的建议！请描述清楚需求背景和期望方案。
+        Thanks for your suggestion! Please describe the problem and your proposed solution.
   - type: textarea
     id: problem
     attributes:
-      label: 问题 / 动机
-      description: 你遇到了什么问题，或者为什么需要这个功能？
+      label: Problem / Motivation
+      description: What problem are you facing, or why do you need this feature?
     validations:
       required: true
   - type: textarea
     id: solution
     attributes:
-      label: 期望方案
-      description: 你希望怎么解决？
+      label: Proposed Solution
+      description: How would you like this to be solved?
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: 替代方案
-      description: 你考虑过其他方案吗？
+      label: Alternatives Considered
+      description: Have you considered other approaches?
     validations:
       required: false
   - type: dropdown
     id: component
     attributes:
-      label: 涉及组件
+      label: Component
       options:
         - OpenClaw Channel Plugin
         - Claude Code Adapter
-        - 其他
+        - Other
     validations:
       required: true
   - type: textarea
     id: context
     attributes:
-      label: 补充信息
-      description: 参考链接、相关 Issue 等
+      label: Additional Context
+      description: Related links, issues, etc.
     validations:
       required: false
