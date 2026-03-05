@@ -13,40 +13,29 @@ interface WKSocketOptions {
 }
 
 /**
- * Module-level singleton tracking — ensures only one set of SDK listeners
- * exists at any time, even if startAccount is called multiple times
- * (e.g. during auto-restart).
- */
-let activeSocket: WKSocket | null = null;
-
-/**
  * WuKongIM WebSocket client for bot connections.
  * Thin wrapper around wukongimjssdk — the SDK handles binary encoding,
  * DH key exchange, encryption, heartbeat, reconnect, and RECVACK.
  *
- * Only one WKSocket can be active at a time (WKSDK is a singleton).
- * Creating a new connection automatically cleans up the previous one.
+ * Each WKSocket creates its own WKSDK instance, allowing multiple
+ * concurrent connections for multi-account setups.
  */
 export class WKSocket extends EventEmitter {
+  private im: InstanceType<typeof WKSDK>;
   private statusListener: ((status: ConnectStatus, reasonCode?: number) => void) | null = null;
   private messageListener: ((message: Message) => void) | null = null;
   private connected = false;
 
   constructor(private opts: WKSocketOptions) {
     super();
+    this.im = new WKSDK();
   }
 
   /** Connect to WuKongIM WebSocket */
   connect(): void {
-    // If another WKSocket was active, fully clean it up first
-    if (activeSocket && activeSocket !== this) {
-      activeSocket.disconnect();
-    }
-    activeSocket = this;
+    const im = this.im;
 
-    const im = WKSDK.shared();
-
-    // Ensure clean state — disconnect any prior SDK session
+    // Ensure clean state — disconnect any prior session on this instance
     try { im.disconnect(); } catch (err) { console.debug("[WKSocket] disconnect error (ignored):", err); }
 
     im.config.addr = this.opts.wsUrl;
@@ -66,9 +55,6 @@ export class WKSocket extends EventEmitter {
 
     // Register exactly one status listener
     this.statusListener = (status: ConnectStatus, reasonCode?: number) => {
-      // Ignore events if we're no longer the active socket
-      if (activeSocket !== this) return;
-
       switch (status) {
         case ConnectStatus.Connected:
           this.connected = true;
@@ -97,8 +83,6 @@ export class WKSocket extends EventEmitter {
 
     // Register exactly one message listener
     this.messageListener = (message: Message) => {
-      if (activeSocket !== this) return;
-
       const content = message.content;
       const payload: MessagePayload = {
         type: content?.contentType ?? 0,
@@ -130,11 +114,8 @@ export class WKSocket extends EventEmitter {
 
   /** Gracefully disconnect */
   disconnect(): void {
-    const im = WKSDK.shared();
+    const im = this.im;
     this.connected = false;
-    if (activeSocket === this) {
-      activeSocket = null;
-    }
     if (this.statusListener) {
       im.connectManager.removeConnectStatusListener(this.statusListener);
       this.statusListener = null;
