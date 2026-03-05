@@ -35,14 +35,7 @@ export interface BotEventsReq {
   limit?: number;
 }
 
-export interface BotEventsResp {
-  events: BotEvent[];
-}
 
-export interface BotEvent {
-  event_id: number;
-  message?: BotMessage;
-}
 
 export interface BotMessage {
   message_id: string;
@@ -120,12 +113,4 @@ export interface DMWorkGroupConfig {
   enabled?: boolean;
 }
 
-export interface DMWorkConfig {
-  botToken: string;
-  apiUrl: string;
-  wsUrl?: string;
-  groupPolicy?: "open" | "allowlist" | "disabled";
-  requireMention?: boolean;
-  groups?: Record<string, DMWorkGroupConfig>;
-}
 
