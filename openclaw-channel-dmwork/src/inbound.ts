@@ -133,6 +133,69 @@ function findUidByName(name: string, memberMap: Map<string, string>): string | u
 // Cache expiry time: 1 hour
 const GROUP_CACHE_EXPIRY_MS = 60 * 60 * 1000;
 
+
+/**
+ * Refresh group member cache at module level to avoid closure recreation per message.
+ * Extracted from handleInboundMessage (fixes #25).
+ */
+async function refreshGroupMemberCache(opts: {
+  sessionId: string;
+  memberMap: Map<string, string>;
+  uidToNameMap: Map<string, string>;
+  groupCacheTimestamps: Map<string, number>;
+  apiUrl: string;
+  botToken: string;
+  forceRefresh?: boolean;
+  log?: ChannelLogSink;
+}): Promise<boolean> {
+  const { sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl, botToken, log } = opts;
+  const forceRefresh = opts.forceRefresh ?? false;
+
+  const lastFetched = groupCacheTimestamps.get(sessionId) ?? 0;
+  const now = Date.now();
+  const isExpired = (now - lastFetched) > GROUP_CACHE_EXPIRY_MS;
+
+  if (!forceRefresh && !isExpired && lastFetched > 0) {
+    return false;
+  }
+
+  log?.info?.(`dmwork: [CACHE] ${forceRefresh ? 'Force refreshing' : 'Refreshing expired'} group member cache for ${sessionId}`);
+
+  try {
+    const members = await getGroupMembers({
+      apiUrl,
+      botToken,
+      groupNo: sessionId,
+    });
+
+    if (members.length > 0) {
+      for (const m of members) {
+        if (m.name && m.uid) {
+          memberMap.set(m.name, m.uid);
+          uidToNameMap.set(m.uid, m.name);
+
+          const nameWithoutEmoji = stripEmoji(m.name);
+          if (nameWithoutEmoji && nameWithoutEmoji !== m.name && !memberMap.has(nameWithoutEmoji)) {
+            memberMap.set(nameWithoutEmoji, m.uid);
+            log?.debug?.(`dmwork: [CACHE] Added emoji alias: "${nameWithoutEmoji}" -> "${m.uid}"`);
+          }
+        }
+      }
+      groupCacheTimestamps.set(sessionId, now);
+      log?.info?.(`dmwork: [CACHE] Loaded ${members.length} members, memberMap size: ${memberMap.size}`);
+      return true;
+    } else {
+      groupCacheTimestamps.set(sessionId, now - GROUP_CACHE_EXPIRY_MS + 30000);
+      log?.warn?.(`dmwork: [CACHE] No members returned for group ${sessionId}, backoff 30s`);
+      return false;
+    }
+  } catch (err) {
+    groupCacheTimestamps.set(sessionId, now - GROUP_CACHE_EXPIRY_MS + 30000);
+    log?.error?.(`dmwork: [CACHE] Failed to fetch group members: ${err}, backoff 30s`);
+    return false;
+  }
+}
+
 export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
@@ -187,62 +250,9 @@ export async function handleInboundMessage(params: {
   // Save original mention uids for reply (exclude bot itself)
   const originalMentionUids: string[] = (message.payload?.mention?.uids ?? []).filter((uid: string) => uid !== botUid);
 
-  // Helper function to refresh group member cache
-  async function refreshGroupMemberCache(forceRefresh = false): Promise<boolean> {
-    if (!isGroup) return false;
-    
-    const lastFetched = groupCacheTimestamps.get(sessionId) ?? 0;
-    const now = Date.now();
-    const isExpired = (now - lastFetched) > GROUP_CACHE_EXPIRY_MS;
-    
-    if (!forceRefresh && !isExpired && lastFetched > 0) {
-      return false; // Cache is still valid
-    }
-    
-    log?.info?.(`dmwork: [CACHE] ${forceRefresh ? 'Force refreshing' : 'Refreshing expired'} group member cache for ${sessionId}`);
-    
-    try {
-      const members = await getGroupMembers({
-        apiUrl: account.config.apiUrl,
-        botToken: account.config.botToken ?? "",
-        groupNo: sessionId,
-      });
-      
-      if (members.length > 0) {
-        for (const m of members) {
-          if (m.name && m.uid) {
-            memberMap.set(m.name, m.uid);
-            uidToNameMap.set(m.uid, m.name);
-            
-            // Also save name without leading emoji for faster lookup
-            // (complements findUidByName's emoji-tolerant matching)
-            const nameWithoutEmoji = stripEmoji(m.name);
-            if (nameWithoutEmoji && nameWithoutEmoji !== m.name && !memberMap.has(nameWithoutEmoji)) {
-              memberMap.set(nameWithoutEmoji, m.uid);
-              log?.debug?.(`dmwork: [CACHE] Added emoji alias: "${nameWithoutEmoji}" -> "${m.uid}"`);
-            }
-          }
-        }
-        groupCacheTimestamps.set(sessionId, now);
-        log?.info?.(`dmwork: [CACHE] Loaded ${members.length} members, memberMap size: ${memberMap.size}`);
-        return true;
-      } else {
-        // Set a short backoff (30s) to prevent retry storms on empty responses
-        groupCacheTimestamps.set(sessionId, now - GROUP_CACHE_EXPIRY_MS + 30000);
-        log?.warn?.(`dmwork: [CACHE] No members returned for group ${sessionId}, backoff 30s`);
-        return false;
-      }
-    } catch (err) {
-      // Set a short backoff (30s) to prevent retry storms on errors
-      groupCacheTimestamps.set(sessionId, now - GROUP_CACHE_EXPIRY_MS + 30000);
-      log?.error?.(`dmwork: [CACHE] Failed to fetch group members: ${err}, backoff 30s`);
-      return false;
-    }
-  }
-
-  // Refresh group member cache if needed (on first message or after expiry)
+    // Refresh group member cache if needed (on first message or after expiry)
   if (isGroup) {
-    await refreshGroupMemberCache();
+    await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
 
   // Build displayName -> uid mapping from message content + mention.uids
@@ -553,7 +563,7 @@ export async function handleInboundMessage(params: {
           // If we have unresolved names, try refreshing the cache and retry
           if (unresolvedNames.length > 0) {
             log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
-            const refreshed = await refreshGroupMemberCache(true);
+            const refreshed = await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
             
             if (refreshed) {
               // Retry unresolved names and insert at original positions
