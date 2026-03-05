@@ -59,6 +59,8 @@ export const DmworkConfigJsonSchema = {
             botToken: { type: "string" },
             apiUrl: { type: "string" },
             wsUrl: { type: "string" },
+            pollIntervalMs: { type: "number", minimum: 500 },
+            heartbeatIntervalMs: { type: "number", minimum: 5000 },
             requireMention: { type: "boolean" },
             botUid: { type: "string" },
             historyLimit: { type: "number", minimum: 1, maximum: 100 },
