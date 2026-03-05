@@ -134,7 +134,7 @@ export async function registerBot(params: {
 export async function fetchBotGroups(params: {
   apiUrl: string;
   botToken: string;
-  log?: { info?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
 }): Promise<Array<{ group_no: string; name: string }>> {
   const url = `${params.apiUrl}/v1/bot/groups`;
   const resp = await fetch(url, {
@@ -165,7 +165,7 @@ export async function getGroupMembers(params: {
   apiUrl: string;
   botToken: string;
   groupNo: string;  // 群 ID (channel_id)
-  log?: { info?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
 }): Promise<GroupMember[]> {
   const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/members`;
   try {
@@ -205,7 +205,7 @@ export async function getChannelMessages(params: {
   channelType: ChannelType;
   limit?: number;
   signal?: AbortSignal;
-  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void };
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
 }): Promise<Array<{ from_uid: string; content: string; timestamp: number; type?: number; url?: string; name?: string }>> {
   try {
     const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/channel/messages`;

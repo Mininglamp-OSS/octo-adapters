@@ -93,3 +93,66 @@ describe("fetchBotGroups", () => {
     expect(result.map((g) => g.name)).toEqual(["Group"]);
   });
 });
+
+describe("log parameter type compatibility", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should accept ChannelLogSink-compatible log parameter", async () => {
+    // Simulates ChannelLogSink type from OpenClaw SDK:
+    // { info: (msg: string) => void; error: (msg: string) => void; ... }
+    const channelLogSink = {
+      info: (msg: string) => console.log(msg),
+      warn: (msg: string) => console.warn(msg),
+      error: (msg: string) => console.error(msg),
+    };
+
+    const mockGroups = [{ group_no: "g1", name: "Group" }];
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue(mockGroups),
+    }) as unknown as typeof fetch;
+
+    const { fetchBotGroups } = await import("./api-fetch.js");
+
+    // This should compile without TypeScript errors
+    const result = await fetchBotGroups({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      log: channelLogSink,
+    });
+
+    expect(result).toEqual(mockGroups);
+  });
+
+  it("should call log.error on non-ok response", async () => {
+    const errorSpy = vi.fn();
+    const log = {
+      info: vi.fn(),
+      error: errorSpy,
+    };
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+    }) as unknown as typeof fetch;
+
+    const { fetchBotGroups } = await import("./api-fetch.js");
+
+    await fetchBotGroups({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      log,
+    });
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("401"));
+  });
+});
