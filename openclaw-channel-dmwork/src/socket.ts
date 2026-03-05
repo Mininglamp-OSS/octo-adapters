@@ -1,5 +1,6 @@
 import { EventEmitter } from "events";
 import WKSDK, { ConnectStatus, type Message } from "wukongimjssdk";
+const getSDK = (): InstanceType<typeof WKSDK> => (WKSDK as any).shared();
 import type { BotMessage, MessagePayload } from "./types.js";
 
 interface WKSocketOptions {
@@ -17,19 +18,18 @@ interface WKSocketOptions {
  * Thin wrapper around wukongimjssdk — the SDK handles binary encoding,
  * DH key exchange, encryption, heartbeat, reconnect, and RECVACK.
  *
- * Each WKSocket creates its own WKSDK instance, allowing multiple
- * concurrent connections for multi-account setups.
+ * Uses WKSDK.shared() singleton — the SDK's ConnectManager is global,
+ * so only one WebSocket connection is supported at a time.
  */
 export class WKSocket extends EventEmitter {
-  private im: InstanceType<typeof WKSDK>;
+  private im!: InstanceType<typeof WKSDK>;
   private statusListener: ((status: ConnectStatus, reasonCode?: number) => void) | null = null;
   private messageListener: ((message: Message) => void) | null = null;
   private connected = false;
 
   constructor(private opts: WKSocketOptions) {
     super();
-    this.im = new WKSDK();
-    (this.im as any).init();  // WKSDK constructor is empty; config/managers created in init()
+    this.im = getSDK();
   }
 
   /** Connect to WuKongIM WebSocket */
