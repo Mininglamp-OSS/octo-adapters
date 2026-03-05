@@ -4,6 +4,7 @@ import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
+import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
@@ -171,7 +172,7 @@ export async function handleInboundMessage(params: {
   const replyData = message.payload?.reply;
   if (replyData) {
     const replyPayload = replyData.payload;
-    const replyContent = replyPayload?.content ?? resolveContentText(replyPayload);
+    const replyContent = replyPayload?.content ?? (replyPayload ? resolveContentText(replyPayload) : "");
     const replyFrom = replyData.from_uid ?? replyData.from_name ?? "unknown";
     if (replyContent) {
       quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
@@ -336,7 +337,7 @@ export async function handleInboundMessage(params: {
           .map((m: any) => ({
             sender: m.from_uid,
             body: m.content || resolveApiMessagePlaceholder(m.type, m.name),
-            timestamp: m.timestamp * 1000,
+            timestamp: m.timestamp,  // Already in ms from getChannelMessages
           }));
         log?.info?.(`dmwork: [MENTION] 从API获取到 ${entries.length} 条历史消息`);
       } catch (err) {
@@ -346,12 +347,14 @@ export async function handleInboundMessage(params: {
 
     // Build history context manually (JSON format)
     if (entries.length > 0) {
-      historyPrefix = "【群聊历史记录】以下是你上次回复后群里其他人说的话（sender 是用户ID，body 是消息内容）：\n```json\n" +
-        JSON.stringify(entries.map((e: any) => ({
-          sender: e.sender,
-          body: e.body,
-        })), null, 2) +
-        "\n```\n请根据这些历史上下文来回复当前的@消息。\n\n";
+      const messagesJson = JSON.stringify(entries.map((e: any) => ({
+        sender: e.sender,
+        body: e.body,
+      })), null, 2);
+      const template = account.config.historyPromptTemplate || DEFAULT_HISTORY_PROMPT_TEMPLATE;
+      historyPrefix = template
+        .replace("{messages}", messagesJson)
+        .replace("{count}", String(entries.length));
       log?.info?.(`dmwork: [MENTION] 已注入历史上下文 | ${historyPrefix.length} chars | ${entries.length}条消息`);
     } else {
       log?.info?.(`dmwork: [MENTION] 无历史上下文可注入`);

@@ -19,6 +19,7 @@ export type ResolvedDmworkAccount = {
     heartbeatIntervalMs: number;
     requireMention?: boolean;
     historyLimit?: number;  // 群聊历史消息条数限制
+    historyPromptTemplate?: string;  // Template for group history context injection
   };
 };
 
@@ -75,6 +76,7 @@ export function resolveDmworkAccount(params: {
       heartbeatIntervalMs,
       requireMention: accountConfig.requireMention ?? channel.requireMention,
       historyLimit: accountConfig.historyLimit ?? channel.historyLimit ?? 20,
+      historyPromptTemplate: accountConfig.historyPromptTemplate ?? channel.historyPromptTemplate,
     },
   };
 }

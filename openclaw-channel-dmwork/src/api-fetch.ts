@@ -229,7 +229,8 @@ export async function getChannelMessages(params: {
       url: m.payload?.url ?? undefined,
       name: m.payload?.name ?? undefined,
       content: m.payload?.content ?? m.content ?? "",
-      timestamp: m.timestamp ?? Math.floor(Date.now() / 1000),  // API timestamps are in seconds
+      // Convert seconds to milliseconds (API returns seconds, internal standard is ms)
+      timestamp: (m.timestamp ?? Math.floor(Date.now() / 1000)) * 1000,
     }));
   } catch (err) {
     params.log?.error?.(`dmwork: getChannelMessages error: ${err}`);

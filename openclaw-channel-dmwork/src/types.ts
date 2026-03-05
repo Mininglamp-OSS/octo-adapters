@@ -35,6 +35,10 @@ export interface BotEventsReq {
   limit?: number;
 }
 
+export interface BotEventsResp {
+  events: BotEvent[];
+}
+
 export interface BotEvent {
   event_id: number;
   message?: BotMessage;
@@ -55,12 +59,19 @@ export interface MentionPayload {
   all?: boolean | number; // true or 1 = @all (API returns either depending on version)
 }
 
+export interface ReplyPayload {
+  payload?: MessagePayload;
+  from_uid?: string;
+  from_name?: string;
+}
+
 export interface MessagePayload {
   type: MessageType;
   content?: string;
   url?: string;
   name?: string;
   mention?: MentionPayload;
+  reply?: ReplyPayload;
   [key: string]: unknown;
 }
 
