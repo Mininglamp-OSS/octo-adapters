@@ -29,6 +29,7 @@ export class WKSocket extends EventEmitter {
   constructor(private opts: WKSocketOptions) {
     super();
     this.im = new WKSDK();
+    (this.im as any).init();  // WKSDK constructor is empty; config/managers created in init()
   }
 
   /** Connect to WuKongIM WebSocket */
