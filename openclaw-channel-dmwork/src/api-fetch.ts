@@ -17,7 +17,7 @@ async function postJson<T>(
   path: string,
   payload: Record<string, unknown>,
   signal?: AbortSignal,
-): Promise<T> {
+): Promise<T | undefined> {
   const url = `${apiUrl.replace(/\/+$/, "")}${path}`;
   const response = await fetch(url, {
     method: "POST",
@@ -35,7 +35,7 @@ async function postJson<T>(
   }
 
   const text = await response.text();
-  if (!text) return {} as T;
+  if (!text) return undefined;
   return JSON.parse(text) as T;
 }
 
@@ -127,7 +127,16 @@ export async function registerBot(params: {
   const path = params.forceRefresh
     ? "/v1/bot/register?force_refresh=true"
     : "/v1/bot/register";
-  return postJson(params.apiUrl, params.botToken, path, {}, params.signal);
+  const result = await postJson<{
+    robot_id: string;
+    im_token: string;
+    ws_url: string;
+    api_url: string;
+    owner_uid: string;
+    owner_channel_id: string;
+  }>(params.apiUrl, params.botToken, path, {}, params.signal);
+  if (!result) throw new Error("DMWork bot registration returned empty response");
+  return result;
 }
 
 // Fetch the groups the bot belongs to
