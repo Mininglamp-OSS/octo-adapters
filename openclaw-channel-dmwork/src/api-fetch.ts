@@ -36,7 +36,11 @@ async function postJson<T>(
 
   const text = await response.text();
   if (!text) return undefined;
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`DMWork API ${path} returned invalid JSON: ${text.slice(0, 200)}`);
+  }
 }
 
 export async function sendMessage(params: {
@@ -250,7 +254,8 @@ export async function getChannelMessages(params: {
         try {
           const decoded = Buffer.from(m.payload, "base64").toString("utf-8");
           payload = JSON.parse(decoded);
-        } catch {
+        } catch (decodeErr) {
+          params.log?.info?.(`dmwork: payload decode failed for msg ${m.message_id ?? "unknown"}: ${decodeErr}`);
           // If decoding fails, try treating payload as already-parsed object
           payload = typeof m.payload === "object" ? m.payload : {};
         }
