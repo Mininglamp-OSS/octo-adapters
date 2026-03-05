@@ -93,6 +93,42 @@ function resolveApiMessagePlaceholder(type?: number, name?: string): string {
   }
 }
 
+/**
+ * Strip emoji from string for fuzzy matching.
+ * Removes most emoji using Unicode ranges.
+ */
+function stripEmoji(str: string): string {
+  return str
+    .replace(/[\u{1F300}-\u{1F9FF}]/gu, '') // Most emoji (faces, symbols, etc.)
+    .replace(/[\u{2600}-\u{26FF}]/gu, '')   // Misc symbols
+    .replace(/[\u{2700}-\u{27BF}]/gu, '')   // Dingbats
+    .replace(/[\u{FE00}-\u{FE0F}]/gu, '')   // Variation selectors
+    .replace(/[\u{1F000}-\u{1F02F}]/gu, '') // Mahjong, dominos
+    .replace(/[\u{1F0A0}-\u{1F0FF}]/gu, '') // Playing cards
+    .trim();
+}
+
+/**
+ * Find uid by displayName with emoji-tolerant matching.
+ * First tries exact match, then falls back to matching with emoji stripped.
+ */
+function findUidByName(name: string, memberMap: Map<string, string>): string | undefined {
+  // First try exact match
+  const exact = memberMap.get(name);
+  if (exact) return exact;
+  
+  // Then try matching by stripping emoji from both sides
+  const strippedName = stripEmoji(name);
+  if (!strippedName) return undefined;
+  
+  for (const [displayName, uid] of memberMap.entries()) {
+    if (stripEmoji(displayName) === strippedName) {
+      return uid;
+    }
+  }
+  return undefined;
+}
+
 // Cache expiry time: 1 hour
 const GROUP_CACHE_EXPIRY_MS = 60 * 60 * 1000;
 
@@ -176,6 +212,14 @@ export async function handleInboundMessage(params: {
           if (m.name && m.uid) {
             memberMap.set(m.name, m.uid);
             uidToNameMap.set(m.uid, m.name);
+            
+            // Also save name without leading emoji for faster lookup
+            // (complements findUidByName's emoji-tolerant matching)
+            const nameWithoutEmoji = stripEmoji(m.name);
+            if (nameWithoutEmoji && nameWithoutEmoji !== m.name && !memberMap.has(nameWithoutEmoji)) {
+              memberMap.set(nameWithoutEmoji, m.uid);
+              log?.debug?.(`dmwork: [CACHE] Added emoji alias: "${nameWithoutEmoji}" -> "${m.uid}"`);
+            }
           }
         }
         groupCacheTimestamps.set(sessionId, now);
@@ -455,7 +499,7 @@ export async function handleInboundMessage(params: {
           // Helper to resolve a single mention
           const resolveMention = (name: string): { uid: string | null; newContent: string } => {
             // First try memberMap (displayName -> uid)
-            let uid = memberMap.get(name);
+            let uid = findUidByName(name, memberMap);
             let newContent = finalContent;
             
             if (uid) {
@@ -509,7 +553,7 @@ export async function handleInboundMessage(params: {
             if (refreshed) {
               // Retry unresolved names and insert at original positions
               for (const { name, index } of unresolvedNames) {
-                const uid = memberMap.get(name);
+                const uid = findUidByName(name, memberMap);
                 if (uid) {
                   resolvedUids[index] = uid; // Insert at original position
                   log?.debug?.(`dmwork: [REPLY] after refresh: resolved @${name}`);
@@ -523,10 +567,6 @@ export async function handleInboundMessage(params: {
           // Build final mention UIDs array preserving original order
           replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
           
-          // Always include the original sender so they get notified of the reply
-          if (message.from_uid && !replyMentionUids.includes(message.from_uid)) {
-            replyMentionUids.unshift(message.from_uid);
-          }
           
           if (replyMentionUids.length > 0) {
             log?.debug?.(`dmwork: [REPLY] final mentionUids count: ${replyMentionUids.length}`);
