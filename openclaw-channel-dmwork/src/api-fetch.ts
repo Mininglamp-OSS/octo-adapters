@@ -5,6 +5,8 @@
 
 import { ChannelType, MessageType } from "./types.js";
 
+const DEFAULT_TIMEOUT_MS = 30_000;
+
 const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
 };
@@ -132,6 +134,7 @@ export async function registerBot(params: {
 export async function fetchBotGroups(params: {
   apiUrl: string;
   botToken: string;
+  log?: { info?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
 }): Promise<Array<{ group_no: string; name: string }>> {
   const url = `${params.apiUrl}/v1/bot/groups`;
   const resp = await fetch(url, {
@@ -139,9 +142,10 @@ export async function fetchBotGroups(params: {
     headers: {
       "Authorization": `Bearer ${params.botToken}`,
     },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
   });
   if (!resp.ok) {
-    // Fallback: return empty if API not available
+    params.log?.error?.(`dmwork: fetchBotGroups failed: ${resp.status}`);
     return [];
   }
   return await resp.json();
@@ -161,6 +165,7 @@ export async function getGroupMembers(params: {
   apiUrl: string;
   botToken: string;
   groupNo: string;  // 群 ID (channel_id)
+  log?: { info?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void };
 }): Promise<GroupMember[]> {
   const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/members`;
   try {
@@ -169,9 +174,10 @@ export async function getGroupMembers(params: {
       headers: {
         "Authorization": `Bearer ${params.botToken}`,
       },
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
     if (!resp.ok) {
-      console.log(`[dmwork] getGroupMembers failed: ${resp.status}`);
+      params.log?.error?.(`dmwork: getGroupMembers failed: ${resp.status}`);
       return [];
     }
     const data = await resp.json();
@@ -183,7 +189,7 @@ export async function getGroupMembers(params: {
         : [];
     return members as GroupMember[];
   } catch (err) {
-    console.log(`[dmwork] getGroupMembers error: ${err}`);
+    params.log?.error?.(`dmwork: getGroupMembers error: ${err}`);
     return [];
   }
 }

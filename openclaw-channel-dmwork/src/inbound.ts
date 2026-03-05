@@ -167,6 +167,7 @@ async function refreshGroupMemberCache(opts: {
       apiUrl,
       botToken,
       groupNo: sessionId,
+      log,
     });
 
     if (members.length > 0) {
