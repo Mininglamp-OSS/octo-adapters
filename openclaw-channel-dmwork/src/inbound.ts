@@ -5,6 +5,7 @@ import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
+import { extractMentionMatches } from "./mention-utils.js";
 
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
@@ -259,8 +260,9 @@ export async function handleInboundMessage(params: {
   // When user sends "@陈皮皮 @托马斯.福 xxx", the @ names in content correspond to mention.uids in order
   if (isGroup) {
     const allMentionUids: string[] = message.payload?.mention?.uids ?? [];
-    // Match all @xxx patterns (including Chinese characters and dots)
-    const contentMentions = rawBody.match(/@[\w\u4e00-\u9fa5.]+/g) ?? [];
+    // Match all @xxx patterns (including Chinese characters, dots, hyphens)
+    // Uses shared utility for consistent regex across inbound/outbound (fixes #31)
+    const contentMentions = extractMentionMatches(rawBody);
     
     if (contentMentions.length > 0 && allMentionUids.length > 0) {
       log?.debug?.(`dmwork: [MAPPING] content @names: ${JSON.stringify(contentMentions)}, mention.uids: ${JSON.stringify(allMentionUids)}`);
@@ -503,7 +505,8 @@ export async function handleInboundMessage(params: {
         
         if (isGroup) {
           // Parse all @mentions from content (support Chinese, English, dots, underscores, hex uids)
-          const contentMentions = content.match(/@[\w\u4e00-\u9fa5.]+/g) ?? [];
+          // Uses shared utility for consistent regex across inbound/outbound (fixes #31)
+          const contentMentions = extractMentionMatches(content);
           
           log?.debug?.(`dmwork: [REPLY] content @mentions count: ${contentMentions.length}`);
           log?.debug?.(`dmwork: [REPLY] memberMap size: ${memberMap.size}, uidToNameMap size: ${uidToNameMap.size}`);

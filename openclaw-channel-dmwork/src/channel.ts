@@ -15,6 +15,7 @@ import { registerBot, sendMessage, sendHeartbeat } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
+import { parseMentions } from "./mention-utils.js";
 // HistoryEntry type - compatible with any version
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
@@ -140,16 +141,13 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         }
         channelType = ChannelType.Group;
 
-        // Parse @mentions from message content (e.g., "@chenpipi_bot" -> "chenpipi_bot")
-        // Match @username where username is alphanumeric with underscores (typical uid format)
-        const contentMentions = content.match(/@([a-zA-Z0-9_]+)/g);
-        if (contentMentions) {
-          for (const mention of contentMentions) {
-            const uid = mention.slice(1); // Remove @ prefix
-            if (uid && !mentionUids.includes(uid)) {
-              mentionUids.push(uid);
-              console.log(`[dmwork] parsed @mention from content: ${uid}`);
-            }
+        // Parse @mentions from message content (e.g., "@chenpipi_bot", "@陈皮皮")
+        // Uses shared utility for consistent regex across inbound/outbound (fixes #31)
+        const contentMentionNames = parseMentions(content);
+        for (const name of contentMentionNames) {
+          if (name && !mentionUids.includes(name)) {
+            mentionUids.push(name);
+            console.log(`[dmwork] parsed @mention from content: ${name}`);
           }
         }
         if (mentionUids.length > 0) {
