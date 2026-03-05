@@ -47,7 +47,7 @@ export class WKSocket extends EventEmitter {
     const im = WKSDK.shared();
 
     // Ensure clean state — disconnect any prior SDK session
-    try { im.disconnect(); } catch { /* ignore */ }
+    try { im.disconnect(); } catch (err) { console.debug("[WKSocket] disconnect error (ignored):", err); }
 
     im.config.addr = this.opts.wsUrl;
     im.config.uid = this.opts.uid;
@@ -143,6 +143,6 @@ export class WKSocket extends EventEmitter {
       im.chatManager.removeMessageListener(this.messageListener);
       this.messageListener = null;
     }
-    try { im.disconnect(); } catch { /* ignore */ }
+    try { im.disconnect(); } catch (err) { console.debug("[WKSocket] disconnect error (ignored):", err); }
   }
 }
