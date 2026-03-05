@@ -281,8 +281,17 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           sendHeartbeat({
             apiUrl: account.config.apiUrl,
             botToken: account.config.botToken!,
+          }).then(() => {
+            consecutiveHeartbeatFailures = 0; // Reset on success
           }).catch((err) => {
-            log?.error?.(`dmwork: heartbeat failed: ${String(err)}`);
+            consecutiveHeartbeatFailures++;
+            log?.error?.(`dmwork: heartbeat failed (${consecutiveHeartbeatFailures}/${MAX_HEARTBEAT_FAILURES}): ${String(err)}`);
+            if (consecutiveHeartbeatFailures >= MAX_HEARTBEAT_FAILURES && !stopped) {
+              log?.warn?.("dmwork: too many heartbeat failures, triggering reconnect...");
+              consecutiveHeartbeatFailures = 0;
+              socket.disconnect();
+              socket.connect();
+            }
           });
         }, account.config.heartbeatIntervalMs);
       };
@@ -301,6 +310,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       // 5. Token refresh state — detect stale cached token
       let hasRefreshedToken = false;
+      let isRefreshingToken = false; // Guard against concurrent refreshes (#43)
+
+      // 5b. Heartbeat failure tracking — reconnect after consecutive failures (#42)
+      let consecutiveHeartbeatFailures = 0;
+      const MAX_HEARTBEAT_FAILURES = 3;
 
       // 6. Connect WebSocket — pure real-time via WuKongIM SDK
       const socket = new WKSocket({
@@ -354,8 +368,10 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           statusSink({ lastError: err.message });
 
           // If kicked or connect failed, try refreshing the IM token once
-          if (!hasRefreshedToken && !stopped &&
+          // Use isRefreshingToken to prevent concurrent refresh attempts (#43)
+          if (!hasRefreshedToken && !isRefreshingToken && !stopped &&
               (err.message.includes("Kicked") || err.message.includes("Connect failed"))) {
+            isRefreshingToken = true;
             hasRefreshedToken = true;
             log?.warn?.("dmwork: connection rejected — refreshing IM token...");
             try {
@@ -371,6 +387,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
               socket.connect();
             } catch (refreshErr) {
               log?.error?.(`dmwork: token refresh failed: ${String(refreshErr)}`);
+              hasRefreshedToken = false; // Allow retry on next error (#43)
+            } finally {
+              isRefreshingToken = false;
             }
           }
         },
