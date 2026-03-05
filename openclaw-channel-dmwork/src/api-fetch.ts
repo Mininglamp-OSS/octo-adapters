@@ -217,7 +217,8 @@ export async function getChannelMessages(params: {
   log?: { info?: (msg: string) => void; error?: (msg: string) => void };
 }): Promise<Array<{ from_uid: string; content: string; timestamp: number; type?: number; url?: string; name?: string }>> {
   try {
-    const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/channel/messages`;
+    const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/messages/sync`;
+    const limit = params.limit ?? 20;
     const response = await fetch(url, {
       method: "POST",
       headers: {
@@ -227,7 +228,10 @@ export async function getChannelMessages(params: {
       body: JSON.stringify({
         channel_id: params.channelId,
         channel_type: params.channelType,
-        limit: params.limit ?? 20,
+        limit,
+        start_message_seq: 0,
+        end_message_seq: 0,
+        pull_mode: 1,  // 1 = pull up (newer messages)
       }),
       signal: params.signal,
     });
@@ -238,15 +242,29 @@ export async function getChannelMessages(params: {
     }
 
     const data = await response.json();
-    return (data.messages ?? data ?? []).map((m: any) => ({
-      from_uid: m.from_uid ?? m.sender_id ?? "unknown",
-      type: m.payload?.type ?? undefined,
-      url: m.payload?.url ?? undefined,
-      name: m.payload?.name ?? undefined,
-      content: m.payload?.content ?? m.content ?? "",
-      // Convert seconds to milliseconds (API returns seconds, internal standard is ms)
-      timestamp: (m.timestamp ?? Math.floor(Date.now() / 1000)) * 1000,
-    }));
+    const messages = data.messages ?? [];
+    return messages.map((m: any) => {
+      // payload is base64-encoded JSON string
+      let payload: any = {};
+      if (m.payload) {
+        try {
+          const decoded = Buffer.from(m.payload, "base64").toString("utf-8");
+          payload = JSON.parse(decoded);
+        } catch {
+          // If decoding fails, try treating payload as already-parsed object
+          payload = typeof m.payload === "object" ? m.payload : {};
+        }
+      }
+      return {
+        from_uid: m.from_uid ?? "unknown",
+        type: payload.type ?? undefined,
+        url: payload.url ?? undefined,
+        name: payload.name ?? undefined,
+        content: payload.content ?? "",
+        // Convert seconds to milliseconds (API returns seconds, internal standard is ms)
+        timestamp: (m.timestamp ?? Math.floor(Date.now() / 1000)) * 1000,
+      };
+    });
   } catch (err) {
     params.log?.error?.(`dmwork: getChannelMessages error: ${err}`);
     return [];

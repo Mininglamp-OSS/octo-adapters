@@ -331,9 +331,10 @@ export async function handleInboundMessage(params: {
     const historyCountBefore = entries.length;
     log?.info?.(`dmwork: [MENTION] 收到@消息 | 缓存=${historyCountBefore}条 | historyLimit=${historyLimit}`);
 
-    // If memory cache is empty, try fetching from API
-    if (entries.length === 0 && account.config.botToken) {
-      log?.info?.(`dmwork: [MENTION] 内存缓存为空，尝试从API获取历史...`);
+    // If memory cache is empty or insufficient, try fetching from API
+    const cacheInsufficient = entries.length < Math.ceil(historyLimit / 2);
+    if (cacheInsufficient && account.config.botToken) {
+      log?.info?.(`dmwork: [MENTION] 缓存不足(${entries.length}/${historyLimit})，从API补充历史...`);
       try {
         const fetchLimit = Math.min(historyLimit, 100);  // Cap at 100
         const apiMessages = await getChannelMessages({
