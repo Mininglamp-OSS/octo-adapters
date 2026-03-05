@@ -66,6 +66,39 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
   return m;
 }
 
+
+// --- Cache cleanup: evict groups inactive for >4 hours ---
+const CACHE_MAX_AGE_MS = 4 * 60 * 60 * 1000;
+const CACHE_CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
+const _cacheActivity = new Map<string, Map<string, number>>();
+
+function touchCache(accountId: string, groupId: string): void {
+  let m = _cacheActivity.get(accountId);
+  if (!m) { m = new Map(); _cacheActivity.set(accountId, m); }
+  m.set(groupId, Date.now());
+}
+
+function cleanupStaleCaches(): void {
+  const cutoff = Date.now() - CACHE_MAX_AGE_MS;
+  for (const [accountId, activityMap] of _cacheActivity) {
+    for (const [groupId, lastAccess] of activityMap) {
+      if (lastAccess < cutoff) {
+        _historyMaps.get(accountId)?.delete(groupId);
+        _memberMaps.get(accountId)?.delete(groupId);
+        _uidToNameMaps.get(accountId)?.delete(groupId);
+        _groupCacheTimestamps.get(accountId)?.delete(groupId);
+        activityMap.delete(groupId);
+      }
+    }
+    if (activityMap.size === 0) _cacheActivity.delete(accountId);
+  }
+}
+
+const _cleanupTimer = setInterval(cleanupStaleCaches, CACHE_CLEANUP_INTERVAL_MS);
+if (typeof _cleanupTimer === "object" && _cleanupTimer && "unref" in _cleanupTimer) {
+  (_cleanupTimer as NodeJS.Timeout).unref();
+}
+
 const meta = {
   id: "dmwork",
   label: "DMWork",
@@ -285,6 +318,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           log?.info?.(
             `dmwork: recv message from=${msg.from_uid} channel=${msg.channel_id ?? "DM"} type=${msg.channel_type ?? 1}`,
           );
+
+          // Track cache activity for cleanup
+          if (msg.channel_id) touchCache(account.accountId, msg.channel_id);
 
           handleInboundMessage({
             account,
