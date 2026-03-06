@@ -94,6 +94,9 @@ function cleanupStaleCaches(): void {
   }
 }
 
+// Known bot robot_ids across all accounts — for bot-to-bot loop prevention
+const _knownBotUids = new Set<string>();
+
 // Singleton timer to prevent accumulation during hot reload (#54)
 let _cleanupTimer: NodeJS.Timeout | null = null;
 
@@ -265,6 +268,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         throw err;
       }
 
+      // Track this bot's uid for bot-to-bot loop prevention
+      _knownBotUids.add(credentials.robot_id);
+
       log?.info?.(
         `[${account.accountId}] bot registered as ${credentials.robot_id}`,
       );
@@ -334,13 +340,17 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         onMessage: (msg: BotMessage) => {
           // Skip self messages
           if (msg.from_uid === credentials.robot_id) return;
+          // Skip messages from any other bot in this plugin instance (prevent bot-to-bot loops)
+          if (_knownBotUids.has(msg.from_uid)) return;
           // Skip unsupported message types (Location, Card)
           const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File];
           if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;
 
-          // DM bot filtering: WuKongIM DM channel_id is a fake channel "uid1@uid2".
-          // Only process if current bot's robot_id is part of the fake channel.
-          // This prevents multi-account setups from cross-processing each other's DMs.
+          // Defense-in-depth DM filter (kept for safety, though v0.2.28+ uses independent
+          // WebSocket connections per bot so server-side routing is already correct).
+          // WuKongIM DM channel_id is typically "uid1@uid2", but may also be a plain uid
+          // when channel_type === 1 without '@'. The plain-uid case needs no extra filter
+          // since each bot has its own WS connection.
           if (msg.channel_type === ChannelType.DM && msg.channel_id && msg.channel_id.includes("@")) {
             const parts = msg.channel_id.split("@");
             if (!parts.includes(credentials.robot_id)) {
