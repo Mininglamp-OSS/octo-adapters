@@ -338,8 +338,21 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File];
           if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;
 
+          // DM bot filtering: WuKongIM DM channel_id is a fake channel "uid1@uid2".
+          // Only process if current bot's robot_id is part of the fake channel.
+          // This prevents multi-account setups from cross-processing each other's DMs.
+          if (msg.channel_type === ChannelType.DM && msg.channel_id && msg.channel_id.includes("@")) {
+            const parts = msg.channel_id.split("@");
+            if (!parts.includes(credentials.robot_id)) {
+              log?.info?.(
+                `dmwork: [${account.accountId}] skipping DM not for this bot: channel=${msg.channel_id} bot=${credentials.robot_id}`,
+              );
+              return;
+            }
+          }
+
           log?.info?.(
-            `dmwork: recv message from=${msg.from_uid} channel=${msg.channel_id ?? "DM"} type=${msg.channel_type ?? 1}`,
+            `dmwork: [${account.accountId}] recv message from=${msg.from_uid} channel=${msg.channel_id ?? "DM"} type=${msg.channel_type ?? 1}`,
           );
 
           // Track cache activity for cleanup
