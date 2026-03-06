@@ -220,7 +220,7 @@ export async function handleInboundMessage(params: {
 
   const sessionId = isGroup
     ? message.channel_id!
-    : `${message.from_uid}:${account.accountId}`;
+    : message.from_uid;
 
   const resolved = resolveContent(message.payload);
   const rawBody = resolved.text;
