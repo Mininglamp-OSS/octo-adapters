@@ -218,6 +218,14 @@ export async function handleInboundMessage(params: {
     message.channel_id.length > 0 &&
     message.channel_type === ChannelType.Group;
 
+  // Parse space_id from channel_id (format: s{spaceId}_{peerId})
+  let spaceId = "";
+  const effectiveChannelId = isGroup ? message.channel_id! : message.from_uid;
+  const spaceMatch = effectiveChannelId.match(/^s([^_]+)_(.+)$/);
+  if (spaceMatch) {
+    spaceId = spaceMatch[1];
+  }
+
   const sessionId = isGroup
     ? message.channel_id!
     : message.from_uid;
@@ -409,7 +417,7 @@ export async function handleInboundMessage(params: {
 
   const fromLabel = isGroup
     ? `group:${message.channel_id}`
-    : `user:${message.from_uid}`;
+    : spaceId ? `space:${spaceId}:user:${message.from_uid}` : `user:${message.from_uid}`;
 
   const storePath = core.channel.session.resolveStorePath(config.session?.store, {
     agentId: route.agentId,
