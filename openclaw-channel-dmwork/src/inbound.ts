@@ -219,16 +219,33 @@ export async function handleInboundMessage(params: {
     message.channel_type === ChannelType.Group;
 
   // Parse space_id from channel_id (format: s{spaceId}_{peerId})
+  // For DM, channel_id is a fake channel: s{spaceId}_{uid1}@s{spaceId}_{uid2}
+  // Use LastIndex approach: spaceId is everything between 's' and the last '_' before peerId
   let spaceId = "";
   const effectiveChannelId = isGroup ? message.channel_id! : message.from_uid;
-  const spaceMatch = effectiveChannelId.match(/^s([^_]+)_(.+)$/);
-  if (spaceMatch) {
-    spaceId = spaceMatch[1];
+  if (effectiveChannelId.startsWith("s")) {
+    const lastUnderscore = effectiveChannelId.lastIndexOf("_");
+    if (lastUnderscore > 0) {
+      spaceId = effectiveChannelId.substring(1, lastUnderscore);
+    }
+  }
+  // Also try to extract spaceId from the WS channel_id (compound DM format)
+  if (!spaceId && message.channel_id && message.channel_id.startsWith("s")) {
+    // DM compound: s{spaceId}_{uid1}@s{spaceId}_{uid2}
+    const atIdx = message.channel_id.indexOf("@");
+    const firstPart = atIdx > 0 ? message.channel_id.substring(0, atIdx) : message.channel_id;
+    if (firstPart.startsWith("s")) {
+      const lastUnderscore = firstPart.lastIndexOf("_");
+      if (lastUnderscore > 0) {
+        spaceId = firstPart.substring(1, lastUnderscore);
+      }
+    }
   }
 
+  // Session ID: include spaceId for Space isolation (same user in different Spaces = different sessions)
   const sessionId = isGroup
     ? message.channel_id!
-    : message.from_uid;
+    : spaceId ? `${spaceId}:${message.from_uid}` : message.from_uid;
 
   const resolved = resolveContent(message.payload);
   const rawBody = resolved.text;
