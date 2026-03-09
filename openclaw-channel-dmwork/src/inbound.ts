@@ -126,6 +126,25 @@ async function uploadAndSendMedia(params: {
   });
 }
 
+/** Guess MIME type from file extension */
+function guessMime(pathOrName?: string, fallback = "application/octet-stream"): string {
+  if (!pathOrName) return fallback;
+  const ext = pathOrName.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp",
+    mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav", m4a: "audio/mp4", aac: "audio/aac", opus: "audio/opus",
+    mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm", avi: "video/x-msvideo", mkv: "video/x-matroska",
+    pdf: "application/pdf", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ppt: "application/vnd.ms-powerpoint", pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    zip: "application/zip", gz: "application/gzip", tar: "application/x-tar",
+    txt: "text/plain", json: "application/json", csv: "text/csv", md: "text/markdown",
+    py: "text/x-python", js: "text/javascript", ts: "text/typescript", go: "text/x-go", java: "text/x-java",
+    html: "text/html", css: "text/css", xml: "text/xml", yaml: "text/yaml", yml: "text/yaml",
+  };
+  return map[ext] ?? fallback;
+}
+
 interface ResolvedContent {
   text: string;
   mediaUrl?: string;
@@ -150,23 +169,27 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string): Resolv
       return { text: payload.content ?? "" };
     case MessageType.Image: {
       const imgUrl = makeFullUrl(payload.url);
-      return { text: `[图片]\n${imgUrl ?? ""}`.trim(), mediaUrl: imgUrl, mediaType: "image" };
+      const imgMime = guessMime(payload.url, "image/jpeg");
+      return { text: `[图片]\n${imgUrl ?? ""}`.trim(), mediaUrl: imgUrl, mediaType: imgMime };
     }
     case MessageType.GIF: {
       const gifUrl = makeFullUrl(payload.url);
-      return { text: `[GIF]\n${gifUrl ?? ""}`.trim(), mediaUrl: gifUrl, mediaType: "image" };
+      return { text: `[GIF]\n${gifUrl ?? ""}`.trim(), mediaUrl: gifUrl, mediaType: "image/gif" };
     }
     case MessageType.Voice: {
       const voiceUrl = makeFullUrl(payload.url);
-      return { text: `[语音消息]\n${voiceUrl ?? ""}`.trim(), mediaUrl: voiceUrl, mediaType: "audio" };
+      const voiceMime = guessMime(payload.url, "audio/mpeg");
+      return { text: `[语音消息]\n${voiceUrl ?? ""}`.trim(), mediaUrl: voiceUrl, mediaType: voiceMime };
     }
     case MessageType.Video: {
       const videoUrl = makeFullUrl(payload.url);
-      return { text: `[视频]\n${videoUrl ?? ""}`.trim(), mediaUrl: videoUrl, mediaType: "video" };
+      const videoMime = guessMime(payload.url, "video/mp4");
+      return { text: `[视频]\n${videoUrl ?? ""}`.trim(), mediaUrl: videoUrl, mediaType: videoMime };
     }
     case MessageType.File: {
       const fileUrl = makeFullUrl(payload.url);
-      return { text: `[文件: ${payload.name ?? "未知文件"}]\n${fileUrl ?? ""}`.trim(), mediaUrl: fileUrl, mediaType: "file" };
+      const fileMime = guessMime(payload.url, payload.name ? guessMime(payload.name, "application/octet-stream") : "application/octet-stream");
+      return { text: `[文件: ${payload.name ?? "未知文件"}]\n${fileUrl ?? ""}`.trim(), mediaUrl: fileUrl, mediaType: fileMime };
     }
     case MessageType.Location: {
       const lat = payload.latitude ?? payload.lat;
@@ -410,7 +433,8 @@ export async function handleInboundMessage(params: {
   let rawBody = resolved.text;
   let inboundMediaUrl = resolved.mediaUrl;
   // Inline text file content if possible
-  if (resolved.mediaType === "file" && resolved.mediaUrl) {
+  const isFileMessage = message.payload?.type === MessageType.File;
+  if (isFileMessage && resolved.mediaUrl) {
     const fileContent = await resolveFileContent(resolved.mediaUrl, account.config.botToken ?? "");
     if (fileContent) {
       rawBody = `[文件: ${message.payload.name ?? "未知文件"}]\n\n--- 文件内容 ---\n${fileContent}\n--- 文件结束 ---`;
