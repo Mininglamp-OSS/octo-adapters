@@ -148,16 +148,26 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string): Resolv
   switch (payload.type) {
     case MessageType.Text:
       return { text: payload.content ?? "" };
-    case MessageType.Image:
-      return { text: "[图片]", mediaUrl: makeFullUrl(payload.url), mediaType: "image" };
-    case MessageType.GIF:
-      return { text: "[GIF]", mediaUrl: makeFullUrl(payload.url), mediaType: "image" };
-    case MessageType.Voice:
-      return { text: "[语音消息]", mediaUrl: makeFullUrl(payload.url), mediaType: "audio" };
-    case MessageType.Video:
-      return { text: "[视频]", mediaUrl: makeFullUrl(payload.url), mediaType: "video" };
-    case MessageType.File:
-      return { text: `[文件: ${payload.name ?? "未知文件"}]`, mediaUrl: makeFullUrl(payload.url), mediaType: "file" };
+    case MessageType.Image: {
+      const imgUrl = makeFullUrl(payload.url);
+      return { text: `[图片]\n${imgUrl ?? ""}`.trim(), mediaUrl: imgUrl, mediaType: "image" };
+    }
+    case MessageType.GIF: {
+      const gifUrl = makeFullUrl(payload.url);
+      return { text: `[GIF]\n${gifUrl ?? ""}`.trim(), mediaUrl: gifUrl, mediaType: "image" };
+    }
+    case MessageType.Voice: {
+      const voiceUrl = makeFullUrl(payload.url);
+      return { text: `[语音消息]\n${voiceUrl ?? ""}`.trim(), mediaUrl: voiceUrl, mediaType: "audio" };
+    }
+    case MessageType.Video: {
+      const videoUrl = makeFullUrl(payload.url);
+      return { text: `[视频]\n${videoUrl ?? ""}`.trim(), mediaUrl: videoUrl, mediaType: "video" };
+    }
+    case MessageType.File: {
+      const fileUrl = makeFullUrl(payload.url);
+      return { text: `[文件: ${payload.name ?? "未知文件"}]\n${fileUrl ?? ""}`.trim(), mediaUrl: fileUrl, mediaType: "file" };
+    }
     case MessageType.Location: {
       const lat = payload.latitude ?? payload.lat;
       const lng = payload.longitude ?? payload.lng ?? payload.lon;
