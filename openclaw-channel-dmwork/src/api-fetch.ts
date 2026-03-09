@@ -11,7 +11,7 @@ const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
 };
 
-async function postJson<T>(
+export async function postJson<T>(
   apiUrl: string,
   botToken: string,
   path: string,
@@ -52,6 +52,7 @@ export async function sendMessage(params: {
   mentionUids?: string[];
   mentionAll?: boolean;
   streamNo?: string;
+  replyMsgId?: string;
   signal?: AbortSignal;
 }): Promise<void> {
   const payload: Record<string, unknown> = {
@@ -68,6 +69,10 @@ export async function sendMessage(params: {
       mention.all = true;
     }
     payload.mention = mention;
+  }
+  // Add reply field if replyMsgId is provided
+  if (params.replyMsgId) {
+    payload.reply = { message_id: params.replyMsgId };
   }
   await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,

@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, postJson } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -46,39 +46,188 @@ export type DmworkStatusSink = (patch: {
   lastError?: string | null;
 }) => void;
 
+/** Extract media URLs from deliver payload */
+function resolveOutboundMediaUrls(payload: { mediaUrl?: string; mediaUrls?: string[] }): string[] {
+  return [
+    ...(payload.mediaUrls ?? []),
+    ...(payload.mediaUrl ? [payload.mediaUrl] : []),
+  ].filter(Boolean);
+}
+
+/** Extract filename from a URL path */
+function extractFilename(url: string): string {
+  try {
+    const pathname = new URL(url).pathname;
+    const parts = pathname.split("/");
+    return parts[parts.length - 1] || "file";
+  } catch {
+    return "file";
+  }
+}
+
+/** Upload media to MinIO and send as image/file message */
+async function uploadAndSendMedia(params: {
+  mediaUrl: string;
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  log?: ChannelLogSink;
+}): Promise<void> {
+  const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
+
+  // Fetch the media content
+  const resp = await fetch(mediaUrl);
+  if (!resp.ok) throw new Error(`Failed to fetch media: ${resp.status}`);
+  const buffer = Buffer.from(await resp.arrayBuffer());
+  const contentType = resp.headers.get("content-type") || "application/octet-stream";
+  const filename = extractFilename(mediaUrl);
+
+  // Upload to MinIO via multipart
+  const boundary = `----FormBoundary${Date.now()}`;
+  const bodyParts: Buffer[] = [];
+  const header = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`;
+  const footer = `\r\n--${boundary}--\r\n`;
+  bodyParts.push(Buffer.from(header, "utf-8"));
+  bodyParts.push(buffer);
+  bodyParts.push(Buffer.from(footer, "utf-8"));
+  const body = Buffer.concat(bodyParts);
+
+  const uploadUrl = `${apiUrl.replace(/\/+$/, "")}/v1/bot/upload?type=chat`;
+  const uploadResp = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${botToken}`,
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+  });
+  if (!uploadResp.ok) {
+    const text = await uploadResp.text().catch(() => "");
+    throw new Error(`Upload failed (${uploadResp.status}): ${text}`);
+  }
+  const uploadResult = await uploadResp.json() as { path?: string; url?: string };
+  const fileUrl = uploadResult.path ?? uploadResult.url ?? "";
+
+  // Determine message type from MIME
+  const msgType = contentType.startsWith("image/") ? MessageType.Image : MessageType.File;
+
+  log?.info?.(`dmwork: uploaded media as ${msgType === MessageType.Image ? "image" : "file"}: ${filename}`);
+
+  // Send via sendMessage payload
+  await postJson(apiUrl, botToken, "/v1/bot/sendMessage", {
+    channel_id: channelId,
+    channel_type: channelType,
+    payload: {
+      type: msgType,
+      url: fileUrl,
+      name: filename,
+    },
+  });
+}
+
 interface ResolvedContent {
   text: string;
   mediaUrl?: string;
   mediaType?: string;
 }
 
-function resolveContent(payload: BotMessage["payload"]): ResolvedContent {
+function resolveContent(payload: BotMessage["payload"], apiUrl?: string): ResolvedContent {
   if (!payload) return { text: "" };
+
+  const makeFullUrl = (relUrl?: string) => {
+    if (!relUrl) return undefined;
+    if (relUrl.startsWith("http")) return relUrl;
+    // Build public file URL: strip /api suffix from apiUrl, strip "preview/" from path
+    // e.g. "file/preview/chat/xxx/img.jpg" → "https://host/file/chat/xxx/img.jpg"
+    const baseUrl = apiUrl?.replace(/\/+$/, "").replace(/\/api$/i, "") ?? "";
+    const cleanPath = relUrl.replace(/^file\/preview\//, "file/");
+    return `${baseUrl}/${cleanPath}`;
+  };
+
   switch (payload.type) {
     case MessageType.Text:
       return { text: payload.content ?? "" };
     case MessageType.Image:
-      return { text: "[图片]", mediaUrl: payload.url, mediaType: "image" };
+      return { text: "[图片]", mediaUrl: makeFullUrl(payload.url), mediaType: "image" };
     case MessageType.GIF:
-      return { text: "[GIF]", mediaUrl: payload.url, mediaType: "image" };
+      return { text: "[GIF]", mediaUrl: makeFullUrl(payload.url), mediaType: "image" };
     case MessageType.Voice:
-      return { text: "[语音消息]" };
+      return { text: "[语音消息]", mediaUrl: makeFullUrl(payload.url), mediaType: "audio" };
     case MessageType.Video:
-      return { text: "[视频]", mediaUrl: payload.url, mediaType: "video" };
+      return { text: "[视频]", mediaUrl: makeFullUrl(payload.url), mediaType: "video" };
     case MessageType.File:
-      return { text: `[文件: ${payload.name ?? "未知文件"}]`, mediaUrl: payload.url };
-    case MessageType.Location:
-      return { text: "[位置信息]" };
-    case MessageType.Card:
-      return { text: "[名片]" };
+      return { text: `[文件: ${payload.name ?? "未知文件"}]`, mediaUrl: makeFullUrl(payload.url), mediaType: "file" };
+    case MessageType.Location: {
+      const lat = payload.latitude ?? payload.lat;
+      const lng = payload.longitude ?? payload.lng ?? payload.lon;
+      const locText = lat != null && lng != null ? `[位置信息: ${lat},${lng}]` : "[位置信息]";
+      return { text: locText };
+    }
+    case MessageType.Card: {
+      const cardName = payload.name ?? "未知";
+      const cardUid = payload.uid ?? "";
+      const cardText = cardUid ? `[名片: ${cardName} (${cardUid})]` : `[名片: ${cardName}]`;
+      return { text: cardText };
+    }
     default:
       return { text: payload.content ?? payload.url ?? "" };
   }
 }
 
 /** Extract text-only content for history/quotes (no mediaUrl) */
-function resolveContentText(payload: BotMessage["payload"]): string {
-  return resolveContent(payload).text;
+function resolveContentText(payload: BotMessage["payload"], apiUrl?: string): string {
+  return resolveContent(payload, apiUrl).text;
+}
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  "txt", "html", "htm", "md", "csv", "json", "xml", "yaml", "yml",
+  "log", "py", "js", "ts", "go", "java",
+]);
+
+/** Fetch an authenticated URL and return a base64 data URL */
+async function fetchAsDataUrl(
+  url: string,
+  botToken: string,
+): Promise<string | null> {
+  try {
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${botToken}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!resp.ok) return null;
+    const contentType = resp.headers.get("content-type") || "application/octet-stream";
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    return `data:${contentType};base64,${buffer.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveFileContent(
+  url: string,
+  botToken: string,
+  maxBytes = 5 * 1024 * 1024,
+): Promise<string | null> {
+  try {
+    const ext = url.split(".").pop()?.toLowerCase() ?? "";
+    if (!TEXT_FILE_EXTENSIONS.has(ext)) return null;
+
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${botToken}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!resp.ok || !resp.body) return null;
+
+    const contentLength = resp.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > maxBytes) return null;
+
+    const buffer = await resp.arrayBuffer();
+    if (buffer.byteLength > maxBytes) return null;
+    return new TextDecoder().decode(buffer);
+  } catch {
+    return null;
+  }
 }
 
 /** Placeholder text for non-text API history messages */
@@ -247,9 +396,29 @@ export async function handleInboundMessage(params: {
     ? message.channel_id!
     : spaceId ? `${spaceId}:${message.from_uid}` : message.from_uid;
 
-  const resolved = resolveContent(message.payload);
-  const rawBody = resolved.text;
-  const inboundMediaUrl = resolved.mediaUrl;
+  const resolved = resolveContent(message.payload, account.config.apiUrl);
+  let rawBody = resolved.text;
+  let inboundMediaUrl = resolved.mediaUrl;
+  // Inline text file content if possible
+  if (resolved.mediaType === "file" && resolved.mediaUrl) {
+    const fileContent = await resolveFileContent(resolved.mediaUrl, account.config.botToken ?? "");
+    if (fileContent) {
+      rawBody = `[文件: ${message.payload.name ?? "未知文件"}]\n\n--- 文件内容 ---\n${fileContent}\n--- 文件结束 ---`;
+      inboundMediaUrl = undefined;
+    }
+  }
+
+  // Convert authenticated media URLs to base64 data URLs so the Agent can access them
+  if (inboundMediaUrl && !inboundMediaUrl.startsWith("data:")) {
+    const dataUrl = await fetchAsDataUrl(inboundMediaUrl, account.config.botToken ?? "");
+    if (dataUrl) {
+      log?.info?.(`dmwork: converted media URL to base64 data URL (${resolved.mediaType})`);
+      inboundMediaUrl = dataUrl;
+    } else {
+      log?.warn?.(`dmwork: failed to convert media URL to base64, keeping original`);
+    }
+  }
+
   if (!rawBody) {
     log?.info?.(
       `dmwork: inbound dropped session=${sessionId} reason=empty-content`,
@@ -262,7 +431,7 @@ export async function handleInboundMessage(params: {
   const replyData = message.payload?.reply;
   if (replyData) {
     const replyPayload = replyData.payload;
-    const replyContent = replyPayload?.content ?? (replyPayload ? resolveContentText(replyPayload) : "");
+    const replyContent = replyPayload?.content ?? (replyPayload ? resolveContentText(replyPayload, account.config.apiUrl) : "");
     const replyFrom = replyData.from_uid ?? replyData.from_name ?? "unknown";
     if (replyContent) {
       quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
@@ -505,9 +674,55 @@ export async function handleInboundMessage(params: {
     .then(() => log?.info?.("dmwork: typing sent OK"))
     .catch((err) => log?.error?.(`dmwork: typing failed: ${String(err)}`));
 
+  const apiUrl = account.config.apiUrl;
+  const botToken = account.config.botToken ?? "";
+
+  // Keep sending typing indicator while AI is processing
+  const typingInterval = setInterval(() => {
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
+  }, 5000);
+
+  // Streaming state
+  let streamNo: string | undefined;
+  let streamFailed = false;
+
+  try {
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg: config,
+    replyOptions: {
+      onPartialReply: async (partial: { text?: string; mediaUrls?: string[] }) => {
+        if (streamFailed) return;
+        const text = partial.text?.trim();
+        if (!text) return;
+        try {
+          if (!streamNo) {
+            // Start stream
+            const payloadB64 = Buffer.from(JSON.stringify({ type: 1, content: text })).toString("base64");
+            const result = await postJson<{ stream_no: string }>(apiUrl, botToken, "/v1/bot/stream/start", {
+              channel_id: replyChannelId,
+              channel_type: replyChannelType,
+              payload: payloadB64,
+            });
+            streamNo = result?.stream_no;
+            log?.info?.(`dmwork: stream started: ${streamNo}`);
+          } else {
+            // Continue stream
+            await sendMessage({
+              apiUrl,
+              botToken,
+              channelId: replyChannelId,
+              channelType: replyChannelType,
+              content: text,
+              streamNo,
+            });
+          }
+        } catch (err) {
+          log?.error?.(`dmwork: stream partial failed, falling back to deliver: ${String(err)}`);
+          streamFailed = true;
+        }
+      },
+    },
     dispatcherOptions: {
       deliver: async (payload: {
         text?: string;
@@ -515,14 +730,31 @@ export async function handleInboundMessage(params: {
         mediaUrl?: string;
         replyToId?: string | null;
       }) => {
-        const contentParts: string[] = [];
-        if (payload.text) contentParts.push(payload.text);
-        const mediaUrls = [
-          ...(payload.mediaUrls ?? []),
-          ...(payload.mediaUrl ? [payload.mediaUrl] : []),
-        ].filter(Boolean);
-        if (mediaUrls.length > 0) contentParts.push(...mediaUrls);
-        const content = contentParts.join("\n").trim();
+        // Resolve outbound media URLs
+        const outboundMediaUrls = resolveOutboundMediaUrls(payload);
+
+        // Upload and send each media file
+        for (const mediaUrl of outboundMediaUrls) {
+          try {
+            await uploadAndSendMedia({
+              mediaUrl,
+              apiUrl: account.config.apiUrl,
+              botToken: account.config.botToken ?? "",
+              channelId: replyChannelId,
+              channelType: replyChannelType,
+              log,
+            });
+          } catch (err) {
+            log?.error?.(`dmwork: media send failed for ${mediaUrl}: ${String(err)}`);
+          }
+        }
+
+        // If there are no media URLs, fall through to text logic; if there are, only send text if caption exists
+        const content = payload.text?.trim() ?? "";
+        if (!content && outboundMediaUrls.length > 0) {
+          statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+          return;
+        }
         if (!content) return;
 
         // Build mentionUids from @mentions in content, using memberMap to resolve displayName -> uid
@@ -630,9 +862,37 @@ export async function handleInboundMessage(params: {
 
         statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
       },
-      onError: (err, info) => {
+      onError: async (err: unknown, info: { kind: string }) => {
+        clearInterval(typingInterval);
         log?.error?.(`dmwork ${info.kind} reply failed: ${String(err)}`);
+        try {
+          await sendMessage({
+            apiUrl,
+            botToken,
+            channelId: replyChannelId,
+            channelType: replyChannelType,
+            content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
+          });
+        } catch (sendErr) {
+          log?.error?.(`dmwork: failed to send error message: ${String(sendErr)}`);
+        }
       },
     },
   });
+  } finally {
+    clearInterval(typingInterval);
+    // End stream if one was started (skip if stream failed — deliver handles final message)
+    if (streamNo && !streamFailed) {
+      try {
+        await postJson(apiUrl, botToken, "/v1/bot/stream/end", {
+          stream_no: streamNo,
+          channel_id: replyChannelId,
+          channel_type: replyChannelType,
+        });
+        log?.info?.(`dmwork: stream ended: ${streamNo}`);
+      } catch (err) {
+        log?.error?.(`dmwork: stream end failed: ${String(err)}`);
+      }
+    }
+  }
 }

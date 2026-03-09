@@ -16,6 +16,9 @@ import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { parseMentions } from "./mention-utils.js";
+import path from "path";
+import os from "os";
+import { mkdir, writeFile } from "fs/promises";
 // HistoryEntry type - compatible with any version
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
@@ -105,6 +108,39 @@ function ensureCleanupTimer(): void {
   _cleanupTimer = setInterval(cleanupStaleCaches, CACHE_CLEANUP_INTERVAL_MS);
   if (typeof _cleanupTimer === "object" && _cleanupTimer && "unref" in _cleanupTimer) {
     _cleanupTimer.unref();
+  }
+}
+
+async function checkForUpdates(
+  apiUrl: string,
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void; warn?: (msg: string) => void },
+): Promise<void> {
+  try {
+    // Check npm version
+    const localVersion = (await import("../package.json", { with: { type: "json" } })).default.version;
+    const resp = await fetch("https://registry.npmjs.org/openclaw-channel-dmwork/latest");
+    if (resp.ok) {
+      const data = await resp.json() as { version?: string };
+      if (data.version && data.version !== localVersion) {
+        log?.info?.(`dmwork: new version available: ${data.version} (current: ${localVersion}). Run: npm install openclaw-channel-dmwork@latest`);
+      }
+    }
+  } catch (err) {
+    log?.error?.(`dmwork: version check failed: ${String(err)}`);
+  }
+
+  try {
+    // Fetch skill.md
+    const skillResp = await fetch(`${apiUrl.replace(/\/+$/, "")}/v1/bot/skill.md`);
+    if (skillResp.ok) {
+      const skillContent = await skillResp.text();
+      const skillDir = path.join(os.homedir(), ".openclaw", "skills", "dmwork");
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(path.join(skillDir, "SKILL.md"), skillContent, "utf-8");
+      log?.info?.("dmwork: updated SKILL.md");
+    }
+  } catch (err) {
+    log?.error?.(`dmwork: skill.md fetch failed: ${String(err)}`);
   }
 }
 
@@ -274,6 +310,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       log?.info?.(
         `[${account.accountId}] bot registered as ${credentials.robot_id}`,
       );
+
+      // Check for updates in background (fire-and-forget)
+      checkForUpdates(account.config.apiUrl, log).catch(() => {});
 
       ctx.setStatus({
         accountId: account.accountId,
