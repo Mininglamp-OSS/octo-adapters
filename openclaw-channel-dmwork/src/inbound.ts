@@ -157,11 +157,11 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string): Resolv
   const makeFullUrl = (relUrl?: string) => {
     if (!relUrl) return undefined;
     if (relUrl.startsWith("http")) return relUrl;
-    // Build public file URL: strip /api suffix from apiUrl, strip "preview/" from path
-    // e.g. "file/preview/chat/xxx/img.jpg" → "https://host/file/chat/xxx/img.jpg"
-    const baseUrl = apiUrl?.replace(/\/+$/, "").replace(/\/api$/i, "") ?? "";
-    const cleanPath = relUrl.replace(/^file\/preview\//, "file/");
-    return `${baseUrl}/${cleanPath}`;
+    // Use bot file proxy endpoint which handles auth via Bearer token
+    // and returns 302 redirect to presigned URL (works with both MinIO and COS).
+    // /v1/botfile/*path auto-strips "file/" prefix from the storage path.
+    const baseUrl = apiUrl?.replace(/\/+$/, "") ?? "";
+    return `${baseUrl}/v1/botfile/${relUrl}`;
   };
 
   switch (payload.type) {
@@ -222,17 +222,22 @@ const TEXT_FILE_EXTENSIONS = new Set([
 async function fetchAsDataUrl(
   url: string,
   botToken: string,
+  log?: { warn?: (msg: string) => void },
 ): Promise<string | null> {
   try {
     const resp = await fetch(url, {
       headers: { Authorization: `Bearer ${botToken}` },
       signal: AbortSignal.timeout(30_000),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      log?.warn?.(`dmwork: fetchAsDataUrl failed: status=${resp.status} url=${url}`);
+      return null;
+    }
     const contentType = resp.headers.get("content-type") || "application/octet-stream";
     const buffer = Buffer.from(await resp.arrayBuffer());
     return `data:${contentType};base64,${buffer.toString("base64")}`;
-  } catch {
+  } catch (err) {
+    log?.warn?.(`dmwork: fetchAsDataUrl error: ${String(err)} url=${url}`);
     return null;
   }
 }
@@ -444,7 +449,7 @@ export async function handleInboundMessage(params: {
 
   // Convert authenticated media URLs to base64 data URLs so the Agent can access them
   if (inboundMediaUrl && !inboundMediaUrl.startsWith("data:")) {
-    const dataUrl = await fetchAsDataUrl(inboundMediaUrl, account.config.botToken ?? "");
+    const dataUrl = await fetchAsDataUrl(inboundMediaUrl, account.config.botToken ?? "", log);
     if (dataUrl) {
       log?.info?.(`dmwork: converted media URL to base64 data URL (${resolved.mediaType})`);
       inboundMediaUrl = dataUrl;
@@ -476,6 +481,7 @@ export async function handleInboundMessage(params: {
   // --- Mention gating for group messages ---
   const requireMention = account.config.requireMention !== false;
   let historyPrefix = "";
+  let historyMediaUrls: string[] = [];
   
   // Save original mention uids for reply (exclude bot itself)
   const originalMentionUids: string[] = (message.payload?.mention?.uids ?? []).filter((uid: string) => uid !== botUid);
@@ -535,6 +541,7 @@ export async function handleInboundMessage(params: {
       entries.push({
         sender: message.from_uid,
         body: rawBody,
+        mediaDataUrl: inboundMediaUrl?.startsWith("data:") ? inboundMediaUrl : undefined,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
       });
       const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
@@ -588,10 +595,16 @@ export async function handleInboundMessage(params: {
     }
 
     // Build history context manually (JSON format)
+    // Collect media data URLs from history entries for attachment to the inbound context
+    historyMediaUrls = entries
+      .map((e: any) => e.mediaDataUrl)
+      .filter((url: string | undefined): url is string => Boolean(url));
+
     if (entries.length > 0) {
       const messagesJson = JSON.stringify(entries.map((e: any) => ({
         sender: e.sender,
         body: e.body,
+        ...(e.mediaDataUrl ? { hasMedia: true } : {}),
       })), null, 2);
       const template = account.config.historyPromptTemplate || DEFAULT_HISTORY_PROMPT_TEMPLATE;
       historyPrefix = template
@@ -666,7 +679,10 @@ export async function handleInboundMessage(params: {
     RawBody: rawBody,
     CommandBody: rawBody,
     MediaUrl: inboundMediaUrl,
-    MediaUrls: inboundMediaUrl ? [inboundMediaUrl] : undefined,
+    MediaUrls: (() => {
+      const urls = [...(inboundMediaUrl ? [inboundMediaUrl] : []), ...historyMediaUrls];
+      return urls.length > 0 ? urls : undefined;
+    })(),
     MediaTypes: resolved.mediaType ? [resolved.mediaType] : undefined,
     From: `dmwork:${message.from_uid}`,
     To: `dmwork:${sessionId}`,
