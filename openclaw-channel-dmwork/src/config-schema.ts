@@ -6,6 +6,7 @@ export interface DmworkAccountConfig {
   botToken?: string;
   apiUrl?: string;
   wsUrl?: string;
+  cdnUrl?: string;  // CDN base URL for media files (e.g. https://cdn.example.com/bucket)
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
   requireMention?: boolean;
@@ -20,6 +21,7 @@ export interface DmworkConfig {
   botToken?: string;
   apiUrl?: string;
   wsUrl?: string;
+  cdnUrl?: string;  // CDN base URL for media files (e.g. https://cdn.example.com/bucket)
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
   requireMention?: boolean;
@@ -43,6 +45,7 @@ export const DmworkConfigJsonSchema = {
       botToken: { type: "string" },
       apiUrl: { type: "string" },
       wsUrl: { type: "string" },
+      cdnUrl: { type: "string" },
       pollIntervalMs: { type: "number", minimum: 500 },
       heartbeatIntervalMs: { type: "number", minimum: 5000 },
       requireMention: { type: "boolean" },
@@ -59,6 +62,7 @@ export const DmworkConfigJsonSchema = {
             botToken: { type: "string" },
             apiUrl: { type: "string" },
             wsUrl: { type: "string" },
+            cdnUrl: { type: "string" },
             pollIntervalMs: { type: "number", minimum: 500 },
             heartbeatIntervalMs: { type: "number", minimum: 5000 },
             requireMention: { type: "boolean" },

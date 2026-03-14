@@ -15,6 +15,7 @@ export type ResolvedDmworkAccount = {
     botToken?: string;
     apiUrl: string;
     wsUrl?: string;
+    cdnUrl?: string;  // CDN base URL for media files (public-read, no auth)
     pollIntervalMs: number;
     heartbeatIntervalMs: number;
     requireMention?: boolean;
@@ -51,6 +52,7 @@ export function resolveDmworkAccount(params: {
   const botToken = accountConfig.botToken ?? channel.botToken;
   const apiUrl = accountConfig.apiUrl ?? channel.apiUrl ?? DEFAULT_API_URL;
   const wsUrl = accountConfig.wsUrl ?? channel.wsUrl;
+  const cdnUrl = accountConfig.cdnUrl ?? channel.cdnUrl;
   const pollIntervalMs =
     accountConfig.pollIntervalMs ??
     channel.pollIntervalMs ??
@@ -72,6 +74,7 @@ export function resolveDmworkAccount(params: {
       botToken,
       apiUrl,
       wsUrl,
+      cdnUrl,
       pollIntervalMs,
       heartbeatIntervalMs,
       requireMention: accountConfig.requireMention ?? channel.requireMention,

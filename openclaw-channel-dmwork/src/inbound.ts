@@ -151,17 +151,28 @@ interface ResolvedContent {
   mediaType?: string;
 }
 
-function resolveContent(payload: BotMessage["payload"], apiUrl?: string, log?: ChannelLogSink): ResolvedContent {
+function resolveContent(payload: BotMessage["payload"], apiUrl?: string, log?: ChannelLogSink, cdnUrl?: string): ResolvedContent {
   if (!payload) return { text: "" };
 
   const makeFullUrl = (relUrl?: string) => {
     if (!relUrl) return undefined;
     if (relUrl.startsWith("http")) return relUrl;
-    // Use bot file proxy endpoint which handles auth via Bearer token
-    // and returns 302 redirect to presigned URL (works with both MinIO and COS).
-    // /v1/botfile/*path auto-strips "file/" prefix from the storage path.
+    // Strip common path prefixes to get the raw storage path
+    let storagePath = relUrl;
+    // Remove "file/preview/" or "file/" prefix
+    if (storagePath.startsWith("file/preview/")) {
+      storagePath = storagePath.substring("file/preview/".length);
+    } else if (storagePath.startsWith("file/")) {
+      storagePath = storagePath.substring("file/".length);
+    }
+    if (cdnUrl) {
+      // CDN direct: public-read, no auth needed, LLM can access directly
+      const base = cdnUrl.replace(/\/+$/, "");
+      return `${base}/${storagePath}`;
+    }
+    // Fallback: Nginx public /file/ path (no auth)
     const baseUrl = apiUrl?.replace(/\/+$/, "") ?? "";
-    return `${baseUrl}/v1/botfile/${relUrl}`;
+    return `${baseUrl}/file/${storagePath}`;
   };
 
   switch (payload.type) {
@@ -436,7 +447,7 @@ export async function handleInboundMessage(params: {
     ? message.channel_id!
     : spaceId ? `${spaceId}:${message.from_uid}` : message.from_uid;
 
-  const resolved = resolveContent(message.payload, account.config.apiUrl, log);
+  const resolved = resolveContent(message.payload, account.config.apiUrl, log, account.config.cdnUrl);
   let rawBody = resolved.text;
   let inboundMediaUrl = resolved.mediaUrl;
   // Inline text file content if possible
@@ -585,7 +596,7 @@ export async function handleInboundMessage(params: {
           // For media message types, resolve the URL directly (storage is public-read)
           const mediaTypes = [MessageType.Image, MessageType.File, MessageType.Voice, MessageType.Video];
           if (mediaTypes.includes(m.type) && !m.content) {
-            const apiResolved = resolveContent({ type: m.type, url: m.url, name: m.name } as any, account.config.apiUrl, log);
+            const apiResolved = resolveContent({ type: m.type, url: m.url, name: m.name } as any, account.config.apiUrl, log, account.config.cdnUrl);
             if (apiResolved.mediaUrl) {
               entry.mediaUrl = apiResolved.mediaUrl;
               entry.body = apiResolved.text;
