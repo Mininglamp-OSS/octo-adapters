@@ -151,7 +151,7 @@ interface ResolvedContent {
   mediaType?: string;
 }
 
-function resolveContent(payload: BotMessage["payload"], apiUrl?: string): ResolvedContent {
+function resolveContent(payload: BotMessage["payload"], apiUrl?: string, log?: ChannelLogSink): ResolvedContent {
   if (!payload) return { text: "" };
 
   const makeFullUrl = (relUrl?: string) => {
@@ -168,6 +168,7 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string): Resolv
     case MessageType.Text:
       return { text: payload.content ?? "" };
     case MessageType.Image: {
+      log?.debug?.(`dmwork: [resolveContent] Image payload.url=${payload.url}`);
       const imgUrl = makeFullUrl(payload.url);
       const imgMime = guessMime(payload.url, "image/jpeg");
       return { text: `[图片]\n${imgUrl ?? ""}`.trim(), mediaUrl: imgUrl, mediaType: imgMime };
@@ -187,6 +188,7 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string): Resolv
       return { text: `[视频]\n${videoUrl ?? ""}`.trim(), mediaUrl: videoUrl, mediaType: videoMime };
     }
     case MessageType.File: {
+      log?.debug?.(`dmwork: [resolveContent] File payload.url=${payload.url}`);
       const fileUrl = makeFullUrl(payload.url);
       const fileMime = guessMime(payload.url, payload.name ? guessMime(payload.name, "application/octet-stream") : "application/octet-stream");
       return { text: `[文件: ${payload.name ?? "未知文件"}]\n${fileUrl ?? ""}`.trim(), mediaUrl: fileUrl, mediaType: fileMime };
@@ -434,7 +436,7 @@ export async function handleInboundMessage(params: {
     ? message.channel_id!
     : spaceId ? `${spaceId}:${message.from_uid}` : message.from_uid;
 
-  const resolved = resolveContent(message.payload, account.config.apiUrl);
+  const resolved = resolveContent(message.payload, account.config.apiUrl, log);
   let rawBody = resolved.text;
   let inboundMediaUrl = resolved.mediaUrl;
   // Inline text file content if possible
@@ -447,16 +449,7 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // Convert authenticated media URLs to base64 data URLs so the Agent can access them
-  if (inboundMediaUrl && !inboundMediaUrl.startsWith("data:")) {
-    const dataUrl = await fetchAsDataUrl(inboundMediaUrl, account.config.botToken ?? "", log);
-    if (dataUrl) {
-      log?.info?.(`dmwork: converted media URL to base64 data URL (${resolved.mediaType})`);
-      inboundMediaUrl = dataUrl;
-    } else {
-      log?.warn?.(`dmwork: failed to convert media URL to base64, keeping original`);
-    }
-  }
+  // Media URLs are passed directly to the Agent (storage is public-read, no auth needed)
 
   if (!rawBody) {
     log?.info?.(
@@ -541,7 +534,7 @@ export async function handleInboundMessage(params: {
       entries.push({
         sender: message.from_uid,
         body: rawBody,
-        mediaDataUrl: inboundMediaUrl?.startsWith("data:") ? inboundMediaUrl : undefined,
+        mediaUrl: inboundMediaUrl,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
       });
       const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
@@ -580,14 +573,26 @@ export async function handleInboundMessage(params: {
           limit: fetchLimit,
           log,
         });
-        entries = apiMessages
+        const filteredApiMsgs = apiMessages
           .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
-          .slice(-historyLimit)
-          .map((m: any) => ({
+          .slice(-historyLimit);
+        entries = filteredApiMsgs.map((m: any) => {
+          const entry: any = {
             sender: m.from_uid,
             body: m.content || resolveApiMessagePlaceholder(m.type, m.name),
-            timestamp: m.timestamp,  // Already in ms from getChannelMessages
-          }));
+            timestamp: m.timestamp,
+          };
+          // For media message types, resolve the URL directly (storage is public-read)
+          const mediaTypes = [MessageType.Image, MessageType.File, MessageType.Voice, MessageType.Video];
+          if (mediaTypes.includes(m.type) && !m.content) {
+            const apiResolved = resolveContent({ type: m.type, url: m.url, name: m.name } as any, account.config.apiUrl, log);
+            if (apiResolved.mediaUrl) {
+              entry.mediaUrl = apiResolved.mediaUrl;
+              entry.body = apiResolved.text;
+            }
+          }
+          return entry;
+        });
         log?.info?.(`dmwork: [MENTION] 从API获取到 ${entries.length} 条历史消息`);
       } catch (err) {
         log?.error?.(`dmwork: [MENTION] 从API获取历史失败: ${err}`);
@@ -595,16 +600,16 @@ export async function handleInboundMessage(params: {
     }
 
     // Build history context manually (JSON format)
-    // Collect media data URLs from history entries for attachment to the inbound context
+    // Collect media URLs from history entries for attachment to the inbound context
     historyMediaUrls = entries
-      .map((e: any) => e.mediaDataUrl)
+      .map((e: any) => e.mediaUrl)
       .filter((url: string | undefined): url is string => Boolean(url));
 
     if (entries.length > 0) {
       const messagesJson = JSON.stringify(entries.map((e: any) => ({
         sender: e.sender,
         body: e.body,
-        ...(e.mediaDataUrl ? { hasMedia: true } : {}),
+        ...(e.mediaUrl ? { hasMedia: true } : {}),
       })), null, 2);
       const template = account.config.historyPromptTemplate || DEFAULT_HISTORY_PROMPT_TEMPLATE;
       historyPrefix = template
