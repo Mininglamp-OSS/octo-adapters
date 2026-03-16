@@ -1,0 +1,16 @@
+# Go
+*.go text eol=lf diff=golang
+
+# TypeScript / JavaScript
+*.ts text eol=lf
+*.js text eol=lf
+
+# Markdown
+*.md text eol=lf
+
+# Binary
+*.png binary
+*.jpg binary
+
+# Generated
+go.sum linguist-generated
