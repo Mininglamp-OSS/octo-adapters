@@ -105,6 +105,7 @@ export enum MessageType {
   Location = 6,
   Card = 7,
   File = 8,
+  MultipleForward = 11,
 }
 
 /** Plugin config */

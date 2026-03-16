@@ -384,7 +384,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           // mention gating in inbound.ts ensures only @-targeted messages trigger AI.
           if (_knownBotUids.has(msg.from_uid) && msg.channel_type === ChannelType.DM) return;
           // Skip unsupported message types (Location, Card)
-          const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File];
+          const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File, MessageType.MultipleForward];
           if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;
 
           // Defense-in-depth DM filter (kept for safety, though v0.2.28+ uses independent
@@ -429,6 +429,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           statusSink({ lastError: null });
           startHeartbeat();
           // WS connected successfully = WuKongIM accepted the token
+          // Reset refresh flag so we can refresh again if kicked later (#92)
+          hasRefreshedToken = false;
         },
 
         onDisconnected: () => {

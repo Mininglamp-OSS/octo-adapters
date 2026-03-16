@@ -271,6 +271,7 @@ export async function getChannelMessages(params: {
         url: payload.url ?? undefined,
         name: payload.name ?? undefined,
         content: payload.content ?? "",
+        payload,  // preserve full payload for types that need nested data (e.g. MultipleForward)
         // Convert seconds to milliseconds (API returns seconds, internal standard is ms)
         timestamp: (m.timestamp ?? Math.floor(Date.now() / 1000)) * 1000,
       };
