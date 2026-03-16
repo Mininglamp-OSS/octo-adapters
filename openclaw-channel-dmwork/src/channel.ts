@@ -11,14 +11,14 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { parseMentions } from "./mention-utils.js";
 import path from "path";
 import os from "os";
-import { mkdir, writeFile } from "fs/promises";
+import { mkdir, readFile, writeFile } from "fs/promises";
 // HistoryEntry type - compatible with any version
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
@@ -244,6 +244,85 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       return { channel: "dmwork", to: ctx.to, messageId: "" };
     },
+    sendMedia: async (ctx) => {
+      const account = resolveDmworkAccount({
+        cfg: ctx.cfg as OpenClawConfig,
+        accountId: ctx.accountId ?? DEFAULT_ACCOUNT_ID,
+      });
+      if (!account.config.botToken) {
+        throw new Error("DMWork botToken is not configured");
+      }
+
+      const mediaUrl = ctx.mediaUrl;
+      if (!mediaUrl) {
+        throw new Error("sendMedia called without mediaUrl");
+      }
+
+      // 1. Download the file
+      let fileBuffer: Buffer;
+      let contentType: string | undefined;
+      let filename: string;
+
+      if (mediaUrl.startsWith("file://")) {
+        const filePath = decodeURIComponent(mediaUrl.slice(7));
+        fileBuffer = await readFile(filePath);
+        filename = path.basename(filePath);
+        contentType = inferContentType(filename);
+      } else {
+        const resp = await fetch(mediaUrl, { signal: AbortSignal.timeout(60_000) });
+        if (!resp.ok) {
+          throw new Error(`Failed to download media from ${mediaUrl}: ${resp.status}`);
+        }
+        fileBuffer = Buffer.from(await resp.arrayBuffer());
+        contentType = resp.headers.get("content-type") ?? undefined;
+        // Extract filename from URL path
+        const urlPath = new URL(mediaUrl).pathname;
+        filename = path.basename(urlPath) || "file";
+        if (!contentType) {
+          contentType = inferContentType(filename);
+        }
+      }
+
+      contentType = contentType || "application/octet-stream";
+
+      // 2. Upload to backend
+      const { url: cdnUrl } = await uploadFile({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken,
+        fileBuffer,
+        filename,
+        contentType,
+      });
+
+      // 3. Parse target (same logic as sendText)
+      let channelId = ctx.to;
+      let channelType = ChannelType.DM;
+
+      if (ctx.to.startsWith("group:")) {
+        const groupPart = ctx.to.slice(6);
+        const atIdx = groupPart.indexOf("@");
+        channelId = atIdx >= 0 ? groupPart.slice(0, atIdx) : groupPart;
+        channelType = ChannelType.Group;
+      }
+
+      // 4. Determine message type and send
+      const msgType = contentType.startsWith("image/")
+        ? MessageType.Image
+        : MessageType.File;
+
+      await sendMediaMessage({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken,
+        channelId,
+        channelType,
+        type: msgType,
+        url: cdnUrl,
+        name: filename,
+        size: fileBuffer.length,
+      });
+
+      return { channel: "dmwork", to: ctx.to, messageId: "" };
+    },
   },
   status: {
     defaultRuntime: {
@@ -380,9 +459,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           // Skip self messages
           if (msg.from_uid === credentials.robot_id) return;
           // Skip messages from any other bot in this plugin instance (prevent bot-to-bot loops)
-          // But allow group messages through — bot-to-bot @mention in groups is legitimate;
-          // mention gating in inbound.ts ensures only @-targeted messages trigger AI.
-          if (_knownBotUids.has(msg.from_uid) && msg.channel_type === ChannelType.DM) return;
+          if (_knownBotUids.has(msg.from_uid)) return;
           // Skip unsupported message types (Location, Card)
           const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File, MessageType.MultipleForward];
           if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;

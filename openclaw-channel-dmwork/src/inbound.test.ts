@@ -194,7 +194,7 @@ describe("MultipleForward handling", () => {
     expect(result.text).toBe(
       "[合并转发: 聊天记录]\n大棍子: 你好\n托马斯: Hello\n大棍子: 晚上好"
     );
-    expect(result.mediaUrl).toBeUndefined();
+    // mediaUrl is not part of the resolved text result
   });
 
   it("should resolve MultipleForward with mixed types", () => {

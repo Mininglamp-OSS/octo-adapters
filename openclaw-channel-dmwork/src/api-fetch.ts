@@ -4,6 +4,7 @@
  */
 
 import { ChannelType, MessageType } from "./types.js";
+import path from "path";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -41,6 +42,94 @@ export async function postJson<T>(
   } catch {
     throw new Error(`DMWork API ${path} returned invalid JSON: ${text.slice(0, 200)}`);
   }
+}
+
+/**
+ * Upload a file to DMWork backend via multipart/form-data.
+ * Returns the CDN URL of the uploaded file.
+ */
+export async function uploadFile(params: {
+  apiUrl: string;
+  botToken: string;
+  fileBuffer: Buffer;
+  filename: string;
+  contentType: string;
+  signal?: AbortSignal;
+}): Promise<{ url: string }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/upload`;
+  const formData = new FormData();
+  const blob = new Blob([new Uint8Array(params.fileBuffer)], { type: params.contentType });
+  formData.append("file", blob, params.filename);
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    body: formData,
+    signal: params.signal,
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`DMWork API /v1/bot/upload failed (${response.status}): ${text || response.statusText}`);
+  }
+
+  const data = await response.json() as { url?: string };
+  if (!data.url) {
+    throw new Error("DMWork API /v1/bot/upload returned no url");
+  }
+  return { url: data.url };
+}
+
+/**
+ * Send a media message (image or file) to a channel.
+ */
+export async function sendMediaMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+  type: MessageType;
+  url: string;
+  name?: string;
+  size?: number;
+  mentionUids?: string[];
+  signal?: AbortSignal;
+}): Promise<void> {
+  const payload: Record<string, unknown> = {
+    type: params.type,
+    url: params.url,
+  };
+  if (params.name) payload.name = params.name;
+  if (params.size != null) payload.size = params.size;
+  if (params.mentionUids && params.mentionUids.length > 0) {
+    payload.mention = { uids: params.mentionUids };
+  }
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    payload,
+  }, params.signal);
+}
+
+/**
+ * Infer MIME type from filename extension. Returns a sensible default if unknown.
+ */
+export function inferContentType(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
+    ".bmp": "image/bmp", ".ico": "image/x-icon",
+    ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".pdf": "application/pdf", ".zip": "application/zip",
+    ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".txt": "text/plain", ".json": "application/json",
+  };
+  return map[ext] ?? "application/octet-stream";
 }
 
 export async function sendMessage(params: {
