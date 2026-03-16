@@ -1,17 +1,18 @@
-## What
-<!-- Brief description of what this PR does -->
+## 改动描述
 
-## Why
-<!-- Why is this change needed? Related issue: Closes #xx -->
+<!-- 简要说明本次改动的内容和目的 -->
 
-## How
-<!-- Technical approach (if not obvious from the diff) -->
+## 改动类型
 
-## Testing
-- [ ] Local build passes (`npm run build`)
-- [ ] Type check passes (`npm run type-check`)
-- [ ] No security risks
-- [ ] Verified with local OpenClaw instance (if applicable)
+- [ ] feat: 新功能
+- [ ] fix: Bug 修复
+- [ ] docs: 文档更新
+- [ ] chore: 构建/工具/依赖等维护
 
-## AI Assistance (if applicable)
-<!-- What AI tools were used? Testing level? Do you understand the code? -->
+## 测试说明
+
+<!-- 说明如何测试本次改动，或标注"无需测试" -->
+
+## 影响范围
+
+<!-- 本次改动影响的模块、服务或接口 -->
