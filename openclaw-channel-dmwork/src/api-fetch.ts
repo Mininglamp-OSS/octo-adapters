@@ -56,7 +56,7 @@ export async function uploadFile(params: {
   contentType: string;
   signal?: AbortSignal;
 }): Promise<{ url: string }> {
-  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/upload`;
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/file/upload`;
   const formData = new FormData();
   const blob = new Blob([new Uint8Array(params.fileBuffer)], { type: params.contentType });
   formData.append("file", blob, params.filename);

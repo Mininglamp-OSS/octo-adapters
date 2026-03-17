@@ -263,7 +263,28 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       let contentType: string | undefined;
       let filename: string;
 
-      if (mediaUrl.startsWith("file://")) {
+      if (mediaUrl.startsWith("data:")) {
+        // Parse data URI: data:[<mediatype>][;base64],<data>
+        const match = mediaUrl.match(/^data:([^;,]+)?(?:;base64)?,(.*)$/);
+        if (!match) {
+          throw new Error("Invalid data URI format");
+        }
+        contentType = match[1] || "application/octet-stream";
+        fileBuffer = Buffer.from(match[2], "base64");
+        // Generate a reasonable filename from MIME type
+        const extMap: Record<string, string> = {
+          "text/markdown": ".md", "text/plain": ".txt", "application/pdf": ".pdf",
+          "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp",
+          "application/json": ".json", "application/zip": ".zip",
+          "audio/mpeg": ".mp3", "video/mp4": ".mp4",
+        };
+        const ext = extMap[contentType] || ".bin";
+        filename = `file${ext}`;
+        // If OpenClaw provides a filename hint via ctx, prefer it
+        if ((ctx as Record<string, unknown>).filename) {
+          filename = String((ctx as Record<string, unknown>).filename);
+        }
+      } else if (mediaUrl.startsWith("file://")) {
         const filePath = decodeURIComponent(mediaUrl.slice(7));
         fileBuffer = await readFile(filePath);
         filename = path.basename(filePath);
