@@ -1,0 +1,13 @@
+{
+  "botToken": "your_bot_token_from_botfather",
+  "apiUrl": "https://your-dmwork-server.com/api",
+  "cwd": "/path/to/your/working/directory",
+  "sdk": {
+    "settingSources": ["user", "project"],
+    "allowedTools": [
+      "Read", "Write", "Edit", "Glob", "Grep",
+      "Skill", "WebFetch", "WebSearch"
+    ],
+    "permissionMode": "bypassPermissions"
+  }
+}
