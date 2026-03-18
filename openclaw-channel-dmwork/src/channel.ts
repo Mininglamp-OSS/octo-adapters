@@ -480,7 +480,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           // Skip self messages
           if (msg.from_uid === credentials.robot_id) return;
           // Skip messages from any other bot in this plugin instance (prevent bot-to-bot loops)
-          if (_knownBotUids.has(msg.from_uid)) return;
+          // But allow group messages through — bot-to-bot @mention in groups is legitimate;
+          // mention gating in inbound.ts ensures only @-targeted messages trigger AI.
+          if (_knownBotUids.has(msg.from_uid) && msg.channel_type === ChannelType.DM) return;
           // Skip unsupported message types (Location, Card)
           const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File, MessageType.MultipleForward];
           if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;
