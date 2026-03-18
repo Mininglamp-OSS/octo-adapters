@@ -1,6 +1,6 @@
 # openclaw-channel-dmwork
 
-DMWork channel plugin for OpenClaw. Connects via WuKongIM WebSocket for real-time messaging.
+DMWork channel plugin for OpenClaw. Connects via DMWORK WebSocket for real-time messaging.
 
 Repository: https://github.com/Mininglamp-OSS/octo-adapters
 
@@ -34,7 +34,7 @@ Configuration fields:
 
 - `botToken` (required): Bot token from BotFather (`bf_` prefix)
 - `apiUrl` (required): DMWork server API URL, e.g. `http://192.168.1.100:8090`
-- `wsUrl` (optional): WuKongIM WebSocket URL. Auto-detected from register if omitted.
+- `wsUrl` (optional): DMWORK WebSocket URL. Auto-detected from register if omitted.
 
 ## Run
 
@@ -47,7 +47,7 @@ The plugin is loaded automatically by OpenClaw when the gateway starts.
 ## What it does
 
 1. Registers the bot with the DMWork server via REST API
-2. Connects to WuKongIM WebSocket for real-time message receiving
+2. Connects to DMWORK WebSocket for real-time message receiving
 3. Auto-reconnects on disconnection
 4. Sends a greeting to the bot owner on connect
 5. Dispatches incoming messages to OpenClaw's message handler

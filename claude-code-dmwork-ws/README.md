@@ -1,14 +1,14 @@
 # claude-code-dmwork (WebSocket Gateway)
 
-A WebSocket-based gateway that connects [Claude Agent SDK](https://github.com/anthropics/claude-code) to DMWork messaging via the [WuKongIM](https://github.com/WuKongIM/WuKongIM) protocol.
+A WebSocket-based gateway that connects [Claude Agent SDK](https://github.com/anthropics/claude-code) to DMWork messaging via the DMWORK protocol.
 
 ## How It Works
 
 ```
-DMWork Users ←→ WuKongIM WebSocket ←→ Gateway ←→ Claude Agent SDK
+DMWork Users ←→ DMWORK WebSocket ←→ Gateway ←→ Claude Agent SDK
 ```
 
-The gateway maintains a persistent WebSocket connection to WuKongIM, receives messages in real-time, routes them to Claude Code for processing, and sends replies back via the DMWork Bot REST API.
+The gateway maintains a persistent WebSocket connection to DMWORK, receives messages in real-time, routes them to Claude Code for processing, and sends replies back via the DMWork Bot REST API.
 
 ### vs. claude-code-dmwork (Polling)
 
@@ -16,7 +16,7 @@ The existing `claude-code-dmwork` adapter in this repo uses a bash polling scrip
 
 | | Polling Adapter | WebSocket Gateway |
 |---|---|---|
-| Protocol | REST polling | WuKongIM binary WebSocket |
+| Protocol | REST polling | DMWORK binary WebSocket |
 | Latency | Poll interval (seconds) | Real-time (< 100ms) |
 | Session | Stateless | Persistent with history |
 | Group chat | Not supported | Full support (context + @mention) |
@@ -96,7 +96,7 @@ src/
 ├── session-store.ts      # Conversation history persistence
 ├── group-context.ts      # Group chat context cache + member resolution
 └── dmwork/
-    ├── socket.ts          # WuKongIM binary protocol (DH, AES, heartbeat)
+    ├── socket.ts          # DMWORK binary protocol (DH, AES, heartbeat)
     ├── api.ts             # DMWork Bot REST API client
     ├── types.ts           # Type definitions
     └── mentions.ts        # @mention parsing
