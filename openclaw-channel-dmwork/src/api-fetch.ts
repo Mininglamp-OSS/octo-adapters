@@ -94,6 +94,8 @@ export async function sendMediaMessage(params: {
   url: string;
   name?: string;
   size?: number;
+  width?: number;
+  height?: number;
   mentionUids?: string[];
   signal?: AbortSignal;
 }): Promise<void> {
@@ -101,8 +103,16 @@ export async function sendMediaMessage(params: {
     type: params.type,
     url: params.url,
   };
-  if (params.name) payload.name = params.name;
-  if (params.size != null) payload.size = params.size;
+
+  // Image (type=2) needs width/height; File (type=8) needs name/size
+  if (params.type === MessageType.Image) {
+    if (params.width) payload.width = params.width;
+    if (params.height) payload.height = params.height;
+  } else {
+    if (params.name) payload.name = params.name;
+    if (params.size != null) payload.size = params.size;
+  }
+
   if (params.mentionUids && params.mentionUids.length > 0) {
     payload.mention = { uids: params.mentionUids };
   }
@@ -255,7 +265,8 @@ export async function fetchBotGroups(params: {
     params.log?.error?.(`dmwork: fetchBotGroups failed: ${resp.status}`);
     return [];
   }
-  return await resp.json();
+  const data = await resp.json();
+  return Array.isArray(data) ? data : [];
 }
 
 /**
@@ -299,6 +310,82 @@ export async function getGroupMembers(params: {
     params.log?.error?.(`dmwork: getGroupMembers error: ${err}`);
     return [];
   }
+}
+
+/**
+ * 获取群信息
+ */
+export async function getGroupInfo(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ group_no: string; name: string; [key: string]: unknown }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${params.botToken}`,
+      },
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+    });
+    if (!resp.ok) {
+      params.log?.error?.(`dmwork: getGroupInfo failed: ${resp.status}`);
+      throw new Error(`getGroupInfo failed: ${resp.status}`);
+    }
+    return await resp.json();
+  } catch (err) {
+    params.log?.error?.(`dmwork: getGroupInfo error: ${err}`);
+    throw err;
+  }
+}
+
+// Fetch GROUP.md content for a group
+export async function getGroupMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ content: string; version: number; updated_at: string | null; updated_by: string }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/md`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`getGroupMd failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return await resp.json();
+}
+
+// Update GROUP.md content for a group (requires bot_admin permission)
+export async function updateGroupMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  content: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ version: number }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/md`;
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      ...DEFAULT_HEADERS,
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    body: JSON.stringify({ content: params.content }),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`updateGroupMd failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return await resp.json();
 }
 
 /**

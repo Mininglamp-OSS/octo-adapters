@@ -1,11 +1,12 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, postJson } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, uploadFile, sendMediaMessage, inferContentType } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import { extractMentionMatches } from "./mention-utils.js";
+import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate } from "./group-md.js";
 
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
@@ -55,6 +56,43 @@ function resolveOutboundMediaUrls(payload: { mediaUrl?: string; mediaUrls?: stri
 }
 
 /** Extract filename from a URL path */
+/**
+ * Parse image dimensions from buffer (PNG/JPEG/GIF/WebP).
+ * Lightweight — reads only the header bytes, no external dependencies.
+ */
+function parseImageDimensions(buf: Buffer, mime: string): { width: number; height: number } | null {
+  try {
+    if (mime === "image/png" && buf.length > 24) {
+      // PNG: width at offset 16 (4 bytes BE), height at offset 20 (4 bytes BE)
+      return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+    }
+    if ((mime === "image/jpeg" || mime === "image/jpg") && buf.length > 2) {
+      // JPEG: scan for SOF0/SOF2 marker (0xFF 0xC0 or 0xFF 0xC2)
+      let offset = 2;
+      while (offset < buf.length - 8) {
+        if (buf[offset] !== 0xFF) break;
+        const marker = buf[offset + 1];
+        if (marker === 0xC0 || marker === 0xC2) {
+          return { width: buf.readUInt16BE(offset + 7), height: buf.readUInt16BE(offset + 5) };
+        }
+        const len = buf.readUInt16BE(offset + 2);
+        offset += 2 + len;
+      }
+    }
+    if (mime === "image/gif" && buf.length > 10) {
+      // GIF: width at offset 6 (2 bytes LE), height at offset 8 (2 bytes LE)
+      return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) };
+    }
+    if (mime === "image/webp" && buf.length > 30) {
+      // WebP VP8: width at offset 26, height at offset 28 (both 2 bytes LE)
+      if (buf.toString("ascii", 12, 16) === "VP8 " && buf.length > 29) {
+        return { width: buf.readUInt16LE(26) & 0x3FFF, height: buf.readUInt16LE(28) & 0x3FFF };
+      }
+    }
+  } catch { /* ignore parse errors */ }
+  return null;
+}
+
 function extractFilename(url: string): string {
   try {
     const pathname = new URL(url).pathname;
@@ -66,7 +104,7 @@ function extractFilename(url: string): string {
 }
 
 /** Upload media to MinIO and send as image/file message */
-async function uploadAndSendMedia(params: {
+export async function uploadAndSendMedia(params: {
   mediaUrl: string;
   apiUrl: string;
   botToken: string;
@@ -76,53 +114,62 @@ async function uploadAndSendMedia(params: {
 }): Promise<void> {
   const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
 
-  // Fetch the media content
-  const resp = await fetch(mediaUrl);
-  if (!resp.ok) throw new Error(`Failed to fetch media: ${resp.status}`);
-  const buffer = Buffer.from(await resp.arrayBuffer());
-  const contentType = resp.headers.get("content-type") || "application/octet-stream";
-  const filename = extractFilename(mediaUrl);
+  // Handle local file path or remote URL
+  let buffer: Buffer;
+  let contentType: string;
+  let filename: string;
 
-  // Upload to MinIO via multipart
-  const boundary = `----FormBoundary${Date.now()}`;
-  const bodyParts: Buffer[] = [];
-  const header = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`;
-  const footer = `\r\n--${boundary}--\r\n`;
-  bodyParts.push(Buffer.from(header, "utf-8"));
-  bodyParts.push(buffer);
-  bodyParts.push(Buffer.from(footer, "utf-8"));
-  const body = Buffer.concat(bodyParts);
-
-  const uploadUrl = `${apiUrl.replace(/\/+$/, "")}/v1/bot/upload?type=chat`;
-  const uploadResp = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${botToken}`,
-      "Content-Type": `multipart/form-data; boundary=${boundary}`,
-    },
-    body,
-  });
-  if (!uploadResp.ok) {
-    const text = await uploadResp.text().catch(() => "");
-    throw new Error(`Upload failed (${uploadResp.status}): ${text}`);
+  if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
+    const resp = await fetch(mediaUrl);
+    if (!resp.ok) throw new Error(`Failed to fetch media: ${resp.status}`);
+    buffer = Buffer.from(await resp.arrayBuffer());
+    contentType = resp.headers.get("content-type") || "application/octet-stream";
+    filename = extractFilename(mediaUrl);
+  } else {
+    // Local file path
+    const { readFileSync } = await import("node:fs");
+    const { basename } = await import("node:path");
+    buffer = readFileSync(mediaUrl);
+    filename = basename(mediaUrl);
+    contentType = inferContentType(filename);
   }
-  const uploadResult = await uploadResp.json() as { path?: string; url?: string };
-  const fileUrl = uploadResult.path ?? uploadResult.url ?? "";
+
+  // Upload via /v1/bot/file/upload
+  const uploaded = await uploadFile({
+    apiUrl,
+    botToken,
+    fileBuffer: buffer,
+    filename,
+    contentType,
+  });
 
   // Determine message type from MIME
-  const msgType = contentType.startsWith("image/") ? MessageType.Image : MessageType.File;
+  const isImage = contentType.startsWith("image/");
+  const msgType = isImage ? MessageType.Image : MessageType.File;
 
-  log?.info?.(`dmwork: uploaded media as ${msgType === MessageType.Image ? "image" : "file"}: ${filename}`);
+  // For images, try to read dimensions from the buffer
+  let width: number | undefined;
+  let height: number | undefined;
+  if (isImage) {
+    const dims = parseImageDimensions(buffer, contentType);
+    width = dims?.width;
+    height = dims?.height;
+  }
 
-  // Send via sendMessage payload
-  await postJson(apiUrl, botToken, "/v1/bot/sendMessage", {
-    channel_id: channelId,
-    channel_type: channelType,
-    payload: {
-      type: msgType,
-      url: fileUrl,
-      name: filename,
-    },
+  log?.info?.(`dmwork: uploaded media as ${isImage ? "image" : "file"}: ${filename}${width ? ` (${width}x${height})` : ""}`);
+
+  // Send via sendMessage
+  await sendMediaMessage({
+    apiUrl,
+    botToken,
+    channelId,
+    channelType,
+    type: msgType,
+    url: uploaded.url,
+    name: isImage ? undefined : filename,
+    size: isImage ? undefined : buffer.length,
+    width,
+    height,
   });
 }
 
@@ -473,17 +520,87 @@ export async function handleInboundMessage(params: {
   memberMap: Map<string, string>;  // displayName -> uid mapping
   uidToNameMap: Map<string, string>;  // uid -> displayName mapping (reverse)
   groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
+  groupMdCache?: Map<string, { content: string; version: number }>;
   log?: ChannelLogSink;
   statusSink?: DmworkStatusSink;
 }) {
-  const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, log, statusSink } = params;
+  const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
 
   await ensureSdkLoaded();
+
+  // Detect GROUP.md update/delete notification — refresh both memory + disk cache, do NOT pass to LLM
+  const earlyEventType = (message.payload as any)?.event?.type;
+  if ((earlyEventType === "group_md_updated" || earlyEventType === "group_md_deleted") && message.channel_id) {
+    log?.info?.(`dmwork: GROUP.md ${earlyEventType} notification for group ${message.channel_id}`);
+
+    // Update memory cache
+    if (earlyEventType === "group_md_updated" && groupMdCache) {
+      try {
+        const md = await getGroupMd({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken ?? "",
+          groupNo: message.channel_id,
+          log,
+        });
+        if (md.content) {
+          groupMdCache.set(message.channel_id, { content: md.content, version: md.version });
+          log?.info?.(`dmwork: GROUP.md memory cache updated for ${message.channel_id} (v${md.version})`);
+        }
+      } catch (err) {
+        log?.error?.(`dmwork: failed to refresh GROUP.md memory cache: ${String(err)}`);
+      }
+    } else if (earlyEventType === "group_md_deleted" && groupMdCache) {
+      groupMdCache.delete(message.channel_id);
+    }
+
+    // Update disk cache (for before_prompt_build hook)
+    // Use broadcastGroupMdUpdate which scans all agent workspaces — avoids needing agentId
+    if (earlyEventType === "group_md_updated" && groupMdCache) {
+      const cached = groupMdCache.get(message.channel_id);
+      if (cached) {
+        broadcastGroupMdUpdate({
+          accountId: account.accountId,
+          groupNo: message.channel_id,
+          content: cached.content,
+          version: cached.version,
+        });
+      }
+    } else if (earlyEventType === "group_md_deleted") {
+      // Delete disk cache for all agents
+      broadcastGroupMdUpdate({
+        accountId: account.accountId,
+        groupNo: message.channel_id,
+        content: "",
+        version: 0,
+      });
+    }
+
+    return;
+  }
 
   const isGroup =
     typeof message.channel_id === "string" &&
     message.channel_id.length > 0 &&
     message.channel_type === ChannelType.Group;
+
+  // --- GROUP.md: register group→account mapping and handle structured events ---
+  if (isGroup && message.channel_id) {
+    // Resolve agentId for the group→account mapping
+    try {
+      const _core = getDmworkRuntime();
+      const _cfg = _core.config.loadConfig() as OpenClawConfig;
+      const _route = _core.channel.routing.resolveAgentRoute({
+        config: _cfg, provider: "dmwork", accountId: account.accountId,
+        channelType: "group", peerId: message.channel_id,
+      });
+      registerGroupAccount(message.channel_id, account.accountId, _route?.agentId);
+    } catch {
+      registerGroupAccount(message.channel_id, account.accountId);
+    }
+
+    // Note: group_md_updated/deleted events are handled by the early handler above (line ~530)
+    // and never reach here because early handler returns.
+  }
 
   // Parse space_id from channel_id (format: s{spaceId}_{peerId})
   // For DM, channel_id is a fake channel: s{spaceId}_{uid1}@s{spaceId}_{uid2}
@@ -736,6 +853,18 @@ export async function handleInboundMessage(params: {
     return;
   }
 
+  // Fire-and-forget: ensure GROUP.md is cached for this group
+  if (isGroup && message.channel_id) {
+    ensureGroupMd({
+      agentId: route.agentId,
+      accountId: account.accountId,
+      groupNo: message.channel_id,
+      apiUrl: account.config.apiUrl,
+      botToken: account.config.botToken ?? "",
+      log,
+    }).catch((err) => log?.warn?.(`dmwork: [GROUP.md] ensureGroupMd failed: ${String(err)}`));
+  }
+
   const fromLabel = isGroup
     ? `group:${message.channel_id}`
     : spaceId ? `space:${spaceId}:user:${message.from_uid}` : `user:${message.from_uid}`;
@@ -761,6 +890,9 @@ export async function handleInboundMessage(params: {
     body: finalBody,
   });
 
+  // Inject GROUP.md as GroupSystemPrompt for group messages
+  const groupSystemPrompt = isGroup && groupMdCache ? groupMdCache.get(message.channel_id!)?.content : undefined;
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
@@ -782,6 +914,7 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
+    GroupSystemPrompt: groupSystemPrompt,
     Provider: "dmwork",
     Surface: "dmwork",
     OriginatingChannel: "dmwork",

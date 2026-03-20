@@ -3,7 +3,7 @@ import {
   type ChannelOutboundContext,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk";
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig, ChannelMessageActionAdapter } from "openclaw/plugin-sdk";
 import { DmworkConfigJsonSchema } from "./config-schema.js";
 import {
   listDmworkAccountIds,
@@ -11,11 +11,14 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { parseMentions } from "./mention-utils.js";
+import { handleDmworkMessageAction } from "./actions.js";
+import { createDmworkManagementTools } from "./agent-tools.js";
+import { getOrCreateGroupMdCache } from "./group-md.js";
 import path from "path";
 import os from "os";
 import { mkdir, readFile, writeFile } from "fs/promises";
@@ -37,7 +40,7 @@ function getOrCreateHistoryMap(accountId: string): Map<string, any[]> {
 // Module-level member mapping: displayName -> uid
 // Used to resolve @mentions in AI replies
 const _memberMaps = new Map<string, Map<string, string>>();
-function getOrCreateMemberMap(accountId: string): Map<string, string> {
+export function getOrCreateMemberMap(accountId: string): Map<string, string> {
   let m = _memberMaps.get(accountId);
   if (!m) {
     m = new Map<string, string>();
@@ -49,7 +52,7 @@ function getOrCreateMemberMap(accountId: string): Map<string, string> {
 // Module-level reverse mapping: uid -> displayName
 // Used to show display names instead of uids in replies
 const _uidToNameMaps = new Map<string, Map<string, string>>();
-function getOrCreateUidToNameMap(accountId: string): Map<string, string> {
+export function getOrCreateUidToNameMap(accountId: string): Map<string, string> {
   let m = _uidToNameMaps.get(accountId);
   if (!m) {
     m = new Map<string, string>();
@@ -69,6 +72,18 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
   return m;
 }
 
+
+// --- Group → Account mapping: tracks which account each group was received from ---
+// Used by handleAction to resolve the correct account when framework passes wrong accountId
+const _groupToAccount = new Map<string, string>(); // groupNo → accountId
+
+export function registerGroupToAccount(groupNo: string, accountId: string): void {
+  _groupToAccount.set(groupNo, accountId);
+}
+
+export function resolveAccountForGroup(groupNo: string): string | undefined {
+  return _groupToAccount.get(groupNo);
+}
 
 // --- Cache cleanup: evict groups inactive for >4 hours ---
 const CACHE_MAX_AGE_MS = 4 * 60 * 60 * 1000;
@@ -164,6 +179,70 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     threads: false,
   },
   reload: { configPrefixes: ["channels.dmwork"] },
+  actions: {
+    listActions: ({ cfg }: { cfg: any }) => {
+      try {
+        const ids = listDmworkAccountIds(cfg);
+        const hasConfigured = ids.some((id) => {
+          const acct = resolveDmworkAccount({ cfg, accountId: id });
+          return acct.enabled && acct.configured && !!acct.config.botToken;
+        });
+        if (!hasConfigured) return [];
+      } catch {
+        return [];
+      }
+      return ["send", "read"] as any; // TODO: remove when SDK types support this
+    },
+    extractToolSend: ({ args }: { args: Record<string, unknown> }) => {
+      const target = args.target as string | undefined;
+      return target ? { target } : {};
+    },
+    handleAction: async (ctx: any) => {
+      // Resolve correct accountId: framework may pass wrong one when agent has multiple accounts.
+      // Use currentChannelId to look up which account actually owns the group.
+      let accountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
+      const currentChannelId = ctx.toolContext?.currentChannelId;
+      if (currentChannelId) {
+        const rawGroupNo = currentChannelId.replace(/^dmwork:/, '');
+        const correctAccountId = resolveAccountForGroup(rawGroupNo);
+        if (correctAccountId && correctAccountId !== accountId) {
+          ctx.log?.info?.(`dmwork: handleAction accountId corrected: ${accountId} → ${correctAccountId} (group=${rawGroupNo})`);
+          accountId = correctAccountId;
+        }
+      }
+      const account = resolveDmworkAccount({
+        cfg: ctx.cfg,
+        accountId,
+      });
+      if (!account.config.botToken) {
+        return { ok: false, error: "DMWork botToken is not configured" };
+      }
+      const memberMap = getOrCreateMemberMap(accountId);
+      const uidToNameMap = getOrCreateUidToNameMap(accountId);
+      const groupMdCache = getOrCreateGroupMdCache(accountId);
+      return handleDmworkMessageAction({
+        action: ctx.action,
+        args: ctx.params ?? {},
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken,
+        memberMap,
+        uidToNameMap,
+        groupMdCache,
+        currentChannelId: ctx.toolContext?.currentChannelId ?? undefined,
+        log: ctx.log,
+      });
+    },
+  } as any, // TODO: remove when SDK types support this
+  agentTools: (params: { cfg?: any }) => createDmworkManagementTools(params),
+  agentPrompt: {
+    messageToolHints: ({ cfg, accountId }: { cfg: any; accountId?: string | null }) => {
+      if (!accountId) return [];
+      return [
+        `When using the dmwork_management tool, pass accountId: "${accountId}".`,
+        `For cross-group messaging with action=send, use target="group:<groupId>". Use dmwork_management tool (list-groups action) to discover available groups first.`,
+      ];
+    },
+  },
   configSchema: DmworkConfigJsonSchema,
   config: {
     listAccountIds: (cfg) => listDmworkAccountIds(cfg),
@@ -414,6 +493,29 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // Check for updates in background (fire-and-forget)
       checkForUpdates(account.config.apiUrl, log).catch(() => {});
 
+      // Prefetch GROUP.md for all groups (fire-and-forget)
+      const groupMdCache = getOrCreateGroupMdCache(account.accountId);
+      (async () => {
+        try {
+          const groups = await fetchBotGroups({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, log });
+          for (const g of groups) {
+            try {
+              const md = await getGroupMd({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
+              if (md.content) {
+                groupMdCache.set(g.group_no, { content: md.content, version: md.version });
+              }
+            } catch {
+              // Ignore per-group failures (group may not have GROUP.md)
+            }
+          }
+          if (groupMdCache.size > 0) {
+            log?.info?.(`dmwork: prefetched GROUP.md for ${groupMdCache.size} groups`);
+          }
+        } catch (err) {
+          log?.error?.(`dmwork: GROUP.md prefetch failed: ${String(err)}`);
+        }
+      })();
+
       ctx.setStatus({
         accountId: account.accountId,
         running: true,
@@ -477,15 +579,20 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         token: credentials.im_token,
 
         onMessage: (msg: BotMessage) => {
-          // Skip self messages
-          if (msg.from_uid === credentials.robot_id) return;
+          // Allow structured event messages (e.g. group_md_updated) even from self/bots
+          const isEvent = !!(msg.payload as any)?.event?.type; // TODO: remove when SDK types support this
+          if (msg.payload?.type === 1 && (msg.payload as any)?.event) { // TODO: remove when SDK types support this
+          }
+          // Skip self messages (but not events — bot needs to know about its own GROUP.md updates)
+          if (msg.from_uid === credentials.robot_id && !isEvent) return;
           // Skip messages from any other bot in this plugin instance (prevent bot-to-bot loops)
           // But allow group messages through — bot-to-bot @mention in groups is legitimate;
           // mention gating in inbound.ts ensures only @-targeted messages trigger AI.
-          if (_knownBotUids.has(msg.from_uid) && msg.channel_type === ChannelType.DM) return;
-          // Skip unsupported message types (Location, Card)
+          // Also allow event messages (e.g. group_md_updated) from any source.
+          if (_knownBotUids.has(msg.from_uid) && msg.channel_type === ChannelType.DM && !isEvent) return;
+          // Skip unsupported message types (Location, Card), but allow event messages through
           const supportedTypes = [MessageType.Text, MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video, MessageType.File, MessageType.MultipleForward];
-          if (!msg.payload || !supportedTypes.includes(msg.payload.type)) return;
+          if (!msg.payload || (!supportedTypes.includes(msg.payload.type) && !isEvent)) return;
 
           // Defense-in-depth DM filter (kept for safety, though v0.2.28+ uses independent
           // WebSocket connections per bot so server-side routing is already correct).
@@ -507,7 +614,12 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           );
 
           // Track cache activity for cleanup
-          if (msg.channel_id) touchCache(account.accountId, msg.channel_id);
+          if (msg.channel_id) {
+            touchCache(account.accountId, msg.channel_id);
+            if (msg.channel_type === ChannelType.Group) {
+              registerGroupToAccount(msg.channel_id, account.accountId);
+            }
+          }
 
           handleInboundMessage({
             account,
@@ -517,6 +629,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             memberMap,
             uidToNameMap,
             groupCacheTimestamps,
+            groupMdCache,
             log,
             statusSink,
           }).catch((err) => {

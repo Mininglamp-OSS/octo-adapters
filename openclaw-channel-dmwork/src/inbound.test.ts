@@ -194,7 +194,6 @@ describe("MultipleForward handling", () => {
     expect(result.text).toBe(
       "[合并转发: 聊天记录]\n大棍子: 你好\n托马斯: Hello\n大棍子: 晚上好"
     );
-    // mediaUrl is not part of the resolved text result
   });
 
   it("should resolve MultipleForward with mixed types", () => {
@@ -286,5 +285,47 @@ describe("MultipleForward handling", () => {
     expect(resolveInnerMessageText({ type: MessageType.MultipleForward })).toBe("[合并转发]");
     expect(resolveInnerMessageText({ type: 99 })).toBe("[消息]");
     expect(resolveInnerMessageText({ type: 99, content: "fallback" })).toBe("fallback");
+  });
+});
+
+/**
+ * Tests for GROUP.md event detection logic.
+ */
+describe("GROUP.md event detection", () => {
+  function isGroupMdEvent(payload: any): boolean {
+    return payload?.event?.type === "group_md_updated";
+  }
+
+  it("should detect group_md_updated event", () => {
+    const payload = {
+      type: 1,
+      content: "GROUP.md updated",
+      event: { type: "group_md_updated", version: 4, updated_by: "user_uid" },
+      mention: { uids: ["bot1", "bot2"] },
+    };
+    expect(isGroupMdEvent(payload)).toBe(true);
+  });
+
+  it("should NOT detect regular text messages as GROUP.md event", () => {
+    const payload = { type: 1, content: "Hello world" };
+    expect(isGroupMdEvent(payload)).toBe(false);
+  });
+
+  it("should NOT detect other event types", () => {
+    const payload = {
+      type: 1,
+      content: "Something happened",
+      event: { type: "member_joined" },
+    };
+    expect(isGroupMdEvent(payload)).toBe(false);
+  });
+
+  it("should NOT detect when event is undefined", () => {
+    const payload = { type: 1, content: "No event" };
+    expect(isGroupMdEvent(payload)).toBe(false);
+  });
+
+  it("should NOT detect when payload is undefined", () => {
+    expect(isGroupMdEvent(undefined)).toBe(false);
   });
 });

@@ -65,6 +65,11 @@ export interface MessagePayload {
   name?: string;
   mention?: MentionPayload;
   reply?: ReplyPayload;
+  event?: {
+    type: string;       // "group_md_updated" | "group_md_deleted"
+    version?: number;
+    updated_by?: string;
+  };
   [key: string]: unknown;
 }
 
