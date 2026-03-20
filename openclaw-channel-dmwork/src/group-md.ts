@@ -372,11 +372,8 @@ export function broadcastGroupMdUpdate(params: {
         .filter(d => d.isDirectory())
         .map(d => d.name);
       for (const agentId of agents) {
-        const existing = readGroupMdFromDisk(agentId, accountId, groupNo);
-        if (existing !== null) {
-          writeGroupMdToDisk({ agentId, accountId, groupNo, content, meta });
-          updatedAgents.push(agentId);
-        }
+        writeGroupMdToDisk({ agentId, accountId, groupNo, content, meta });
+        updatedAgents.push(agentId);
       }
     } catch { /* workspace dir may not exist */ }
   }
