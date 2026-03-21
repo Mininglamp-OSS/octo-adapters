@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, uploadFile, sendMediaMessage, inferContentType, parseImageDimensions } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, uploadFile, sendMediaMessage, inferContentType, parseImageDimensions, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -97,14 +97,26 @@ export async function uploadAndSendMedia(params: {
     contentType = inferContentType(filename);
   }
 
-  // Upload via /v1/bot/file/upload
-  const uploaded = await uploadFile({
-    apiUrl,
-    botToken,
-    fileBuffer: buffer,
-    filename,
-    contentType,
-  });
+  // Upload directly to COS via STS credentials
+  let uploadedUrl: string;
+  try {
+    const creds = await getUploadCredentials({ apiUrl, botToken, filename });
+    const { url: cosUrl } = await uploadFileToCOS({
+      credentials: creds.credentials,
+      startTime: creds.startTime,
+      expiredTime: creds.expiredTime,
+      bucket: creds.bucket,
+      region: creds.region,
+      key: creds.key,
+      fileBuffer: buffer,
+      contentType,
+    });
+    uploadedUrl = cosUrl;
+  } catch {
+    // Fallback to legacy upload endpoint
+    const uploaded = await uploadFile({ apiUrl, botToken, fileBuffer: buffer, filename, contentType });
+    uploadedUrl = uploaded.url;
+  }
 
   // Determine message type from MIME
   const isImage = contentType.startsWith("image/");
@@ -128,7 +140,7 @@ export async function uploadAndSendMedia(params: {
     channelId,
     channelType,
     type: msgType,
-    url: uploaded.url,
+    url: uploadedUrl,
     name: isImage ? undefined : filename,
     size: isImage ? undefined : buffer.length,
     width,
