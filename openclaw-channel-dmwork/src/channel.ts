@@ -385,30 +385,42 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       contentType = contentType || "application/octet-stream";
 
-      // 2. Get STS credentials from backend
-      const creds = await getUploadCredentials({
-        apiUrl: account.config.apiUrl,
-        botToken: account.config.botToken,
-        filename,
-      });
-
-      // 3. Upload directly to COS with progress
-      const { url: cdnUrl } = await uploadFileToCOS({
-        credentials: creds.credentials,
-        startTime: creds.startTime,
-        expiredTime: creds.expiredTime,
-        bucket: creds.bucket,
-        region: creds.region,
-        key: creds.key,
-        fileBuffer,
-        contentType,
-        cdnBaseUrl: creds.cdnBaseUrl,
-        onProgress: (percent) => {
-          if (percent % 20 === 0 || percent === 100) {
-            console.log(`[dmwork] COS upload progress: ${percent}%`);
-          }
-        },
-      });
+      // 2. Upload to COS via STS credentials, fallback to legacy endpoint
+      let cdnUrl: string;
+      try {
+        const creds = await getUploadCredentials({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken,
+          filename,
+        });
+        const { url: cosUrl } = await uploadFileToCOS({
+          credentials: creds.credentials,
+          startTime: creds.startTime,
+          expiredTime: creds.expiredTime,
+          bucket: creds.bucket,
+          region: creds.region,
+          key: creds.key,
+          fileBuffer,
+          contentType,
+          cdnBaseUrl: creds.cdnBaseUrl,
+          onProgress: (percent) => {
+            if (percent % 20 === 0 || percent === 100) {
+              console.log(`[dmwork] COS upload progress: ${percent}%`);
+            }
+          },
+        });
+        cdnUrl = cosUrl;
+      } catch {
+        // Fallback to legacy upload endpoint (backend PR #786 not deployed)
+        const uploaded = await uploadFile({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken,
+          fileBuffer,
+          filename,
+          contentType,
+        });
+        cdnUrl = uploaded.url;
+      }
 
       // 4. Parse target using shared parseTarget + knownGroupIds
       let targetForParse = ctx.to;
