@@ -402,6 +402,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         key: creds.key,
         fileBuffer,
         contentType,
+        cdnBaseUrl: creds.cdnBaseUrl,
         onProgress: (percent) => {
           if (percent % 20 === 0 || percent === 100) {
             console.log(`[dmwork] COS upload progress: ${percent}%`);

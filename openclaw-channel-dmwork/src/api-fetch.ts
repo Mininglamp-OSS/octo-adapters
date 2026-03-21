@@ -516,6 +516,7 @@ export async function getUploadCredentials(params: {
   };
   startTime: number;
   expiredTime: number;
+  cdnBaseUrl?: string;
 }> {
   const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/upload/credentials?filename=${encodeURIComponent(params.filename)}`;
   const response = await fetch(url, {
@@ -558,6 +559,7 @@ export async function uploadFileToCOS(params: {
   key: string;
   fileBuffer: Buffer;
   contentType: string;
+  cdnBaseUrl?: string;
   onProgress?: (percent: number) => void;
 }): Promise<{ url: string }> {
   const cos = new COS({
@@ -583,8 +585,14 @@ export async function uploadFileToCOS(params: {
       if (err) {
         reject(new Error(`COS upload failed: ${err.message || JSON.stringify(err)}`));
       } else {
-        // COS returns Location which is the full URL without protocol
-        const url = data.Location ? `https://${data.Location}` : "";
+        // Prefer CDN base URL (e.g. https://cdn.example.com) over raw COS URL
+        let url: string;
+        if (params.cdnBaseUrl) {
+          const base = params.cdnBaseUrl.replace(/\/+$/, "");
+          url = `${base}/${params.key}`;
+        } else {
+          url = data.Location ? `https://${data.Location}` : "";
+        }
         if (!url) {
           reject(new Error("COS upload succeeded but returned no Location URL"));
           return;
