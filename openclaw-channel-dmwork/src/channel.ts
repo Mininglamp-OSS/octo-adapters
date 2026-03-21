@@ -11,14 +11,14 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { parseMentions } from "./mention-utils.js";
-import { handleDmworkMessageAction } from "./actions.js";
+import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
-import { getOrCreateGroupMdCache } from "./group-md.js";
+import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
 import path from "path";
 import os from "os";
 import { mkdir, readFile, writeFile } from "fs/promises";
@@ -239,7 +239,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       if (!accountId) return [];
       return [
         `When using the dmwork_management tool, pass accountId: "${accountId}".`,
-        `For cross-group messaging with action=send, use target="group:<groupId>". Use dmwork_management tool (list-groups action) to discover available groups first.`,
+        `For sending messages: if the target is a group, use target="group:<groupId>". If the target is a specific user (1v1 direct message), use target="user:<userId>". If sending to the current conversation, no prefix is needed.`,
       ];
     },
   },
@@ -282,24 +282,24 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         return { channel: "dmwork", to: ctx.to, messageId: "" };
       }
 
-      // Parse target: "group:channel_id" for groups, "group:channel_id@uid1,uid2" for @mentions
-      let channelId = ctx.to;
-      let channelType = ChannelType.DM;
+      // Parse target using shared parseTarget + knownGroupIds
       let mentionUids: string[] = [];
+      let targetForParse = ctx.to;
 
+      // Handle "group:channel_id@uid1,uid2" format — extract inline mention UIDs
       if (ctx.to.startsWith("group:")) {
         const groupPart = ctx.to.slice(6);
         const atIdx = groupPart.indexOf("@");
         if (atIdx >= 0) {
-          channelId = groupPart.slice(0, atIdx);
+          targetForParse = "group:" + groupPart.slice(0, atIdx);
           mentionUids = groupPart.slice(atIdx + 1).split(",").filter(Boolean);
-        } else {
-          channelId = groupPart;
         }
-        channelType = ChannelType.Group;
+      }
 
+      const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
+
+      if (channelType === ChannelType.Group) {
         // Parse @mentions from message content (e.g., "@chenpipi_bot", "@陈皮皮")
-        // Uses shared utility for consistent regex across inbound/outbound (fixes #31)
         const contentMentionNames = parseMentions(content);
         for (const name of contentMentionNames) {
           if (name && !mentionUids.includes(name)) {
@@ -394,32 +394,44 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         contentType,
       });
 
-      // 3. Parse target (same logic as sendText)
-      let channelId = ctx.to;
-      let channelType = ChannelType.DM;
-
+      // 3. Parse target using shared parseTarget + knownGroupIds
+      let targetForParse = ctx.to;
       if (ctx.to.startsWith("group:")) {
         const groupPart = ctx.to.slice(6);
         const atIdx = groupPart.indexOf("@");
-        channelId = atIdx >= 0 ? groupPart.slice(0, atIdx) : groupPart;
-        channelType = ChannelType.Group;
+        if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
       }
+      const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
 
       // 4. Determine message type and send
       const msgType = contentType.startsWith("image/")
         ? MessageType.Image
         : MessageType.File;
 
-      await sendMediaMessage({
-        apiUrl: account.config.apiUrl,
-        botToken: account.config.botToken,
-        channelId,
-        channelType,
-        type: msgType,
-        url: cdnUrl,
-        name: filename,
-        size: fileBuffer.length,
-      });
+      if (msgType === MessageType.Image) {
+        const dims = parseImageDimensions(fileBuffer, contentType);
+        await sendMediaMessage({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken,
+          channelId,
+          channelType,
+          type: msgType,
+          url: cdnUrl,
+          width: dims?.width,
+          height: dims?.height,
+        });
+      } else {
+        await sendMediaMessage({
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken,
+          channelId,
+          channelType,
+          type: msgType,
+          url: cdnUrl,
+          name: filename,
+          size: fileBuffer.length,
+        });
+      }
 
       return { channel: "dmwork", to: ctx.to, messageId: "" };
     },
@@ -498,6 +510,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       (async () => {
         try {
           const groups = await fetchBotGroups({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, log });
+          registerBotGroupIds(groups.map(g => g.group_no));
           for (const g of groups) {
             try {
               const md = await getGroupMd({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });

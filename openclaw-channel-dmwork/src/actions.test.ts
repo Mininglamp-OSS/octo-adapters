@@ -725,4 +725,28 @@ describe("parseTarget", () => {
     expect(result.channelId).toBe("grpX");
     expect(result.channelType).toBe(ChannelType.DM);
   });
+
+  it("should treat bare ID matching currentChannelId but NOT in knownGroupIds as DM", async () => {
+    const { parseTarget } = await import("./actions.js");
+    const knownGroups = new Set(["otherGroup"]);
+    // currentChannelId matches target, but target is not a known group → DM
+    const result = parseTarget("someChannel", "someChannel", knownGroups);
+    expect(result.channelId).toBe("someChannel");
+    expect(result.channelType).toBe(ChannelType.DM);
+  });
+
+  it("should strip dmwork: prefix from bare ID", async () => {
+    const { parseTarget } = await import("./actions.js");
+    const result = parseTarget("dmwork:someId");
+    expect(result.channelId).toBe("someId");
+    expect(result.channelType).toBe(ChannelType.DM);
+  });
+
+  it("should strip dmwork: prefix and detect group via knownGroupIds", async () => {
+    const { parseTarget } = await import("./actions.js");
+    const knownGroups = new Set(["grpZ"]);
+    const result = parseTarget("dmwork:grpZ", undefined, knownGroups);
+    expect(result.channelId).toBe("grpZ");
+    expect(result.channelType).toBe(ChannelType.Group);
+  });
 });
