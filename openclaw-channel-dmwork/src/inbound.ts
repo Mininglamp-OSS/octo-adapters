@@ -529,7 +529,6 @@ export async function handleInboundMessage(params: {
     }
 
     // Update disk cache (for before_prompt_build hook)
-    // Use broadcastGroupMdUpdate which scans all agent workspaces — avoids needing agentId
     if (earlyEventType === "group_md_updated" && groupMdCache) {
       const cached = groupMdCache.get(message.channel_id);
       if (cached) {
@@ -541,7 +540,7 @@ export async function handleInboundMessage(params: {
         });
       }
     } else if (earlyEventType === "group_md_deleted") {
-      // Delete disk cache for all agents
+      // Delete disk cache
       broadcastGroupMdUpdate({
         accountId: account.accountId,
         groupNo: message.channel_id,

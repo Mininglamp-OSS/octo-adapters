@@ -105,12 +105,12 @@ describe("writeGroupMdToDisk / readGroupMdFromDisk / readGroupMeta", () => {
       account_id: accountId,
     };
 
-    writeGroupMdToDisk({ agentId, accountId, groupNo, content, meta });
+    writeGroupMdToDisk({ accountId, groupNo, content, meta });
 
-    const readContent = readGroupMdFromDisk(agentId, accountId, groupNo);
+    const readContent = readGroupMdFromDisk(accountId, groupNo);
     expect(readContent).toBe(content);
 
-    const readMeta = readGroupMeta(agentId, accountId, groupNo);
+    const readMeta = readGroupMeta(accountId, groupNo);
     expect(readMeta).not.toBeNull();
     expect(readMeta!.version).toBe(5);
     expect(readMeta!.updated_by).toBe("uid_admin");
@@ -118,8 +118,8 @@ describe("writeGroupMdToDisk / readGroupMdFromDisk / readGroupMeta", () => {
   });
 
   it("should return null for non-existent file", () => {
-    expect(readGroupMdFromDisk(agentId, accountId, "nonexistent")).toBeNull();
-    expect(readGroupMeta(agentId, accountId, "nonexistent")).toBeNull();
+    expect(readGroupMdFromDisk(accountId, "nonexistent")).toBeNull();
+    expect(readGroupMeta(accountId, "nonexistent")).toBeNull();
   });
 
   it("should overwrite existing files", () => {
@@ -131,18 +131,17 @@ describe("writeGroupMdToDisk / readGroupMdFromDisk / readGroupMeta", () => {
       account_id: accountId,
     };
 
-    writeGroupMdToDisk({ agentId, accountId, groupNo, content: "v1", meta });
-    expect(readGroupMdFromDisk(agentId, accountId, groupNo)).toBe("v1");
+    writeGroupMdToDisk({ accountId, groupNo, content: "v1", meta });
+    expect(readGroupMdFromDisk(accountId, groupNo)).toBe("v1");
 
     writeGroupMdToDisk({
-      agentId,
       accountId,
       groupNo,
       content: "v2",
       meta: { ...meta, version: 2 },
     });
-    expect(readGroupMdFromDisk(agentId, accountId, groupNo)).toBe("v2");
-    expect(readGroupMeta(agentId, accountId, groupNo)!.version).toBe(2);
+    expect(readGroupMdFromDisk(accountId, groupNo)).toBe("v2");
+    expect(readGroupMeta(accountId, groupNo)!.version).toBe(2);
   });
 });
 
@@ -160,16 +159,16 @@ describe("deleteGroupMdFromDisk", () => {
       account_id: accountId,
     };
 
-    writeGroupMdToDisk({ agentId, accountId, groupNo, content: "test", meta });
-    expect(readGroupMdFromDisk(agentId, accountId, groupNo)).toBe("test");
+    writeGroupMdToDisk({ accountId, groupNo, content: "test", meta });
+    expect(readGroupMdFromDisk(accountId, groupNo)).toBe("test");
 
-    deleteGroupMdFromDisk(agentId, accountId, groupNo);
-    expect(readGroupMdFromDisk(agentId, accountId, groupNo)).toBeNull();
-    expect(readGroupMeta(agentId, accountId, groupNo)).toBeNull();
+    deleteGroupMdFromDisk(accountId, groupNo);
+    expect(readGroupMdFromDisk(accountId, groupNo)).toBeNull();
+    expect(readGroupMeta(accountId, groupNo)).toBeNull();
   });
 
   it("should not throw when files don't exist", () => {
-    expect(() => deleteGroupMdFromDisk(agentId, accountId, "nonexistent")).not.toThrow();
+    expect(() => deleteGroupMdFromDisk(accountId, "nonexistent")).not.toThrow();
   });
 });
 
@@ -187,7 +186,7 @@ describe("scanForAccountId", () => {
       account_id: accountId,
     };
 
-    writeGroupMdToDisk({ agentId, accountId, groupNo, content: "scan test", meta });
+    writeGroupMdToDisk({ accountId, groupNo, content: "scan test", meta });
 
     // Reset memory map so scanForAccountId must scan disk
     _testReset();
@@ -224,7 +223,7 @@ describe("getGroupMdForPrompt", () => {
   const groupNo = "grp_prompt";
 
   it("should return null for non-group sessionKey", () => {
-    registerGroupAccount(groupNo, accountId);
+    registerGroupAccount(groupNo, accountId, "testAgent");
     expect(getGroupMdForPrompt({ sessionKey: "agent:a1:dmwork:direct:uid1", agentId })).toBeNull();
   });
 
@@ -245,7 +244,7 @@ describe("getGroupMdForPrompt", () => {
   });
 
   it("should return cached GROUP.md content for valid group session", () => {
-    registerGroupAccount(groupNo, accountId);
+    registerGroupAccount(groupNo, accountId, "testAgent");
     const content = "# Rules\nBe respectful.";
     const meta: GroupMdMeta = {
       version: 1,
@@ -255,7 +254,7 @@ describe("getGroupMdForPrompt", () => {
       account_id: accountId,
     };
 
-    writeGroupMdToDisk({ agentId, accountId, groupNo, content, meta });
+    writeGroupMdToDisk({ accountId, groupNo, content, meta });
 
     const result = getGroupMdForPrompt({
       sessionKey: `agent:${agentId}:dmwork:group:${groupNo}`,
@@ -265,7 +264,7 @@ describe("getGroupMdForPrompt", () => {
   });
 
   it("should return null when GROUP.md file doesn't exist on disk", () => {
-    registerGroupAccount(groupNo, accountId);
+    registerGroupAccount(groupNo, accountId, "testAgent");
     const result = getGroupMdForPrompt({
       sessionKey: `agent:${agentId}:dmwork:group:${groupNo}`,
       agentId,
@@ -283,7 +282,7 @@ describe("getGroupMdForPrompt", () => {
       fetched_at: new Date().toISOString(),
       account_id: accountId,
     };
-    writeGroupMdToDisk({ agentId, accountId, groupNo, content, meta });
+    writeGroupMdToDisk({ accountId, groupNo, content, meta });
 
     _testReset(); // Simulate restart
 

@@ -2,8 +2,8 @@
  * GROUP.md local caching and before_prompt_build hook for dmwork groups.
  *
  * Storage layout:
- *   ~/.openclaw/workspace/{agent}/dmwork/{accountId}/groups/{groupNo}/GROUP.md
- *   ~/.openclaw/workspace/{agent}/dmwork/{accountId}/groups/{groupNo}/GROUP.meta.json
+ *   ~/.openclaw/workspace/dmwork/{accountId}/groups/{groupNo}/GROUP.md
+ *   ~/.openclaw/workspace/dmwork/{accountId}/groups/{groupNo}/GROUP.meta.json
  *
  * Memory maps (rebuilt from inbound messages after restart):
  *   _groupAccountMap: "agentId:groupNo" → accountId
@@ -62,20 +62,20 @@ export function getOrCreateGroupMdCache(accountId: string): Map<string, { conten
 
 // --- Path helpers ---
 
-function workspaceBase(agentId: string): string {
-  return join(homedir(), ".openclaw", "workspace", agentId, "dmwork");
+function workspaceBase(): string {
+  return join(homedir(), ".openclaw", "workspace", "dmwork");
 }
 
-function groupDir(agentId: string, accountId: string, groupNo: string): string {
-  return join(workspaceBase(agentId), accountId, "groups", groupNo);
+function groupDir(accountId: string, groupNo: string): string {
+  return join(workspaceBase(), accountId, "groups", groupNo);
 }
 
-function groupMdPath(agentId: string, accountId: string, groupNo: string): string {
-  return join(groupDir(agentId, accountId, groupNo), "GROUP.md");
+function groupMdPath(accountId: string, groupNo: string): string {
+  return join(groupDir(accountId, groupNo), "GROUP.md");
 }
 
-function groupMetaPath(agentId: string, accountId: string, groupNo: string): string {
-  return join(groupDir(agentId, accountId, groupNo), "GROUP.meta.json");
+function groupMetaPath(accountId: string, groupNo: string): string {
+  return join(groupDir(accountId, groupNo), "GROUP.meta.json");
 }
 
 // --- Public API ---
@@ -96,7 +96,7 @@ export function registerGroupAccount(groupNo: string, accountId: string, agentId
  * Looks through all accountId directories for a matching groupNo with a meta file.
  */
 export function scanForAccountId(agentId: string, groupNo: string): string | null {
-  const base = workspaceBase(agentId);
+  const base = workspaceBase();
   if (!existsSync(base)) return null;
 
   let accounts: string[];
@@ -109,7 +109,7 @@ export function scanForAccountId(agentId: string, groupNo: string): string | nul
   }
 
   for (const acct of accounts) {
-    const metaFile = groupMetaPath(agentId, acct, groupNo);
+    const metaFile = groupMetaPath(acct, groupNo);
     if (existsSync(metaFile)) {
       try {
         const meta = JSON.parse(readFileSync(metaFile, "utf-8")) as GroupMdMeta;
@@ -169,23 +169,22 @@ async function fetchGroupMdFromApi(params: {
  * Write GROUP.md and meta to disk.
  */
 export function writeGroupMdToDisk(params: {
-  agentId: string;
   accountId: string;
   groupNo: string;
   content: string;
   meta: GroupMdMeta;
 }): void {
-  const dir = groupDir(params.agentId, params.accountId, params.groupNo);
+  const dir = groupDir(params.accountId, params.groupNo);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(groupMdPath(params.agentId, params.accountId, params.groupNo), params.content, "utf-8");
-  writeFileSync(groupMetaPath(params.agentId, params.accountId, params.groupNo), JSON.stringify(params.meta, null, 2), "utf-8");
+  writeFileSync(groupMdPath(params.accountId, params.groupNo), params.content, "utf-8");
+  writeFileSync(groupMetaPath(params.accountId, params.groupNo), JSON.stringify(params.meta, null, 2), "utf-8");
 }
 
 /**
  * Read GROUP.md from disk. Returns null if file doesn't exist.
  */
-export function readGroupMdFromDisk(agentId: string, accountId: string, groupNo: string): string | null {
-  const filePath = groupMdPath(agentId, accountId, groupNo);
+export function readGroupMdFromDisk(accountId: string, groupNo: string): string | null {
+  const filePath = groupMdPath(accountId, groupNo);
   try {
     return readFileSync(filePath, "utf-8");
   } catch {
@@ -196,8 +195,8 @@ export function readGroupMdFromDisk(agentId: string, accountId: string, groupNo:
 /**
  * Read GROUP.meta.json from disk. Returns null if file doesn't exist.
  */
-export function readGroupMeta(agentId: string, accountId: string, groupNo: string): GroupMdMeta | null {
-  const metaFile = groupMetaPath(agentId, accountId, groupNo);
+export function readGroupMeta(accountId: string, groupNo: string): GroupMdMeta | null {
+  const metaFile = groupMetaPath(accountId, groupNo);
   try {
     return JSON.parse(readFileSync(metaFile, "utf-8")) as GroupMdMeta;
   } catch {
@@ -208,9 +207,9 @@ export function readGroupMeta(agentId: string, accountId: string, groupNo: strin
 /**
  * Delete GROUP.md and meta from disk.
  */
-export function deleteGroupMdFromDisk(agentId: string, accountId: string, groupNo: string): void {
-  try { unlinkSync(groupMdPath(agentId, accountId, groupNo)); } catch { /* ok */ }
-  try { unlinkSync(groupMetaPath(agentId, accountId, groupNo)); } catch { /* ok */ }
+export function deleteGroupMdFromDisk(accountId: string, groupNo: string): void {
+  try { unlinkSync(groupMdPath(accountId, groupNo)); } catch { /* ok */ }
+  try { unlinkSync(groupMetaPath(accountId, groupNo)); } catch { /* ok */ }
 }
 
 /**
@@ -238,7 +237,7 @@ export async function ensureGroupMd(params: {
   }
 
   // Compare with local cache — skip disk write if version unchanged
-  const existingMeta = readGroupMeta(agentId, accountId, groupNo);
+  const existingMeta = readGroupMeta(accountId, groupNo);
   if (existingMeta && existingMeta.version === apiData.version) {
     log?.debug?.(`dmwork: [GROUP.md] cache up-to-date for ${groupNo} (v${apiData.version})`);
     return;
@@ -252,7 +251,7 @@ export async function ensureGroupMd(params: {
     account_id: accountId,
   };
 
-  writeGroupMdToDisk({ agentId, accountId, groupNo, content: apiData.content, meta });
+  writeGroupMdToDisk({ accountId, groupNo, content: apiData.content, meta });
   log?.info?.(`dmwork: [GROUP.md] cached v${apiData.version} for group ${groupNo}`);
 }
 
@@ -272,7 +271,7 @@ export async function handleGroupMdEvent(params: {
   const { agentId, accountId, groupNo, eventType, apiUrl, botToken, log } = params;
 
   if (eventType === "group_md_deleted") {
-    deleteGroupMdFromDisk(agentId, accountId, groupNo);
+    deleteGroupMdFromDisk(accountId, groupNo);
     clearGroupMdChecked(accountId, groupNo);
     log?.info?.(`dmwork: [GROUP.md] deleted cache for group ${groupNo}`);
     return;
@@ -295,7 +294,7 @@ export async function handleGroupMdEvent(params: {
       account_id: accountId,
     };
 
-    writeGroupMdToDisk({ agentId, accountId, groupNo, content: apiData.content, meta });
+    writeGroupMdToDisk({ accountId, groupNo, content: apiData.content, meta });
     _checkedGroups.add(`${accountId}/${groupNo}`);
     log?.info?.(`dmwork: [GROUP.md] updated cache to v${apiData.version} for group ${groupNo}`);
   }
@@ -320,7 +319,7 @@ export function getGroupMdForPrompt(ctx: {
   const accountId = resolveAccountId(agentId, groupNo);
   if (!accountId) return null;
 
-  const content = readGroupMdFromDisk(agentId, accountId, groupNo);
+  const content = readGroupMdFromDisk(accountId, groupNo);
   return content;
 }
 
@@ -332,9 +331,8 @@ export function clearGroupMdChecked(accountId: string, groupNo: string): void {
 }
 
 /**
- * Update GROUP.md disk cache for all known agents that have this group registered.
- * Called by agent-tools.ts after a successful API update, since the tool context
- * doesn't have access to agentId.
+ * Update GROUP.md disk cache.
+ * Called by agent-tools.ts after a successful API update and by inbound.ts on events.
  */
 export function broadcastGroupMdUpdate(params: {
   accountId: string;
@@ -346,41 +344,12 @@ export function broadcastGroupMdUpdate(params: {
   const meta: GroupMdMeta = {
     version,
     updated_at: new Date().toISOString(),
-    updated_by: "tool",
+    updated_by: "event",
     fetched_at: new Date().toISOString(),
     account_id: accountId,
   };
-
-  // Find all agentIds that have this group registered
-  const updatedAgents: string[] = [];
-  for (const [key, acctId] of _groupAccountMap.entries()) {
-    if (acctId !== accountId) continue;
-    const parts = key.split(":");
-    if (parts.length === 2 && parts[1] === groupNo) {
-      const agentId = parts[0];
-      writeGroupMdToDisk({ agentId, accountId, groupNo, content, meta });
-      _checkedGroups.add(`${accountId}/${groupNo}`);
-      updatedAgents.push(agentId);
-    }
-  }
-
-  // Also scan workspace dirs if no map entries found (first-time scenario)
-  if (updatedAgents.length === 0) {
-    const base = join(homedir(), ".openclaw", "workspace");
-    try {
-      const agents = readdirSync(base, { withFileTypes: true })
-        .filter(d => d.isDirectory())
-        .map(d => d.name);
-      for (const agentId of agents) {
-        writeGroupMdToDisk({ agentId, accountId, groupNo, content, meta });
-        updatedAgents.push(agentId);
-      }
-    } catch { /* workspace dir may not exist */ }
-  }
-
-  if (updatedAgents.length > 0) {
-    console.error(`[dmwork] broadcastGroupMdUpdate: updated disk cache for agents=[${updatedAgents.join(",")}] group=${groupNo} v${version}`);
-  }
+  writeGroupMdToDisk({ accountId, groupNo, content, meta });
+  console.error(`[dmwork] broadcastGroupMdUpdate: updated disk cache group=${groupNo} v=${version}`);
 }
 
 /**
