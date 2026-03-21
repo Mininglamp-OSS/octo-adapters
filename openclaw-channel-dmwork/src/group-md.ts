@@ -35,6 +35,13 @@ export const OCTO_GROUP_RE = /^agent:[^:]+:dmwork:group:(.+)$/;
 
 // --- In-memory maps ---
 
+/** All bot group IDs registered at startup via fetchBotGroups */
+const _allBotGroupIds = new Set<string>();
+
+export function registerBotGroupIds(groupNos: string[]): void {
+  for (const g of groupNos) _allBotGroupIds.add(g);
+}
+
 /** groupNo → accountId (rebuilt from inbound messages) */
 const _groupAccountMap = new Map<string, string>();
 
@@ -397,6 +404,8 @@ export function getKnownGroupIds(): Set<string> {
       ids.add(groupNo);
     }
   }
+  // Also include groups registered at startup via registerBotGroupIds
+  for (const g of _allBotGroupIds) ids.add(g);
   return ids;
 }
 
@@ -414,4 +423,5 @@ export function _testReset(): void {
   _groupAccountMap.clear();
   _checkedGroups.clear();
   _groupMdCache.clear();
+  _allBotGroupIds.clear();
 }

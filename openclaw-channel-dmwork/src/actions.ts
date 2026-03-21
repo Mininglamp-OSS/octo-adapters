@@ -36,40 +36,26 @@ type LogSink = {
  * Parse a target string into channelId + channelType.
  *
  * Explicit prefixes (`group:` / `user:`) always win.
- * For bare IDs, we check `currentChannelId` (from toolContext) to infer
- * the channel type — if the bare ID matches the current group channel,
- * treat it as a group message. Otherwise default to DM.
+ * For bare IDs, we check `knownGroupIds` to determine the channel type.
  */
 export function parseTarget(
   target: string,
   currentChannelId?: string,
   knownGroupIds?: Set<string>,
-): {
-  channelId: string;
-  channelType: ChannelType;
-} {
+): { channelId: string; channelType: ChannelType } {
+  // Explicit prefixes always win
   if (target.startsWith("group:"))
     return { channelId: target.slice(6), channelType: ChannelType.Group };
   if (target.startsWith("user:"))
     return { channelId: target.slice(5), channelType: ChannelType.DM };
 
-  // Bare ID: infer from current session context
-  if (currentChannelId) {
-    // currentChannelId may have prefixes: "dmwork:", "g-", or raw groupNo
-    let normalizedCurrent = currentChannelId;
-    if (normalizedCurrent.startsWith("dmwork:")) normalizedCurrent = normalizedCurrent.slice(7);
-    if (normalizedCurrent.startsWith("g-")) normalizedCurrent = normalizedCurrent.slice(2);
-    if (target === normalizedCurrent || target === currentChannelId) {
-      return { channelId: target, channelType: ChannelType.Group };
-    }
-  }
+  // Strip dmwork: prefix if present
+  let bareId = target;
+  if (bareId.startsWith("dmwork:")) bareId = bareId.slice(7);
 
-  // Check if bare ID is a known group (cross-group messaging)
-  if (knownGroupIds?.has(target)) {
-    return { channelId: target, channelType: ChannelType.Group };
-  }
-
-  return { channelId: target, channelType: ChannelType.DM };
+  // Bare ID: check knownGroupIds
+  const isGroup = knownGroupIds?.has(bareId) ?? false;
+  return { channelId: bareId, channelType: isGroup ? ChannelType.Group : ChannelType.DM };
 }
 
 /** Strip common prefixes to get the raw group_no */
@@ -163,7 +149,6 @@ async function handleSend(params: {
   const message = (args.message as string | undefined)?.trim();
   const mediaUrl =
     (args.media as string | undefined) ??
-    (args.mediaUrl as string | undefined) ??
     (args.filePath as string | undefined);
 
   if (!message && !mediaUrl) {

@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, uploadFile, sendMediaMessage, inferContentType } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, uploadFile, sendMediaMessage, inferContentType, parseImageDimensions } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -56,43 +56,6 @@ function resolveOutboundMediaUrls(payload: { mediaUrl?: string; mediaUrls?: stri
 }
 
 /** Extract filename from a URL path */
-/**
- * Parse image dimensions from buffer (PNG/JPEG/GIF/WebP).
- * Lightweight — reads only the header bytes, no external dependencies.
- */
-function parseImageDimensions(buf: Buffer, mime: string): { width: number; height: number } | null {
-  try {
-    if (mime === "image/png" && buf.length > 24) {
-      // PNG: width at offset 16 (4 bytes BE), height at offset 20 (4 bytes BE)
-      return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
-    }
-    if ((mime === "image/jpeg" || mime === "image/jpg") && buf.length > 2) {
-      // JPEG: scan for SOF0/SOF2 marker (0xFF 0xC0 or 0xFF 0xC2)
-      let offset = 2;
-      while (offset < buf.length - 8) {
-        if (buf[offset] !== 0xFF) break;
-        const marker = buf[offset + 1];
-        if (marker === 0xC0 || marker === 0xC2) {
-          return { width: buf.readUInt16BE(offset + 7), height: buf.readUInt16BE(offset + 5) };
-        }
-        const len = buf.readUInt16BE(offset + 2);
-        offset += 2 + len;
-      }
-    }
-    if (mime === "image/gif" && buf.length > 10) {
-      // GIF: width at offset 6 (2 bytes LE), height at offset 8 (2 bytes LE)
-      return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) };
-    }
-    if (mime === "image/webp" && buf.length > 30) {
-      // WebP VP8: width at offset 26, height at offset 28 (both 2 bytes LE)
-      if (buf.toString("ascii", 12, 16) === "VP8 " && buf.length > 29) {
-        return { width: buf.readUInt16LE(26) & 0x3FFF, height: buf.readUInt16LE(28) & 0x3FFF };
-      }
-    }
-  } catch { /* ignore parse errors */ }
-  return null;
-}
-
 function extractFilename(url: string): string {
   try {
     const pathname = new URL(url).pathname;
