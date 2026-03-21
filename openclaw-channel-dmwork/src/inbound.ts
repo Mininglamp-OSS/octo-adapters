@@ -553,8 +553,8 @@ export async function handleInboundMessage(params: {
       const _core = getDmworkRuntime();
       const _cfg = _core.config.loadConfig() as OpenClawConfig;
       const _route = _core.channel.routing.resolveAgentRoute({
-        config: _cfg, provider: "dmwork", accountId: account.accountId,
-        channelType: "group", peerId: message.channel_id,
+        cfg: _cfg, channel: "dmwork", accountId: account.accountId,
+        peer: { kind: "group", id: message.channel_id },
       });
       registerGroupAccount(message.channel_id, account.accountId, _route?.agentId);
     } catch {
