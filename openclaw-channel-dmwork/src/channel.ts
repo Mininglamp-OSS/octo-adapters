@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -369,7 +369,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         filename = path.basename(filePath);
         contentType = inferContentType(filename);
       } else {
-        const resp = await fetch(mediaUrl, { signal: AbortSignal.timeout(60_000) });
+        const resp = await fetch(mediaUrl, { signal: AbortSignal.timeout(300_000) });
         if (!resp.ok) {
           throw new Error(`Failed to download media from ${mediaUrl}: ${resp.status}`);
         }
@@ -385,16 +385,31 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       contentType = contentType || "application/octet-stream";
 
-      // 2. Upload to backend
-      const { url: cdnUrl } = await uploadFile({
+      // 2. Get STS credentials from backend
+      const creds = await getUploadCredentials({
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken,
-        fileBuffer,
         filename,
-        contentType,
       });
 
-      // 3. Parse target using shared parseTarget + knownGroupIds
+      // 3. Upload directly to COS with progress
+      const { url: cdnUrl } = await uploadFileToCOS({
+        credentials: creds.credentials,
+        startTime: creds.startTime,
+        expiredTime: creds.expiredTime,
+        bucket: creds.bucket,
+        region: creds.region,
+        key: creds.key,
+        fileBuffer,
+        contentType,
+        onProgress: (percent) => {
+          if (percent % 20 === 0 || percent === 100) {
+            console.log(`[dmwork] COS upload progress: ${percent}%`);
+          }
+        },
+      });
+
+      // 4. Parse target using shared parseTarget + knownGroupIds
       let targetForParse = ctx.to;
       if (ctx.to.startsWith("group:")) {
         const groupPart = ctx.to.slice(6);
@@ -403,7 +418,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       }
       const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
 
-      // 4. Determine message type and send
+      // 5. Determine message type and send
       const msgType = contentType.startsWith("image/")
         ? MessageType.Image
         : MessageType.File;

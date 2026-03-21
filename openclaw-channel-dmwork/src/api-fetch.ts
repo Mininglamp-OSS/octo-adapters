@@ -5,6 +5,8 @@
 
 import { ChannelType, MessageType } from "./types.js";
 import path from "path";
+// @ts-ignore — cos-nodejs-sdk-v5 has incomplete TypeScript definitions
+import COS from "cos-nodejs-sdk-v5";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -493,4 +495,110 @@ export async function getChannelMessages(params: {
     params.log?.error?.(`dmwork: getChannelMessages error: ${err}`);
     return [];
   }
+}
+
+/**
+ * Get STS temporary credentials for direct COS upload.
+ */
+export async function getUploadCredentials(params: {
+  apiUrl: string;
+  botToken: string;
+  filename: string;
+  signal?: AbortSignal;
+}): Promise<{
+  bucket: string;
+  region: string;
+  key: string;
+  credentials: {
+    tmpSecretId: string;
+    tmpSecretKey: string;
+    sessionToken: string;
+  };
+  startTime: number;
+  expiredTime: number;
+}> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/upload/credentials?filename=${encodeURIComponent(params.filename)}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    signal: params.signal,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`DMWork API /v1/bot/upload/credentials failed (${response.status}): ${text || response.statusText}`);
+  }
+  return response.json() as any;
+}
+
+/**
+ * Upload a file directly to COS using STS temporary credentials.
+ */
+export async function uploadFileToCOS(params: {
+  credentials: {
+    tmpSecretId: string;
+    tmpSecretKey: string;
+    sessionToken: string;
+  };
+  startTime: number;
+  expiredTime: number;
+  bucket: string;
+  region: string;
+  key: string;
+  fileBuffer: Buffer;
+  contentType: string;
+  onProgress?: (percent: number) => void;
+}): Promise<{ url: string }> {
+  const cos = new COS({
+    SecretId: params.credentials.tmpSecretId,
+    SecretKey: params.credentials.tmpSecretKey,
+    SecurityToken: params.credentials.sessionToken,
+    StartTime: params.startTime,
+    ExpiredTime: params.expiredTime,
+  } as any);
+
+  return new Promise((resolve, reject) => {
+    cos.uploadFile({
+      Bucket: params.bucket,
+      Region: params.region,
+      Key: params.key,
+      Body: params.fileBuffer,
+      onProgress: (progressData: any) => {
+        if (params.onProgress && progressData.percent != null) {
+          params.onProgress(Math.round(progressData.percent * 100));
+        }
+      },
+    } as any, (err: any, data: any) => {
+      if (err) {
+        reject(new Error(`COS upload failed: ${err.message || JSON.stringify(err)}`));
+      } else {
+        // COS returns Location which is the full URL without protocol
+        const url = data.Location ? `https://${data.Location}` : "";
+        resolve({ url });
+      }
+    });
+  });
+}
+
+/**
+ * Edit a previously sent message (e.g. for progress updates).
+ */
+export async function editMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  messageId: string;
+  messageSeq: number;
+  channelId: string;
+  channelType: ChannelType;
+  contentEdit: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/message/edit", {
+    message_id: params.messageId,
+    message_seq: params.messageSeq,
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    content_edit: params.contentEdit,
+  }, params.signal);
 }
