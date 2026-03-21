@@ -73,15 +73,20 @@ describe("OCTO_GROUP_RE", () => {
 });
 
 describe("registerGroupAccount", () => {
-  it("should store groupNo → accountId mapping", () => {
-    registerGroupAccount("group1", "acct_jeff");
-    expect(_testGetGroupAccountMap().get("group1")).toBe("acct_jeff");
+  it("should store agentId:groupNo → accountId mapping when agentId provided", () => {
+    registerGroupAccount("group1", "acct_jeff", "agent1");
+    expect(_testGetGroupAccountMap().get("agent1:group1")).toBe("acct_jeff");
   });
 
   it("should overwrite existing mapping", () => {
-    registerGroupAccount("group1", "acct_old");
-    registerGroupAccount("group1", "acct_new");
-    expect(_testGetGroupAccountMap().get("group1")).toBe("acct_new");
+    registerGroupAccount("group1", "acct_old", "agent1");
+    registerGroupAccount("group1", "acct_new", "agent1");
+    expect(_testGetGroupAccountMap().get("agent1:group1")).toBe("acct_new");
+  });
+
+  it("should not set bare groupNo key (no agentId)", () => {
+    registerGroupAccount("group2", "acct_bare");
+    expect(_testGetGroupAccountMap().get("group2")).toBeUndefined();
   });
 });
 
@@ -189,8 +194,8 @@ describe("scanForAccountId", () => {
 
     const result = scanForAccountId(agentId, groupNo);
     expect(result).toBe(accountId);
-    // Should also populate memory map
-    expect(_testGetGroupAccountMap().get(groupNo)).toBe(accountId);
+    // Should also populate memory map with agentId:groupNo key
+    expect(_testGetGroupAccountMap().get(`${agentId}:${groupNo}`)).toBe(accountId);
   });
 
   it("should return null when no meta exists", () => {
