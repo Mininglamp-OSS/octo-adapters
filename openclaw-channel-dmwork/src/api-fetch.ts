@@ -5,6 +5,8 @@
 
 import { ChannelType, MessageType } from "./types.js";
 import path from "path";
+// @ts-ignore — cos-nodejs-sdk-v5 has incomplete TypeScript definitions
+import COS from "cos-nodejs-sdk-v5";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -493,4 +495,132 @@ export async function getChannelMessages(params: {
     params.log?.error?.(`dmwork: getChannelMessages error: ${err}`);
     return [];
   }
+}
+
+/**
+ * Get STS temporary credentials for direct COS upload.
+ */
+export async function getUploadCredentials(params: {
+  apiUrl: string;
+  botToken: string;
+  filename: string;
+  signal?: AbortSignal;
+}): Promise<{
+  bucket: string;
+  region: string;
+  key: string;
+  credentials: {
+    tmpSecretId: string;
+    tmpSecretKey: string;
+    sessionToken: string;
+  };
+  startTime: number;
+  expiredTime: number;
+  cdnBaseUrl?: string;
+}> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/upload/credentials?filename=${encodeURIComponent(params.filename)}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    signal: params.signal,
+  });
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`DMWork API /v1/bot/upload/credentials failed (${response.status}): ${text || response.statusText}`);
+  }
+  const data = await response.json() as any;
+  // Validate required fields to catch backend API changes early
+  if (!data.bucket || !data.region || !data.key || !data.credentials) {
+    throw new Error(`DMWork API /v1/bot/upload/credentials returned incomplete response: missing ${
+      ['bucket', 'region', 'key', 'credentials'].filter(k => !data[k]).join(', ')
+    }`);
+  }
+  if (!data.credentials.tmpSecretId || !data.credentials.tmpSecretKey || !data.credentials.sessionToken) {
+    throw new Error("DMWork API /v1/bot/upload/credentials returned incomplete credentials");
+  }
+  return data;
+}
+
+/**
+ * Upload a file directly to COS using STS temporary credentials.
+ */
+export async function uploadFileToCOS(params: {
+  credentials: {
+    tmpSecretId: string;
+    tmpSecretKey: string;
+    sessionToken: string;
+  };
+  startTime: number;
+  expiredTime: number;
+  bucket: string;
+  region: string;
+  key: string;
+  fileBuffer: Buffer;
+  contentType: string;
+  cdnBaseUrl?: string;
+  onProgress?: (percent: number) => void;
+}): Promise<{ url: string }> {
+  const cos = new COS({
+    SecretId: params.credentials.tmpSecretId,
+    SecretKey: params.credentials.tmpSecretKey,
+    SecurityToken: params.credentials.sessionToken,
+    StartTime: params.startTime,
+    ExpiredTime: params.expiredTime,
+  } as any);
+
+  return new Promise((resolve, reject) => {
+    cos.uploadFile({
+      Bucket: params.bucket,
+      Region: params.region,
+      Key: params.key,
+      Body: params.fileBuffer,
+      onProgress: (progressData: any) => {
+        if (params.onProgress && progressData.percent != null) {
+          params.onProgress(Math.round(progressData.percent * 100));
+        }
+      },
+    } as any, (err: any, data: any) => {
+      if (err) {
+        reject(new Error(`COS upload failed: ${err.message || JSON.stringify(err)}`));
+      } else {
+        // Prefer CDN base URL (e.g. https://cdn.example.com) over raw COS URL
+        let url: string;
+        if (params.cdnBaseUrl) {
+          const base = params.cdnBaseUrl.replace(/\/+$/, "");
+          url = `${base}/${params.key}`;
+        } else {
+          url = data.Location ? `https://${data.Location}` : "";
+        }
+        if (!url) {
+          reject(new Error("COS upload succeeded but returned no Location URL"));
+          return;
+        }
+        resolve({ url });
+      }
+    });
+  });
+}
+
+/**
+ * Edit a previously sent message (e.g. for progress updates).
+ */
+export async function editMessage(params: {
+  apiUrl: string;
+  botToken: string;
+  messageId: string;
+  messageSeq: number;
+  channelId: string;
+  channelType: ChannelType;
+  contentEdit: string;
+  signal?: AbortSignal;
+}): Promise<void> {
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/message/edit", {
+    message_id: params.messageId,
+    message_seq: params.messageSeq,
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    content_edit: params.contentEdit,
+  }, params.signal);
 }

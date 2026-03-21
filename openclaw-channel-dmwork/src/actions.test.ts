@@ -175,9 +175,13 @@ describe("handleDmworkMessageAction", () => {
       let mediaSentPayload: any = null;
 
       globalThis.fetch = mockFetch({
-        "/v1/bot/upload": async () => {
+        "/v1/bot/upload/credentials": async () => {
+          // Return 404 to trigger fallback to legacy upload
+          return new Response("Not implemented in test", { status: 404 });
+        },
+        "/v1/bot/file/upload": async () => {
           uploadCalled = true;
-          return jsonResponse({ path: "file/chat/img.png" });
+          return jsonResponse({ url: "https://cdn.example.com/file/chat/img.png" });
         },
         "/v1/bot/sendMessage": async (_url, init) => {
           mediaSentPayload = JSON.parse(init?.body as string);
@@ -210,9 +214,13 @@ describe("handleDmworkMessageAction", () => {
       let uploadCalled = false;
 
       globalThis.fetch = mockFetch({
-        "/v1/bot/upload": async () => {
+        "/v1/bot/upload/credentials": async () => {
+          // Return 404 to trigger fallback to legacy upload
+          return new Response("Not implemented in test", { status: 404 });
+        },
+        "/v1/bot/file/upload": async () => {
           uploadCalled = true;
-          return jsonResponse({ path: "file/chat/doc.pdf" });
+          return jsonResponse({ url: "https://cdn.example.com/file/chat/doc.pdf" });
         },
         "/v1/bot/sendMessage": async (_url, init) => {
           const body = JSON.parse(init?.body as string);

@@ -149,6 +149,7 @@ async function handleSend(params: {
   const message = (args.message as string | undefined)?.trim();
   const mediaUrl =
     (args.media as string | undefined) ??
+    (args.mediaUrl as string | undefined) ??
     (args.filePath as string | undefined);
 
   if (!message && !mediaUrl) {
