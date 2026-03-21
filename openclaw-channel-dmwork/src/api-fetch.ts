@@ -529,7 +529,17 @@ export async function getUploadCredentials(params: {
     const text = await response.text().catch(() => "");
     throw new Error(`DMWork API /v1/bot/upload/credentials failed (${response.status}): ${text || response.statusText}`);
   }
-  return response.json() as any;
+  const data = await response.json() as any;
+  // Validate required fields to catch backend API changes early
+  if (!data.bucket || !data.region || !data.key || !data.credentials) {
+    throw new Error(`DMWork API /v1/bot/upload/credentials returned incomplete response: missing ${
+      ['bucket', 'region', 'key', 'credentials'].filter(k => !data[k]).join(', ')
+    }`);
+  }
+  if (!data.credentials.tmpSecretId || !data.credentials.tmpSecretKey || !data.credentials.sessionToken) {
+    throw new Error("DMWork API /v1/bot/upload/credentials returned incomplete credentials");
+  }
+  return data;
 }
 
 /**
@@ -575,6 +585,10 @@ export async function uploadFileToCOS(params: {
       } else {
         // COS returns Location which is the full URL without protocol
         const url = data.Location ? `https://${data.Location}` : "";
+        if (!url) {
+          reject(new Error("COS upload succeeded but returned no Location URL"));
+          return;
+        }
         resolve({ url });
       }
     });
