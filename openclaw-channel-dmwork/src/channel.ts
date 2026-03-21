@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, uploadFile, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -385,42 +385,23 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       contentType = contentType || "application/octet-stream";
 
-      // 2. Upload to COS via STS credentials, fallback to legacy endpoint
-      let cdnUrl: string;
-      try {
-        const creds = await getUploadCredentials({
-          apiUrl: account.config.apiUrl,
-          botToken: account.config.botToken,
-          filename,
-        });
-        const { url: cosUrl } = await uploadFileToCOS({
-          credentials: creds.credentials,
-          startTime: creds.startTime,
-          expiredTime: creds.expiredTime,
-          bucket: creds.bucket,
-          region: creds.region,
-          key: creds.key,
-          fileBuffer,
-          contentType,
-          cdnBaseUrl: creds.cdnBaseUrl,
-          onProgress: (percent) => {
-            if (percent % 20 === 0 || percent === 100) {
-              console.log(`[dmwork] COS upload progress: ${percent}%`);
-            }
-          },
-        });
-        cdnUrl = cosUrl;
-      } catch {
-        // Fallback to legacy upload endpoint (backend PR #786 not deployed)
-        const uploaded = await uploadFile({
-          apiUrl: account.config.apiUrl,
-          botToken: account.config.botToken,
-          fileBuffer,
-          filename,
-          contentType,
-        });
-        cdnUrl = uploaded.url;
-      }
+      // 2. Upload to COS via STS credentials (putObject supports Buffer directly)
+      const creds = await getUploadCredentials({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken,
+        filename,
+      });
+      const { url: cdnUrl } = await uploadFileToCOS({
+        credentials: creds.credentials,
+        startTime: creds.startTime,
+        expiredTime: creds.expiredTime,
+        bucket: creds.bucket,
+        region: creds.region,
+        key: creds.key,
+        fileBuffer,
+        contentType,
+        cdnBaseUrl: creds.cdnBaseUrl,
+      });
 
       // 4. Parse target using shared parseTarget + knownGroupIds
       let targetForParse = ctx.to;

@@ -46,43 +46,6 @@ export async function postJson<T>(
   }
 }
 
-/**
- * Upload a file to DMWork backend via multipart/form-data.
- * Returns the CDN URL of the uploaded file.
- */
-export async function uploadFile(params: {
-  apiUrl: string;
-  botToken: string;
-  fileBuffer: Buffer;
-  filename: string;
-  contentType: string;
-  signal?: AbortSignal;
-}): Promise<{ url: string }> {
-  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/file/upload`;
-  const formData = new FormData();
-  const blob = new Blob([new Uint8Array(params.fileBuffer)], { type: params.contentType });
-  formData.append("file", blob, params.filename);
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${params.botToken}`,
-    },
-    body: formData,
-    signal: params.signal,
-  });
-
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`DMWork API /v1/bot/upload failed (${response.status}): ${text || response.statusText}`);
-  }
-
-  const data = await response.json() as { url?: string };
-  if (!data.url) {
-    throw new Error("DMWork API /v1/bot/upload returned no url");
-  }
-  return { url: data.url };
-}
 
 /**
  * Send a media message (image or file) to a channel.
@@ -560,7 +523,6 @@ export async function uploadFileToCOS(params: {
   fileBuffer: Buffer;
   contentType: string;
   cdnBaseUrl?: string;
-  onProgress?: (percent: number) => void;
 }): Promise<{ url: string }> {
   const cos = new COS({
     SecretId: params.credentials.tmpSecretId,
@@ -571,16 +533,11 @@ export async function uploadFileToCOS(params: {
   } as any);
 
   return new Promise((resolve, reject) => {
-    cos.uploadFile({
+    cos.putObject({
       Bucket: params.bucket,
       Region: params.region,
       Key: params.key,
       Body: params.fileBuffer,
-      onProgress: (progressData: any) => {
-        if (params.onProgress && progressData.percent != null) {
-          params.onProgress(Math.round(progressData.percent * 100));
-        }
-      },
     } as any, (err: any, data: any) => {
       if (err) {
         reject(new Error(`COS upload failed: ${err.message || JSON.stringify(err)}`));
