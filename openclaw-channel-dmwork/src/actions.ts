@@ -222,6 +222,10 @@ async function handleRead(params: {
   const rawLimit = Number(args.limit) || 20;
   const limit = Math.min(Math.max(rawLimit, 1), 100);
 
+  // after/before map to start_message_seq/end_message_seq (message sequence numbers)
+  const after = args.after != null ? Number(args.after) : undefined;
+  const before = args.before != null ? Number(args.before) : undefined;
+
   const { channelId, channelType } = parseTarget(target, currentChannelId, getKnownGroupIds());
 
   const messages = await getChannelMessages({
@@ -230,6 +234,8 @@ async function handleRead(params: {
     channelId,
     channelType,
     limit,
+    ...(after != null && !isNaN(after) ? { startMessageSeq: after } : {}),
+    ...(before != null && !isNaN(before) ? { endMessageSeq: before } : {}),
     log: log
       ? {
           info: (...a: unknown[]) => log.info?.(String(a[0])),

@@ -400,6 +400,8 @@ export async function getChannelMessages(params: {
   channelId: string;
   channelType: ChannelType;
   limit?: number;
+  startMessageSeq?: number;
+  endMessageSeq?: number;
   signal?: AbortSignal;
   log?: { info?: (msg: string) => void; error?: (msg: string) => void };
 }): Promise<Array<{ from_uid: string; content: string; timestamp: number; type?: number; url?: string; name?: string }>> {
@@ -416,8 +418,8 @@ export async function getChannelMessages(params: {
         channel_id: params.channelId,
         channel_type: params.channelType,
         limit,
-        start_message_seq: 0,
-        end_message_seq: 0,
+        start_message_seq: params.startMessageSeq ?? 0,
+        end_message_seq: params.endMessageSeq ?? 0,
         pull_mode: 1,  // 1 = pull up (newer messages)
       }),
       signal: params.signal,
