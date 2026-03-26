@@ -16,7 +16,7 @@ const plugin: {
   description: string;
   register: (api: OpenClawPluginApi) => void;
 } = {
-  id: "dmwork",
+  id: "openclaw-channel-dmwork",
   name: "DMWork",
   description: "OpenClaw DMWork channel plugin via WuKongIM WebSocket",
   register(api) {
