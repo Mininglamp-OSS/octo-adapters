@@ -548,7 +548,15 @@ export async function uploadFileToCOS(params: {
         let url: string;
         if (params.cdnBaseUrl) {
           const base = params.cdnBaseUrl.replace(/\/+$/, "");
-          url = `${base}/${params.key}`;
+          // Re-encode each path segment: COS keys may contain percent-encoded
+          // characters (e.g. Chinese filenames). Without double-encoding, the
+          // IM client decodes the URL once and requests a key with raw UTF-8
+          // characters that doesn't exist in COS (NoSuchKey / 404).
+          const reEncodedKey = params.key
+            .split("/")
+            .map((seg) => encodeURIComponent(seg))
+            .join("/");
+          url = `${base}/${reEncodedKey}`;
         } else {
           url = data.Location ? `https://${data.Location}` : "";
         }
