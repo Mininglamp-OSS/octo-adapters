@@ -10,8 +10,10 @@ import {
   resolveFileContentWithRetry,
   downloadToTemp,
   uploadAndSendMedia,
+  downloadMediaToLocal,
   type ResolveFileResult,
 } from "./inbound.js";
+import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
 /**
  * Tests for mention.all detection logic.
@@ -622,5 +624,165 @@ describe("uploadAndSendMedia timeout", () => {
     expect(calls.length).toBeGreaterThanOrEqual(2);
     expect(calls[0].method).toBe("HEAD");
     expect(calls[1].signal).toBeDefined();
+  });
+});
+
+/**
+ * Tests for downloadMediaToLocal — downloads inbound media to local temp files.
+ */
+describe("downloadMediaToLocal", () => {
+  const originalFetch = globalThis.fetch;
+  const tempFiles: string[] = [];
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+    // Clean up any temp files created during tests
+    for (const f of tempFiles) {
+      try { unlinkSync(f); } catch {}
+    }
+    tempFiles.length = 0;
+  });
+
+  it("should download image to local path (not http URL)", async () => {
+    const imageData = new Uint8Array(64).fill(0xff);
+
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "image/jpeg" }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(imageData);
+          controller.close();
+        },
+      }),
+    }) as any;
+
+    const result = await downloadMediaToLocal(
+      "https://cdn.example.com/bucket/upload_abc123.jpg",
+      "image/jpeg",
+    );
+
+    expect(result).toBeDefined();
+    expect(result).not.toContain("http");
+    expect(result!.startsWith("/tmp/dmwork-media/")).toBe(true);
+    expect(result!.endsWith(".jpeg")).toBe(true);
+    expect(existsSync(result!)).toBe(true);
+    expect(readFileSync(result!)).toEqual(Buffer.from(imageData));
+    tempFiles.push(result!);
+  });
+
+  it("should return undefined for large media (>20MB)", async () => {
+    // Simulate a stream that exceeds 20MB
+    const chunkSize = 1024 * 1024; // 1MB chunks
+    let chunksSent = 0;
+
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "image/png" }),
+      body: new ReadableStream({
+        pull(controller) {
+          if (chunksSent < 22) { // 22MB total
+            controller.enqueue(new Uint8Array(chunkSize));
+            chunksSent++;
+          } else {
+            controller.close();
+          }
+        },
+      }),
+    }) as any;
+
+    const log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn() } as any;
+    const result = await downloadMediaToLocal(
+      "https://cdn.example.com/huge-image.png",
+      "image/png",
+      log,
+    );
+
+    expect(result).toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("media too large"),
+    );
+  });
+
+  it("should return undefined on download failure (HTTP error)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+    }) as any;
+
+    const log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn() } as any;
+    const result = await downloadMediaToLocal(
+      "https://cdn.example.com/missing.jpg",
+      "image/jpeg",
+      log,
+    );
+
+    expect(result).toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("HTTP 404"),
+    );
+  });
+
+  it("should return undefined on network error (no crash)", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValueOnce(
+      new Error("ECONNREFUSED"),
+    ) as any;
+
+    const log = { warn: vi.fn(), info: vi.fn(), debug: vi.fn() } as any;
+    const result = await downloadMediaToLocal(
+      "https://cdn.example.com/unreachable.jpg",
+      "image/jpeg",
+      log,
+    );
+
+    expect(result).toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining("media download failed"),
+    );
+  });
+
+  it("should derive extension from mime type", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "audio/mpeg" }),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8));
+          controller.close();
+        },
+      }),
+    }) as any;
+
+    const result = await downloadMediaToLocal(
+      "https://cdn.example.com/voice_msg",
+      "audio/mpeg",
+    );
+
+    expect(result).toBeDefined();
+    expect(result!.endsWith(".mpeg")).toBe(true);
+    tempFiles.push(result!);
+  });
+
+  it("should derive extension from URL when mime is not provided", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({}),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8));
+          controller.close();
+        },
+      }),
+    }) as any;
+
+    const result = await downloadMediaToLocal(
+      "https://cdn.example.com/video.mp4",
+      undefined,
+    );
+
+    expect(result).toBeDefined();
+    expect(result!.endsWith(".mp4")).toBe(true);
+    tempFiles.push(result!);
   });
 });

@@ -402,6 +402,108 @@ export function calcDownloadTimeout(fileSize?: number): number {
   return Math.min(MAX_TIMEOUT, Math.max(MIN_TIMEOUT, computed));
 }
 
+const MEDIA_TEMP_DIR = join("/tmp", "dmwork-media");
+const MAX_MEDIA_DOWNLOAD_SIZE = 20 * 1024 * 1024; // 20MB cap for inbound media
+const MEDIA_DOWNLOAD_TIMEOUT = 120_000; // 120 seconds
+
+/** Best-effort cleanup of inbound media temp files older than 1 hour */
+async function cleanupMediaTempFiles(): Promise<void> {
+  try {
+    const entries = await readdir(MEDIA_TEMP_DIR);
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const entry of entries) {
+      try {
+        const filePath = join(MEDIA_TEMP_DIR, entry);
+        const info = await stat(filePath);
+        if (info.mtimeMs < cutoff) {
+          await unlink(filePath);
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+/**
+ * Download inbound media (Image/GIF/Voice/Video) to a local temp file.
+ *
+ * Returns the local file path on success, undefined on failure.
+ * Failures are logged but never thrown — the agent still sees the URL
+ * in the text body, it just won't get native media understanding.
+ */
+export async function downloadMediaToLocal(
+  url: string,
+  mime: string | undefined,
+  log?: ChannelLogSink,
+): Promise<string | undefined> {
+  try {
+    await mkdir(MEDIA_TEMP_DIR, { recursive: true });
+    cleanupMediaTempFiles().catch(() => {});
+
+    // Derive a file extension from mime or URL
+    let ext = "";
+    if (mime) {
+      const parts = mime.split("/");
+      if (parts.length === 2) ext = "." + parts[1].split(";")[0];
+    }
+    if (!ext) {
+      const urlPath = url.split("?")[0];
+      const dot = urlPath.lastIndexOf(".");
+      if (dot !== -1) ext = urlPath.substring(dot);
+    }
+    // Sanitize extension
+    ext = ext.replace(/[^a-zA-Z0-9.]/g, "").substring(0, 10);
+
+    const localPath = join(MEDIA_TEMP_DIR, `${randomUUID()}${ext}`);
+
+    const resp = await fetch(url, {
+      signal: AbortSignal.timeout(MEDIA_DOWNLOAD_TIMEOUT),
+    });
+    if (!resp.ok) {
+      log?.warn?.(`dmwork: media download failed HTTP ${resp.status} for ${url}`);
+      return undefined;
+    }
+    if (!resp.body) {
+      log?.warn?.(`dmwork: media download returned no body for ${url}`);
+      return undefined;
+    }
+
+    const ws = createWriteStream(localPath);
+    let totalBytes = 0;
+    try {
+      const reader = (resp.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_MEDIA_DOWNLOAD_SIZE) {
+          reader.cancel();
+          ws.destroy();
+          try { await unlink(localPath); } catch {}
+          log?.warn?.(`dmwork: media too large (>${formatSize(MAX_MEDIA_DOWNLOAD_SIZE)}), skipping: ${url}`);
+          return undefined;
+        }
+        if (!ws.write(value)) {
+          await new Promise<void>(r => ws.once("drain", r));
+        }
+      }
+      ws.end();
+      await new Promise<void>((resolve, reject) => {
+        ws.on("finish", resolve);
+        ws.on("error", reject);
+      });
+    } catch (err) {
+      ws.destroy();
+      try { await unlink(localPath); } catch {}
+      throw err;
+    }
+    log?.info?.(`dmwork: media downloaded to local: ${localPath} (${formatSize(totalBytes)})`);
+    return localPath;
+  } catch (err) {
+    log?.warn?.(`dmwork: media download failed for ${url}: ${err}`);
+    return undefined;
+  }
+}
+
 const TEMP_DIR = join("/tmp", "dmwork-files");
 const MAX_DOWNLOAD_SIZE = 500 * 1024 * 1024; // 500MB hard cap
 
@@ -910,6 +1012,13 @@ export async function handleInboundMessage(params: {
   const resolved = resolveContent(message.payload, account.config.apiUrl, log, account.config.cdnUrl);
   let rawBody = resolved.text;
   let inboundMediaUrl = resolved.mediaUrl;
+  // For Image/GIF/Voice/Video: download media to local temp file so Core reads
+  // local files instead of remote URLs (avoids hang on large/slow downloads in Core)
+  const mediaDownloadTypes = [MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video];
+  if (inboundMediaUrl && message.payload?.type != null && mediaDownloadTypes.includes(message.payload.type)) {
+    const localPath = await downloadMediaToLocal(inboundMediaUrl, resolved.mediaType, log);
+    inboundMediaUrl = localPath; // undefined on failure — graceful degradation
+  }
   // Inline text file content if possible, or stream large files to temp
   const isFileMessage = message.payload?.type === MessageType.File;
   if (isFileMessage && resolved.mediaUrl) {
@@ -964,8 +1073,7 @@ export async function handleInboundMessage(params: {
   // --- Mention gating for group messages ---
   const requireMention = account.config.requireMention !== false;
   let historyPrefix = "";
-  let historyMediaUrls: string[] = [];
-  
+
   // Save original mention uids for reply (exclude bot itself)
   const originalMentionUids: string[] = (message.payload?.mention?.uids ?? []).filter((uid: string) => uid !== botUid);
 
@@ -1097,12 +1205,8 @@ export async function handleInboundMessage(params: {
     }
 
     // Build history context manually (JSON format)
-    // Collect media URLs from history entries for attachment to the inbound context
-    historyMediaUrls = entries
-      .filter((e: any) => e.msgType !== MessageType.File)
-      .map((e: any) => e.mediaUrl)
-      .filter((url: string | undefined): url is string => Boolean(url));
-
+    // History media URLs are kept in the text body only — not passed as MediaUrls
+    // to Core (they are remote URLs; only local paths should go through MediaUrls)
     if (entries.length > 0) {
       const messagesJson = JSON.stringify(entries.map((e: any) => ({
         sender: e.sender,
@@ -1198,9 +1302,9 @@ export async function handleInboundMessage(params: {
     CommandBody: rawBody,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     MediaUrls: (() => {
+      // Only pass current message's local media path (no remote history URLs)
       const current = isFileMessage ? undefined : inboundMediaUrl;
-      const urls = [...(current ? [current] : []), ...historyMediaUrls];
-      return urls.length > 0 ? urls : undefined;
+      return current ? [current] : undefined;
     })(),
     MediaTypes: resolved.mediaType ? [resolved.mediaType] : undefined,
     From: `dmwork:${message.from_uid}`,
