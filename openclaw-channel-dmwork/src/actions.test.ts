@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ChannelType } from "./types.js";
 
+// Mock uploadAndSendMedia — the streaming COS upload uses its own SDK internals
+// that can't be tested via fetch mocks alone. Upload logic is tested in inbound.test.ts.
+vi.mock("./inbound.js", () => ({
+  uploadAndSendMedia: vi.fn().mockResolvedValue(undefined),
+}));
+
 /**
  * Tests for message action handlers.
  * All API calls are mocked via global.fetch.
@@ -171,29 +177,9 @@ describe("handleDmworkMessageAction", () => {
 
   describe("send — media only (no text)", () => {
     it("should upload and send media without text", async () => {
-      let uploadCalled = false;
-      let mediaSentPayload: any = null;
-
-      globalThis.fetch = mockFetch({
-        "/v1/bot/upload/credentials": async () => {
-          // Return 404 to trigger fallback to legacy upload
-          return new Response("Not implemented in test", { status: 404 });
-        },
-        "/v1/bot/file/upload": async () => {
-          uploadCalled = true;
-          return jsonResponse({ url: "https://cdn.example.com/file/chat/img.png" });
-        },
-        "/v1/bot/sendMessage": async (_url, init) => {
-          mediaSentPayload = JSON.parse(init?.body as string);
-          return jsonResponse({ message_id: 1, message_seq: 1 });
-        },
-        "https://example.com/image.png": async () => {
-          return new Response(Buffer.from("fake-image"), {
-            status: 200,
-            headers: { "Content-Type": "image/png" },
-          });
-        },
-      });
+      const { uploadAndSendMedia } = await import("./inbound.js");
+      const uploadSpy = vi.mocked(uploadAndSendMedia);
+      uploadSpy.mockClear();
 
       const { handleDmworkMessageAction } = await import("./actions.js");
       const result = await handleDmworkMessageAction({
@@ -204,34 +190,27 @@ describe("handleDmworkMessageAction", () => {
       });
 
       expect(result.ok).toBe(true);
-      expect(uploadCalled).toBe(true);
+      expect(uploadSpy).toHaveBeenCalledOnce();
+      expect(uploadSpy.mock.calls[0][0]).toMatchObject({
+        mediaUrl: "https://example.com/image.png",
+        channelId: "uid1",
+      });
     });
   });
 
   describe("send — media + text", () => {
     it("should send both text and media", async () => {
       let textSent = false;
-      let uploadCalled = false;
+
+      const { uploadAndSendMedia } = await import("./inbound.js");
+      const uploadSpy = vi.mocked(uploadAndSendMedia);
+      uploadSpy.mockClear();
 
       globalThis.fetch = mockFetch({
-        "/v1/bot/upload/credentials": async () => {
-          // Return 404 to trigger fallback to legacy upload
-          return new Response("Not implemented in test", { status: 404 });
-        },
-        "/v1/bot/file/upload": async () => {
-          uploadCalled = true;
-          return jsonResponse({ url: "https://cdn.example.com/file/chat/doc.pdf" });
-        },
         "/v1/bot/sendMessage": async (_url, init) => {
           const body = JSON.parse(init?.body as string);
           if (body.payload?.content) textSent = true;
           return jsonResponse({ message_id: 1, message_seq: 1 });
-        },
-        "https://example.com/doc.pdf": async () => {
-          return new Response(Buffer.from("fake-pdf"), {
-            status: 200,
-            headers: { "Content-Type": "application/pdf" },
-          });
         },
       });
 
@@ -249,7 +228,7 @@ describe("handleDmworkMessageAction", () => {
 
       expect(result.ok).toBe(true);
       expect(textSent).toBe(true);
-      expect(uploadCalled).toBe(true);
+      expect(uploadSpy).toHaveBeenCalledOnce();
     });
   });
 

@@ -5,6 +5,7 @@
 
 import { ChannelType, MessageType } from "./types.js";
 import path from "path";
+import { open } from "node:fs/promises";
 // @ts-ignore — cos-nodejs-sdk-v5 has incomplete TypeScript definitions
 import COS from "cos-nodejs-sdk-v5";
 
@@ -141,6 +142,23 @@ export function parseImageDimensions(buf: Buffer, mime: string): { width: number
       }
     }
   } catch { /* ignore parse errors */ }
+  return null;
+}
+
+/**
+ * Parse image dimensions from a file path by reading only the first 64KB.
+ * Avoids loading the entire file into memory.
+ */
+export async function parseImageDimensionsFromFile(filePath: string, mime: string): Promise<{ width: number; height: number } | null> {
+  const HEADER_SIZE = 65536; // 64KB — enough for PNG/JPEG/GIF/WebP headers
+  let fh: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    fh = await open(filePath, "r");
+    const buf = Buffer.alloc(HEADER_SIZE);
+    const { bytesRead } = await fh.read(buf, 0, HEADER_SIZE, 0);
+    return parseImageDimensions(buf.subarray(0, bytesRead), mime);
+  } catch { /* ignore read/parse errors */ }
+  finally { await fh?.close(); }
   return null;
 }
 
@@ -522,7 +540,8 @@ export async function uploadFileToCOS(params: {
   bucket: string;
   region: string;
   key: string;
-  fileBuffer: Buffer;
+  fileBody: Buffer | NodeJS.ReadableStream;
+  fileSize?: number;
   contentType: string;
   cdnBaseUrl?: string;
 }): Promise<{ url: string }> {
@@ -534,13 +553,18 @@ export async function uploadFileToCOS(params: {
     ExpiredTime: params.expiredTime,
   } as any);
 
+  const putParams: Record<string, unknown> = {
+    Bucket: params.bucket,
+    Region: params.region,
+    Key: params.key,
+    Body: params.fileBody,
+  };
+  if (params.fileSize != null) {
+    putParams.ContentLength = params.fileSize;
+  }
+
   return new Promise((resolve, reject) => {
-    cos.putObject({
-      Bucket: params.bucket,
-      Region: params.region,
-      Key: params.key,
-      Body: params.fileBuffer,
-    } as any, (err: any, data: any) => {
+    cos.putObject(putParams as any, (err: any, data: any) => {
       if (err) {
         reject(new Error(`COS upload failed: ${err.message || JSON.stringify(err)}`));
       } else {

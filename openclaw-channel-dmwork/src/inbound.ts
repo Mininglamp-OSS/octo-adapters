@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, parseImageDimensions, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -77,68 +77,110 @@ export async function uploadAndSendMedia(params: {
 }): Promise<void> {
   const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
 
-  // Handle local file path or remote URL
-  let buffer: Buffer;
+  const { createReadStream: fsCreateReadStream, statSync: fsStatSync, createWriteStream: fsCreateWriteStream } = await import("node:fs");
+  const { basename, join: pathJoin } = await import("node:path");
+  const { mkdir: fsMkdir, unlink: fsUnlink } = await import("node:fs/promises");
+  const { randomUUID } = await import("node:crypto");
+  const { pipeline } = await import("node:stream/promises");
+  const { Readable } = await import("node:stream");
+
+  const MAX_UPLOAD = 500 * 1024 * 1024;
+  const TEMP_DIR = pathJoin("/tmp", "dmwork-upload");
+
+  let fileBody: Buffer | NodeJS.ReadableStream;
+  let fileSize: number;
   let contentType: string;
   let filename: string;
+  let tempPath: string | undefined;
 
   if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
+    filename = extractFilename(mediaUrl);
+    // Stream download to temp file
+    await fsMkdir(TEMP_DIR, { recursive: true });
+    tempPath = pathJoin(TEMP_DIR, `${randomUUID()}-${filename}`);
+
+    const head = await fetch(mediaUrl, { method: "HEAD" });
+    const cl = Number(head.headers.get("content-length") || 0);
+    if (cl > MAX_UPLOAD) throw new Error(`File too large (${cl} bytes, max ${MAX_UPLOAD})`);
+
     const resp = await fetch(mediaUrl);
     if (!resp.ok) throw new Error(`Failed to fetch media: ${resp.status}`);
-    buffer = Buffer.from(await resp.arrayBuffer());
     contentType = resp.headers.get("content-type") || "application/octet-stream";
-    filename = extractFilename(mediaUrl);
+
+    const body = resp.body;
+    if (!body) throw new Error(`No response body from ${mediaUrl}`);
+    const nodeStream = Readable.fromWeb(body as any);
+    const ws = fsCreateWriteStream(tempPath);
+    try {
+      await pipeline(nodeStream, ws);
+    } catch (err) {
+      // Cleanup partial temp file on download failure
+      await fsUnlink(tempPath).catch(() => {});
+      tempPath = undefined;
+      throw err;
+    }
+
+    const st = fsStatSync(tempPath);
+    fileBody = fsCreateReadStream(tempPath);
+    fileSize = st.size;
   } else {
-    // Local file path
-    const { readFileSync } = await import("node:fs");
-    const { basename } = await import("node:path");
-    buffer = readFileSync(mediaUrl);
+    // Local file path — stream, don't buffer
+    const st = fsStatSync(mediaUrl);
+    if (st.size > MAX_UPLOAD) throw new Error(`File too large (${st.size} bytes, max ${MAX_UPLOAD})`);
+    fileBody = fsCreateReadStream(mediaUrl);
+    fileSize = st.size;
     filename = basename(mediaUrl);
     contentType = inferContentType(filename);
   }
 
-  // Upload directly to COS via STS credentials (putObject supports Buffer directly)
-  const creds = await getUploadCredentials({ apiUrl, botToken, filename });
-  const { url: uploadedUrl } = await uploadFileToCOS({
-    credentials: creds.credentials,
-    startTime: creds.startTime,
-    expiredTime: creds.expiredTime,
-    bucket: creds.bucket,
-    region: creds.region,
-    key: creds.key,
-    fileBuffer: buffer,
-    contentType,
-    cdnBaseUrl: creds.cdnBaseUrl,
-  });
+  try {
+    // Upload to COS via STS credentials (stream mode)
+    const creds = await getUploadCredentials({ apiUrl, botToken, filename });
+    const { url: uploadedUrl } = await uploadFileToCOS({
+      credentials: creds.credentials,
+      startTime: creds.startTime,
+      expiredTime: creds.expiredTime,
+      bucket: creds.bucket,
+      region: creds.region,
+      key: creds.key,
+      fileBody,
+      fileSize,
+      contentType,
+      cdnBaseUrl: creds.cdnBaseUrl,
+    });
 
-  // Determine message type from MIME
-  const isImage = contentType.startsWith("image/");
-  const msgType = isImage ? MessageType.Image : MessageType.File;
+    // Determine message type from MIME
+    const isImage = contentType.startsWith("image/");
+    const msgType = isImage ? MessageType.Image : MessageType.File;
 
-  // For images, try to read dimensions from the buffer
-  let width: number | undefined;
-  let height: number | undefined;
-  if (isImage) {
-    const dims = parseImageDimensions(buffer, contentType);
-    width = dims?.width;
-    height = dims?.height;
+    // For images, parse dimensions from file (not full buffer)
+    let width: number | undefined;
+    let height: number | undefined;
+    if (isImage) {
+      const fileToParse = tempPath ?? mediaUrl;
+      const dims = await parseImageDimensionsFromFile(fileToParse, contentType);
+      width = dims?.width;
+      height = dims?.height;
+    }
+
+    log?.info?.(`dmwork: uploaded media as ${isImage ? "image" : "file"}: ${filename}${width ? ` (${width}x${height})` : ""}`);
+
+    // Send via sendMessage
+    await sendMediaMessage({
+      apiUrl,
+      botToken,
+      channelId,
+      channelType,
+      type: msgType,
+      url: uploadedUrl,
+      name: isImage ? undefined : filename,
+      size: isImage ? undefined : fileSize,
+      width,
+      height,
+    });
+  } finally {
+    if (tempPath) await fsUnlink(tempPath).catch(() => {});
   }
-
-  log?.info?.(`dmwork: uploaded media as ${isImage ? "image" : "file"}: ${filename}${width ? ` (${width}x${height})` : ""}`);
-
-  // Send via sendMessage
-  await sendMediaMessage({
-    apiUrl,
-    botToken,
-    channelId,
-    channelType,
-    type: msgType,
-    url: uploadedUrl,
-    name: isImage ? undefined : filename,
-    size: isImage ? undefined : buffer.length,
-    width,
-    height,
-  });
 }
 
 /** Guess MIME type from file extension */

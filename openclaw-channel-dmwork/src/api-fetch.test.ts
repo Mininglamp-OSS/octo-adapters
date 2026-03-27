@@ -495,6 +495,144 @@ describe("fetchBotGroups — null response", () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseImageDimensionsFromFile — streaming dimension parser
+// ---------------------------------------------------------------------------
+describe("parseImageDimensionsFromFile", () => {
+  it("should parse dimensions from a valid PNG file", async () => {
+    const { writeFileSync, mkdirSync, unlinkSync } = await import("node:fs");
+    const { join } = await import("node:path");
+
+    // Create a minimal valid PNG (1x1 pixel)
+    const pngHeader = Buffer.from([
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+      0x00, 0x00, 0x00, 0x0D, // IHDR chunk length
+      0x49, 0x48, 0x44, 0x52, // "IHDR"
+      0x00, 0x00, 0x00, 0x64, // width = 100
+      0x00, 0x00, 0x00, 0xC8, // height = 200
+      0x08, 0x02, 0x00, 0x00, 0x00, // bit depth, color type, etc.
+    ]);
+    const tmpDir = join("/tmp", "test-dims");
+    mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, "test.png");
+    writeFileSync(tmpFile, pngHeader);
+
+    try {
+      const { parseImageDimensionsFromFile } = await import("./api-fetch.js");
+      const dims = await parseImageDimensionsFromFile(tmpFile, "image/png");
+      expect(dims).toEqual({ width: 100, height: 200 });
+    } finally {
+      unlinkSync(tmpFile);
+    }
+  });
+
+  it("should return null for non-existent file", async () => {
+    const { parseImageDimensionsFromFile } = await import("./api-fetch.js");
+    const dims = await parseImageDimensionsFromFile("/tmp/nonexistent-test-file.png", "image/png");
+    expect(dims).toBeNull();
+  });
+
+  it("should return null for unsupported mime type", async () => {
+    const { writeFileSync, mkdirSync, unlinkSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const tmpFile = join("/tmp", "test-dims", "test.txt");
+    mkdirSync(join("/tmp", "test-dims"), { recursive: true });
+    writeFileSync(tmpFile, "not an image");
+
+    try {
+      const { parseImageDimensionsFromFile } = await import("./api-fetch.js");
+      const dims = await parseImageDimensionsFromFile(tmpFile, "text/plain");
+      expect(dims).toBeNull();
+    } finally {
+      unlinkSync(tmpFile);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getUploadCredentials — validates response shape
+// ---------------------------------------------------------------------------
+describe("getUploadCredentials", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should return credentials on valid response", async () => {
+    const fakeCreds = {
+      bucket: "my-bucket",
+      region: "ap-guangzhou",
+      key: "uploads/test.png",
+      credentials: {
+        tmpSecretId: "id123",
+        tmpSecretKey: "key456",
+        sessionToken: "tok789",
+      },
+      startTime: 1000,
+      expiredTime: 2000,
+      cdnBaseUrl: "https://cdn.example.com",
+    };
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue(fakeCreds),
+    }) as unknown as typeof fetch;
+
+    const { getUploadCredentials } = await import("./api-fetch.js");
+    const result = await getUploadCredentials({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      filename: "test.png",
+    });
+
+    expect(result.bucket).toBe("my-bucket");
+    expect(result.credentials.tmpSecretId).toBe("id123");
+  });
+
+  it("should throw on non-ok response", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: vi.fn().mockResolvedValue("Forbidden"),
+      statusText: "Forbidden",
+    }) as unknown as typeof fetch;
+
+    const { getUploadCredentials } = await import("./api-fetch.js");
+    await expect(
+      getUploadCredentials({
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        filename: "test.png",
+      }),
+    ).rejects.toThrow("403");
+  });
+
+  it("should throw on incomplete response (missing bucket)", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        region: "ap-guangzhou",
+        key: "uploads/test.png",
+        credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+      }),
+    }) as unknown as typeof fetch;
+
+    const { getUploadCredentials } = await import("./api-fetch.js");
+    await expect(
+      getUploadCredentials({
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        filename: "test.png",
+      }),
+    ).rejects.toThrow("incomplete");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // sendMediaMessage — Image vs File payload shape
 // ---------------------------------------------------------------------------
 describe("sendMediaMessage", () => {

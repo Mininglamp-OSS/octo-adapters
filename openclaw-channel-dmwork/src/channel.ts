@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -19,12 +19,63 @@ import { parseMentions } from "./mention-utils.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
-import path from "path";
-import os from "os";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import path from "node:path";
+import os from "node:os";
+import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
+import { createReadStream, createWriteStream, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { pipeline } from "node:stream/promises";
+import { Readable } from "node:stream";
 // HistoryEntry type - compatible with any version
 type HistoryEntry = { sender: string; body: string; timestamp: number };
 const DEFAULT_GROUP_HISTORY_LIMIT = 20;
+
+const MAX_UPLOAD_SIZE = 500 * 1024 * 1024; // 500 MB
+const UPLOAD_TEMP_DIR = path.join("/tmp", "dmwork-upload");
+
+/** Download a URL to a temp file with backpressure, return the temp path. */
+async function downloadToTempFile(url: string, filename: string, signal?: AbortSignal): Promise<{ tempPath: string; contentType: string | undefined }> {
+  await mkdir(UPLOAD_TEMP_DIR, { recursive: true });
+  const tempPath = path.join(UPLOAD_TEMP_DIR, `${randomUUID()}-${filename}`);
+
+  // HEAD to check size first
+  const head = await fetch(url, { method: "HEAD", signal: signal ?? AbortSignal.timeout(30_000) });
+  const contentLength = Number(head.headers.get("content-length") || 0);
+  if (contentLength > MAX_UPLOAD_SIZE) {
+    throw new Error(`File too large (${contentLength} bytes, max ${MAX_UPLOAD_SIZE})`);
+  }
+
+  const resp = await fetch(url, { signal: signal ?? AbortSignal.timeout(300_000) });
+  if (!resp.ok) throw new Error(`Failed to download media from ${url}: ${resp.status}`);
+  const contentType = resp.headers.get("content-type") ?? undefined;
+
+  const body = resp.body;
+  if (!body) throw new Error(`No response body from ${url}`);
+  const nodeStream = Readable.fromWeb(body as any);
+  const ws = createWriteStream(tempPath);
+  try {
+    await pipeline(nodeStream, ws);
+  } catch (err) {
+    // Cleanup partial temp file on download failure
+    await unlink(tempPath).catch(() => {});
+    throw err;
+  }
+  return { tempPath, contentType };
+}
+
+/** Cleanup old temp upload files (>1h). Called opportunistically. */
+async function cleanupOldUploadTempFiles(): Promise<void> {
+  try {
+    const { readdir, stat, unlink: rm } = await import("node:fs/promises");
+    const files = await readdir(UPLOAD_TEMP_DIR);
+    const now = Date.now();
+    for (const f of files) {
+      const fp = path.join(UPLOAD_TEMP_DIR, f);
+      const st = await stat(fp).catch(() => null);
+      if (st && now - st.mtimeMs > 3600_000) await rm(fp).catch(() => {});
+    }
+  } catch { /* dir may not exist */ }
+}
 
 // Module-level history storage — survives auto-restarts
 const _historyMaps = new Map<string, Map<string, any[]>>();
@@ -337,10 +388,16 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         throw new Error("sendMedia called without mediaUrl");
       }
 
-      // 1. Download the file
-      let fileBuffer: Buffer;
+      // 1. Resolve file — stream-based for HTTP/file paths, Buffer for data URIs
+      let fileBody: Buffer | NodeJS.ReadableStream;
+      let fileSize: number;
       let contentType: string | undefined;
       let filename: string;
+      let tempPath: string | undefined; // temp file we created (will be cleaned up)
+      let localFilePath: string | undefined; // path for parseImageDimensionsFromFile
+
+      // Opportunistic cleanup of stale temp files
+      cleanupOldUploadTempFiles().catch(() => {});
 
       if (mediaUrl.startsWith("data:")) {
         // Parse data URI: data:[<mediatype>][;base64],<data>
@@ -349,7 +406,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           throw new Error("Invalid data URI format");
         }
         contentType = match[1] || "application/octet-stream";
-        fileBuffer = Buffer.from(match[2], "base64");
+        const buf = Buffer.from(match[2], "base64");
+        fileBody = buf;
+        fileSize = buf.length;
         // Generate a reasonable filename from MIME type
         const extMap: Record<string, string> = {
           "text/markdown": ".md", "text/plain": ".txt", "application/pdf": ".pdf",
@@ -365,81 +424,97 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         }
       } else if (mediaUrl.startsWith("file://")) {
         const filePath = decodeURIComponent(mediaUrl.slice(7));
-        fileBuffer = await readFile(filePath);
+        const st = statSync(filePath);
+        if (st.size > MAX_UPLOAD_SIZE) {
+          throw new Error(`File too large (${st.size} bytes, max ${MAX_UPLOAD_SIZE})`);
+        }
+        localFilePath = filePath;
+        fileBody = createReadStream(filePath);
+        fileSize = st.size;
         filename = path.basename(filePath);
         contentType = inferContentType(filename);
       } else {
-        const resp = await fetch(mediaUrl, { signal: AbortSignal.timeout(300_000) });
-        if (!resp.ok) {
-          throw new Error(`Failed to download media from ${mediaUrl}: ${resp.status}`);
-        }
-        fileBuffer = Buffer.from(await resp.arrayBuffer());
-        contentType = resp.headers.get("content-type") ?? undefined;
-        // Extract filename from URL path
+        // HTTP(S) URL — stream download to temp file to avoid buffering in memory
         const urlPath = new URL(mediaUrl).pathname;
         filename = path.basename(urlPath) || "file";
-        if (!contentType) {
-          contentType = inferContentType(filename);
-        }
+        const dl = await downloadToTempFile(mediaUrl, filename);
+        tempPath = dl.tempPath;
+        localFilePath = dl.tempPath;
+        contentType = dl.contentType;
+        if (!contentType) contentType = inferContentType(filename);
+        const st = statSync(tempPath);
+        fileBody = createReadStream(tempPath);
+        fileSize = st.size;
       }
 
       contentType = contentType || "application/octet-stream";
 
-      // 2. Upload to COS via STS credentials (putObject supports Buffer directly)
-      const creds = await getUploadCredentials({
-        apiUrl: account.config.apiUrl,
-        botToken: account.config.botToken,
-        filename,
-      });
-      const { url: cdnUrl } = await uploadFileToCOS({
-        credentials: creds.credentials,
-        startTime: creds.startTime,
-        expiredTime: creds.expiredTime,
-        bucket: creds.bucket,
-        region: creds.region,
-        key: creds.key,
-        fileBuffer,
-        contentType,
-        cdnBaseUrl: creds.cdnBaseUrl,
-      });
-
-      // 4. Parse target using shared parseTarget + knownGroupIds
-      let targetForParse = ctx.to;
-      if (ctx.to.startsWith("group:")) {
-        const groupPart = ctx.to.slice(6);
-        const atIdx = groupPart.indexOf("@");
-        if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
-      }
-      const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
-
-      // 5. Determine message type and send
-      const msgType = contentType.startsWith("image/")
-        ? MessageType.Image
-        : MessageType.File;
-
-      if (msgType === MessageType.Image) {
-        const dims = parseImageDimensions(fileBuffer, contentType);
-        await sendMediaMessage({
+      try {
+        // 2. Upload to COS via STS credentials (stream mode)
+        const creds = await getUploadCredentials({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
-          channelId,
-          channelType,
-          type: msgType,
-          url: cdnUrl,
-          width: dims?.width,
-          height: dims?.height,
+          filename,
         });
-      } else {
-        await sendMediaMessage({
-          apiUrl: account.config.apiUrl,
-          botToken: account.config.botToken,
-          channelId,
-          channelType,
-          type: msgType,
-          url: cdnUrl,
-          name: filename,
-          size: fileBuffer.length,
+        const { url: cdnUrl } = await uploadFileToCOS({
+          credentials: creds.credentials,
+          startTime: creds.startTime,
+          expiredTime: creds.expiredTime,
+          bucket: creds.bucket,
+          region: creds.region,
+          key: creds.key,
+          fileBody,
+          fileSize,
+          contentType,
+          cdnBaseUrl: creds.cdnBaseUrl,
         });
+
+        // 3. Parse target using shared parseTarget + knownGroupIds
+        let targetForParse = ctx.to;
+        if (ctx.to.startsWith("group:")) {
+          const groupPart = ctx.to.slice(6);
+          const atIdx = groupPart.indexOf("@");
+          if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
+        }
+        const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
+
+        // 4. Determine message type and send
+        const msgType = contentType.startsWith("image/")
+          ? MessageType.Image
+          : MessageType.File;
+
+        if (msgType === MessageType.Image) {
+          // For images, parse dimensions from file or buffer
+          const dims = localFilePath
+            ? await parseImageDimensionsFromFile(localFilePath, contentType)
+            : Buffer.isBuffer(fileBody)
+              ? parseImageDimensions(fileBody, contentType)
+              : null;
+          await sendMediaMessage({
+            apiUrl: account.config.apiUrl,
+            botToken: account.config.botToken,
+            channelId,
+            channelType,
+            type: msgType,
+            url: cdnUrl,
+            width: dims?.width,
+            height: dims?.height,
+          });
+        } else {
+          await sendMediaMessage({
+            apiUrl: account.config.apiUrl,
+            botToken: account.config.botToken,
+            channelId,
+            channelType,
+            type: msgType,
+            url: cdnUrl,
+            name: filename,
+            size: fileSize,
+          });
+        }
+      } finally {
+        // Cleanup temp file
+        if (tempPath) await unlink(tempPath).catch(() => {});
       }
 
       return { channel: "dmwork", to: ctx.to, messageId: "" };
