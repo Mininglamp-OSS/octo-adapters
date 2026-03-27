@@ -1,7 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ChannelType, MessageType, type MentionPayload } from "./types.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
-import { resolveInnerMessageText, resolveApiMessagePlaceholder, resolveMultipleForwardText } from "./inbound.js";
+import {
+  resolveInnerMessageText,
+  resolveApiMessagePlaceholder,
+  resolveMultipleForwardText,
+  calcDownloadTimeout,
+  formatSize,
+  resolveFileContentWithRetry,
+  downloadToTemp,
+  uploadAndSendMedia,
+  type ResolveFileResult,
+} from "./inbound.js";
 
 /**
  * Tests for mention.all detection logic.
@@ -327,5 +337,290 @@ describe("GROUP.md event detection", () => {
 
   it("should NOT detect when payload is undefined", () => {
     expect(isGroupMdEvent(undefined)).toBe(false);
+  });
+});
+
+/**
+ * Tests for calcDownloadTimeout — calls the real exported function.
+ */
+describe("calcDownloadTimeout", () => {
+  it("should return minimum 5 minutes for small files", () => {
+    expect(calcDownloadTimeout(1024)).toBe(300_000);
+  });
+
+  it("should scale timeout based on file size (512KB/s baseline)", () => {
+    // 10MB file: ceil(10*1024*1024 / (512*1024)) * 1000 = ceil(20) * 1000 = 20_000
+    // But min is 300_000
+    expect(calcDownloadTimeout(10 * 1024 * 1024)).toBe(300_000);
+  });
+
+  it("should cap at 30 minutes max", () => {
+    expect(calcDownloadTimeout(1024 * 1024 * 1024)).toBe(1_800_000);
+  });
+
+  it("should assume 256MB when size is unknown", () => {
+    const timeout = calcDownloadTimeout(undefined);
+    // 256MB / (512*1024) * 1000 = 512 * 1000 = 512_000
+    expect(timeout).toBeGreaterThanOrEqual(300_000);
+    expect(timeout).toBeLessThanOrEqual(1_800_000);
+  });
+
+  it("should return computed timeout for large files", () => {
+    // 500MB: ceil(500*1024*1024 / (512*1024)) * 1000 = ceil(1000) * 1000 = 1_000_000
+    const timeout = calcDownloadTimeout(500 * 1024 * 1024);
+    expect(timeout).toBe(1_000_000);
+  });
+});
+
+/**
+ * Tests for formatSize — calls the real exported function.
+ */
+describe("formatSize", () => {
+  it("should format bytes", () => {
+    expect(formatSize(500)).toBe("500B");
+  });
+
+  it("should format kilobytes", () => {
+    expect(formatSize(20 * 1024)).toBe("20.0KB");
+  });
+
+  it("should format megabytes", () => {
+    expect(formatSize(52 * 1024 * 1024)).toBe("52.0MB");
+  });
+
+  it("should format gigabytes", () => {
+    expect(formatSize(2 * 1024 * 1024 * 1024)).toBe("2.0GB");
+  });
+});
+
+/**
+ * Tests for resolveFileContentWithRetry — mocks global fetch, calls the real function.
+ */
+describe("resolveFileContentWithRetry", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it("should return null for non-text file extensions", async () => {
+    const result = await resolveFileContentWithRetry(
+      "https://example.com/photo.png",
+      "token",
+      "photo.png",
+    );
+    expect(result).toBeNull();
+  });
+
+  it("should inline small text files (< 20KB)", async () => {
+    const smallContent = "Hello, world!";
+    const encoded = new TextEncoder().encode(smallContent);
+
+    globalThis.fetch = (vi.fn() as any)
+      // HEAD request
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": String(encoded.byteLength) }),
+      } as any)
+      // GET request
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": String(encoded.byteLength) }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded);
+            controller.close();
+          },
+        }),
+      } as any);
+
+    const result = await resolveFileContentWithRetry(
+      "https://example.com/file.txt",
+      "token",
+      "file.txt",
+    );
+    expect(result).not.toBeNull();
+    expect(result).toHaveProperty("inline", smallContent);
+  });
+
+  it("should return description for file > 20KB with Content-Length", async () => {
+    const largeSize = 25 * 1024;
+
+    globalThis.fetch = (vi.fn() as any)
+      // HEAD request reports large file
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": String(largeSize) }),
+      } as any)
+      // downloadToTemp GET request — simulate failure to keep test simple
+      .mockRejectedValueOnce(new Error("HTTP 500"));
+
+    const result = await resolveFileContentWithRetry(
+      "https://example.com/large.txt",
+      "token",
+      "large.txt",
+      { knownSize: largeSize, maxRetries: 1 },
+    );
+    // Should not be null (text extension), and should not be inline
+    expect(result).not.toBeNull();
+    expect(result).not.toHaveProperty("inline");
+  });
+
+  it("should reject file exceeding 500MB hard cap via HEAD without downloading", async () => {
+    const hugeSize = 600 * 1024 * 1024; // 600MB
+
+    globalThis.fetch = (vi.fn() as any)
+      // HEAD request reports 600MB
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": String(hugeSize) }),
+      } as any);
+
+    // Do NOT pass knownSize — let HEAD discovery trigger the 500MB check
+    const result = await resolveFileContentWithRetry(
+      "https://example.com/huge.csv",
+      "token",
+      "huge.csv",
+      { maxRetries: 3 },
+    );
+    // Should return error description, NOT attempt download
+    expect(result).toHaveProperty("description");
+    expect((result as any).description).toContain("500.0MB");
+    expect((result as any).description).toContain("最大下载限制");
+    // Only HEAD request, no GET — verify no download attempted
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("should fall back to GET streaming when HEAD fails", async () => {
+    const content = "fallback content";
+    const encoded = new TextEncoder().encode(content);
+
+    globalThis.fetch = (vi.fn() as any)
+      // HEAD request fails
+      .mockRejectedValueOnce(new Error("HEAD not supported"))
+      // GET request succeeds
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": String(encoded.byteLength) }),
+        body: new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoded);
+            controller.close();
+          },
+        }),
+      } as any);
+
+    const result = await resolveFileContentWithRetry(
+      "https://example.com/data.json",
+      "token",
+      "data.json",
+    );
+    expect(result).toHaveProperty("inline", content);
+  });
+
+  it("should return error description on HTTP 404 and NOT retry", async () => {
+    globalThis.fetch = (vi.fn() as any)
+      // HEAD request
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": "100" }),
+      } as any)
+      // GET returns 404
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        headers: new Headers(),
+      } as any);
+
+    const result = await resolveFileContentWithRetry(
+      "https://example.com/missing.txt",
+      "token",
+      "missing.txt",
+      { maxRetries: 3 },
+    );
+
+    expect(result).not.toBeNull();
+    expect(result).toHaveProperty("description");
+    expect((result as { description: string }).description).toContain("HTTP 404");
+    // Should only have called fetch twice (HEAD + one GET), not retried
+    expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("should retry on timeout and return error description", async () => {
+    globalThis.fetch = (vi.fn() as any)
+      // HEAD request
+      .mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ "content-length": "100" }),
+      } as any)
+      // All GET attempts timeout
+      .mockRejectedValueOnce(new Error("TimeoutError"))
+      .mockRejectedValueOnce(new Error("TimeoutError"));
+
+    const result = await resolveFileContentWithRetry(
+      "https://example.com/slow.txt",
+      "token",
+      "slow.txt",
+      { maxRetries: 2 },
+    );
+
+    expect(result).not.toBeNull();
+    expect(result).toHaveProperty("description");
+    expect((result as { description: string }).description).toContain("下载失败");
+  });
+});
+
+/**
+ * Tests for uploadAndSendMedia timeout signal.
+ *
+ * Verifies that the fetch call to download media includes a timeout signal
+ * by inspecting the function's behavior with a mocked global fetch.
+ */
+describe("uploadAndSendMedia timeout", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("should pass timeout signal to fetch", async () => {
+    const calls: Array<{ url: string; method?: string; signal?: AbortSignal }> = [];
+    const { Readable } = await import("node:stream");
+    vi.stubGlobal("fetch", async (url: string, opts?: any) => {
+      calls.push({ url, method: opts?.method, signal: opts?.signal });
+      if (opts?.method === "HEAD") {
+        return {
+          ok: true,
+          headers: new Headers({ "content-length": "8" }),
+        };
+      }
+      // GET request — return a readable stream body
+      const body = new Readable({ read() { this.push(Buffer.alloc(8)); this.push(null); } });
+      return {
+        ok: true,
+        headers: new Headers({ "content-type": "image/png" }),
+        body,
+      };
+    });
+
+    // Call uploadAndSendMedia — it will use the mocked fetch for HEAD + GET,
+    // then fail on getUploadCredentials (which also uses fetch but posts to API)
+    let caughtError: unknown;
+    try {
+      await uploadAndSendMedia({
+        mediaUrl: "https://example.com/img.png",
+        apiUrl: "https://api.example.com",
+        botToken: "token",
+        channelId: "ch1",
+        channelType: ChannelType.DM,
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    // calls[0] is HEAD (no signal), calls[1] is GET with timeout signal
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[0].method).toBe("HEAD");
+    expect(calls[1].signal).toBeDefined();
   });
 });

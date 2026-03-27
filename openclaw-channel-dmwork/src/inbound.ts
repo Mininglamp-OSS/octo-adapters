@@ -7,6 +7,10 @@ import { getDmworkRuntime } from "./runtime.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import { extractMentionMatches } from "./mention-utils.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate } from "./group-md.js";
+import { createWriteStream } from "node:fs";
+import { mkdir, unlink, readdir, stat } from "node:fs/promises";
+import { join, basename } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
@@ -103,7 +107,9 @@ export async function uploadAndSendMedia(params: {
     const cl = Number(head.headers.get("content-length") || 0);
     if (cl > MAX_UPLOAD) throw new Error(`File too large (${cl} bytes, max ${MAX_UPLOAD})`);
 
-    const resp = await fetch(mediaUrl);
+    const resp = await fetch(mediaUrl, {
+      signal: AbortSignal.timeout(300_000),
+    });
     if (!resp.ok) throw new Error(`Failed to fetch media: ${resp.status}`);
     contentType = resp.headers.get("content-type") || "application/octet-stream";
 
@@ -378,30 +384,291 @@ async function fetchAsDataUrl(
   }
 }
 
-async function resolveFileContent(
+/** Format bytes as human-readable size string */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)}GB`;
+}
+
+/** Calculate dynamic timeout based on file size (512KB/s baseline, min 5min, max 30min) */
+export function calcDownloadTimeout(fileSize?: number): number {
+  const MIN_TIMEOUT = 300_000;    // 5 minutes
+  const MAX_TIMEOUT = 1_800_000;  // 30 minutes
+  const ASSUMED_SIZE = 256 * 1024 * 1024; // 256MB if unknown
+  const size = fileSize ?? ASSUMED_SIZE;
+  const computed = Math.ceil(size / (512 * 1024)) * 1000; // 512KB/s baseline
+  return Math.min(MAX_TIMEOUT, Math.max(MIN_TIMEOUT, computed));
+}
+
+const TEMP_DIR = join("/tmp", "dmwork-files");
+const MAX_DOWNLOAD_SIZE = 500 * 1024 * 1024; // 500MB hard cap
+
+/** Best-effort cleanup of temp files older than 1 hour */
+async function cleanupTempFiles(): Promise<void> {
+  try {
+    const entries = await readdir(TEMP_DIR);
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const entry of entries) {
+      try {
+        const filePath = join(TEMP_DIR, entry);
+        const info = await stat(filePath);
+        if (info.mtimeMs < cutoff) {
+          await unlink(filePath);
+        }
+      } catch {}
+    }
+  } catch {}
+}
+
+/** Download a file to a temp path, streaming to disk with size limit.
+ *  Returns the local path on success. */
+export async function downloadToTemp(
   url: string,
   botToken: string,
-  maxBytes = 5 * 1024 * 1024,
-): Promise<string | null> {
+  filename: string,
+  opts?: { knownSize?: number; log?: ChannelLogSink },
+): Promise<string> {
+  await mkdir(TEMP_DIR, { recursive: true });
+  // Non-blocking cleanup of old temp files
+  cleanupTempFiles().catch(() => {});
+
+  const safeName = basename(filename).replace(/[^a-zA-Z0-9._-]/g, '_') || 'file';
+  const localPath = join(TEMP_DIR, `${randomUUID()}-${safeName}`);
+  const timeout = calcDownloadTimeout(opts?.knownSize);
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${botToken}` },
+    signal: AbortSignal.timeout(timeout),
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.body) throw new Error("no response body");
+
+  const ws = createWriteStream(localPath);
+  let totalBytes = 0;
   try {
-    const ext = url.split(".").pop()?.toLowerCase() ?? "";
-    if (!TEXT_FILE_EXTENSIONS.has(ext)) return null;
-
-    const resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${botToken}` },
-      signal: AbortSignal.timeout(30_000),
+    const reader = (resp.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_DOWNLOAD_SIZE) {
+        reader.cancel();
+        throw new Error(`file exceeds max download size (${formatSize(MAX_DOWNLOAD_SIZE)})`);
+      }
+      if (!ws.write(value)) {
+        await new Promise<void>(r => ws.once('drain', r));
+      }
+    }
+    ws.end();
+    await new Promise<void>((resolve, reject) => {
+      ws.on("finish", resolve);
+      ws.on("error", reject);
     });
-    if (!resp.ok || !resp.body) return null;
-
-    const contentLength = resp.headers.get("content-length");
-    if (contentLength && parseInt(contentLength, 10) > maxBytes) return null;
-
-    const buffer = await resp.arrayBuffer();
-    if (buffer.byteLength > maxBytes) return null;
-    return new TextDecoder().decode(buffer);
-  } catch {
-    return null;
+  } catch (err) {
+    ws.destroy();
+    // Best-effort cleanup
+    try { await unlink(localPath); } catch {}
+    throw err;
   }
+  opts?.log?.info?.(`dmwork: file downloaded to temp: ${localPath}`);
+  return localPath;
+}
+
+/**
+ * Attempt to resolve file content for inline display.
+ *
+ * - Only attempts inline for text-like file extensions
+ * - Threshold reduced to 20KB to avoid blowing up LLM context
+ * - Sends HEAD request first to check size before downloading
+ * - Streams the body with a size guard instead of buffering entirely
+ * - For files above inline threshold, streams to a temp file on disk
+ * - Returns error description string on failure (never silent null)
+ *
+ * Return value:
+ *   { inline: string }             – file content was inlined
+ *   { tempPath: string }           – file was saved to temp
+ *   { description: string }        – download skipped or failed; embed this in message
+ *   null                           – non-text extension, no action needed
+ */
+export type ResolveFileResult =
+  | { inline: string }
+  | { tempPath: string }
+  | { description: string }
+  | null;
+
+export async function resolveFileContentWithRetry(
+  url: string,
+  botToken: string,
+  filename: string,
+  opts?: { knownSize?: number; maxRetries?: number; log?: ChannelLogSink },
+): Promise<ResolveFileResult> {
+  let ext = "";
+  try {
+    ext = new URL(url).pathname.split(".").pop()?.toLowerCase() ?? "";
+  } catch {
+    ext = url.split(".").pop()?.toLowerCase() ?? "";
+  }
+  if (!TEXT_FILE_EXTENSIONS.has(ext)) return null;
+
+  const maxBytes = 20 * 1024; // 20KB inline threshold
+  const knownSize = opts?.knownSize;
+  const maxRetries = opts?.maxRetries ?? 3;
+  const log = opts?.log;
+
+  // If we already know the file is too large for inline, stream to temp
+  if (knownSize != null && knownSize > maxBytes) {
+    log?.info?.(`dmwork: file too large for inline (${formatSize(knownSize)}), streaming to temp`);
+    return await downloadLargeFileWithRetry(url, botToken, filename, { knownSize, maxRetries, log });
+  }
+
+  // HEAD pre-check to get Content-Length without downloading
+  let headSize: number | undefined;
+  try {
+    const headResp = await fetch(url, {
+      method: "HEAD",
+      headers: { Authorization: `Bearer ${botToken}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (headResp.ok) {
+      const cl = headResp.headers.get("content-length");
+      if (cl) headSize = parseInt(cl, 10);
+    }
+  } catch {
+    // HEAD failed — proceed with streaming download
+  }
+
+  // Reject files exceeding hard cap before any download attempt
+  if (headSize != null && headSize > MAX_DOWNLOAD_SIZE) {
+    log?.info?.(`dmwork: HEAD reports ${formatSize(headSize)}, exceeds max download size (${formatSize(MAX_DOWNLOAD_SIZE)}), skipping`);
+    return { description: `[文件: ${filename} (${formatSize(headSize)}) - 文件超过最大下载限制(${formatSize(MAX_DOWNLOAD_SIZE)})]` };
+  }
+
+  if (headSize != null && headSize > maxBytes) {
+    log?.info?.(`dmwork: HEAD reports ${formatSize(headSize)}, exceeds inline threshold, streaming to temp`);
+    return await downloadLargeFileWithRetry(url, botToken, filename, { knownSize: headSize, maxRetries, log });
+  }
+
+  // Attempt inline download with streaming size guard
+  let lastError: string | undefined;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const timeout = calcDownloadTimeout(headSize ?? knownSize);
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${botToken}` },
+        signal: AbortSignal.timeout(timeout),
+      });
+      if (!resp.ok) {
+        lastError = `HTTP ${resp.status}`;
+        log?.warn?.(`dmwork: resolveFileContent attempt ${attempt}/${maxRetries} failed: ${lastError}`);
+        if (resp.status >= 400 && resp.status < 500) break;
+        if (attempt < maxRetries) await sleep(1000 * attempt);
+        continue;
+      }
+      if (!resp.body) {
+        lastError = "no response body";
+        break;
+      }
+
+      // Check Content-Length from GET response
+      const cl = resp.headers.get("content-length");
+      if (cl && parseInt(cl, 10) > maxBytes) {
+        log?.info?.(`dmwork: GET Content-Length ${cl} exceeds inline threshold, streaming to temp`);
+        // Cancel this response; download to temp instead
+        try { resp.body.cancel(); } catch {}
+        return await downloadLargeFileWithRetry(url, botToken, filename, { knownSize: parseInt(cl, 10), maxRetries: maxRetries - attempt + 1, log });
+      }
+
+      // Stream body with size guard
+      const reader = (resp.body as any).getReader() as ReadableStreamDefaultReader<Uint8Array>;
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      let exceededInline = false;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxBytes) {
+          exceededInline = true;
+          reader.cancel();
+          break;
+        }
+        chunks.push(value);
+      }
+
+      if (exceededInline) {
+        log?.info?.(`dmwork: file exceeded inline threshold during stream (${formatSize(totalBytes)}+), streaming to temp`);
+        return await downloadLargeFileWithRetry(url, botToken, filename, { knownSize: totalBytes, maxRetries: maxRetries - attempt + 1, log });
+      }
+
+      // Inline the content
+      const combined = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      const text = new TextDecoder().decode(combined);
+      log?.info?.(`dmwork: file inlined (${formatSize(totalBytes)})`);
+      return { inline: text };
+    } catch (err) {
+      const errMsg = String(err);
+      lastError = errMsg.includes("TimeoutError") || errMsg.includes("abort") ? "下载超时" : `网络错误`;
+      log?.warn?.(`dmwork: resolveFileContent attempt ${attempt}/${maxRetries} error: ${errMsg}`);
+      if (attempt < maxRetries) await sleep(1000 * attempt);
+    }
+  }
+
+  const sizeInfo = knownSize != null ? ` (${formatSize(knownSize)})` : headSize != null ? ` (${formatSize(headSize)})` : "";
+  return { description: `[文件: ${filename}${sizeInfo} - 下载失败: ${lastError ?? "未知错误"}]` };
+}
+
+/** Download large file to temp with retry + exponential backoff */
+async function downloadLargeFileWithRetry(
+  url: string,
+  botToken: string,
+  filename: string,
+  opts: { knownSize?: number; maxRetries: number; log?: ChannelLogSink },
+): Promise<ResolveFileResult> {
+  const { knownSize, maxRetries, log } = opts;
+
+  // Reject files exceeding hard cap before any download attempt
+  if (knownSize != null && knownSize > MAX_DOWNLOAD_SIZE) {
+    log?.info?.(`dmwork: file size ${formatSize(knownSize)} exceeds max download size (${formatSize(MAX_DOWNLOAD_SIZE)}), skipping`);
+    return { description: `[文件: ${filename} (${formatSize(knownSize)}) - 文件超过最大下载限制(${formatSize(MAX_DOWNLOAD_SIZE)})]` };
+  }
+
+  let lastError: string | undefined;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const start = Date.now();
+      const tempPath = await downloadToTemp(url, botToken, filename, { knownSize, log });
+      const duration = ((Date.now() - start) / 1000).toFixed(1);
+      log?.info?.(`dmwork: large file downloaded in ${duration}s: ${filename}`);
+      return { tempPath };
+    } catch (err) {
+      const errMsg = String(err);
+      lastError = errMsg.includes("TimeoutError") || errMsg.includes("abort")
+        ? `下载超时，已重试${attempt}次失败`
+        : errMsg.includes("HTTP ")
+        ? errMsg
+        : "网络错误";
+      log?.warn?.(`dmwork: downloadToTemp attempt ${attempt}/${maxRetries} failed: ${errMsg}`);
+      // 4xx errors are permanent — do not retry
+      const httpMatch = errMsg.match(/HTTP (\d+)/);
+      if (httpMatch) {
+        const status = parseInt(httpMatch[1], 10);
+        if (status >= 400 && status < 500) break;
+      }
+      if (attempt < maxRetries) await sleep(1000 * attempt * 2);
+    }
+  }
+  const sizeInfo = knownSize != null ? ` (${formatSize(knownSize)})` : "";
+  return { description: `[文件: ${filename}${sizeInfo} - ${lastError ?? "下载失败"}]` };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Placeholder text for non-text API history messages */
@@ -643,14 +910,33 @@ export async function handleInboundMessage(params: {
   const resolved = resolveContent(message.payload, account.config.apiUrl, log, account.config.cdnUrl);
   let rawBody = resolved.text;
   let inboundMediaUrl = resolved.mediaUrl;
-  // Inline text file content if possible
+  // Inline text file content if possible, or stream large files to temp
   const isFileMessage = message.payload?.type === MessageType.File;
   if (isFileMessage && resolved.mediaUrl) {
-    const fileContent = await resolveFileContent(resolved.mediaUrl, account.config.botToken ?? "");
-    if (fileContent) {
-      rawBody = `[文件: ${message.payload.name ?? "未知文件"}]\n\n--- 文件内容 ---\n${fileContent}\n--- 文件结束 ---`;
+    const payloadSize = typeof message.payload.size === "number" ? message.payload.size : undefined;
+    const fileName = (message.payload.name as string) ?? "未知文件";
+    if (payloadSize != null) {
+      log?.info?.(`dmwork: file message: ${fileName}, payload.size=${formatSize(payloadSize)}`);
+    }
+    const fileResult = await resolveFileContentWithRetry(
+      resolved.mediaUrl,
+      account.config.botToken ?? "",
+      fileName,
+      { knownSize: payloadSize, log },
+    );
+    if (fileResult && "inline" in fileResult) {
+      rawBody = `[文件: ${fileName}]\n\n--- 文件内容 ---\n${fileResult.inline}\n--- 文件结束 ---`;
+      inboundMediaUrl = undefined;
+    } else if (fileResult && "tempPath" in fileResult) {
+      // tempPath is intentionally included in the message body so the agent can read the file
+      const sizeStr = payloadSize != null ? ` (${formatSize(payloadSize)})` : "";
+      rawBody = `[文件: ${fileName}${sizeStr} - 已下载到本地: ${fileResult.tempPath}]`;
+      inboundMediaUrl = undefined;
+    } else if (fileResult && "description" in fileResult) {
+      rawBody = fileResult.description;
       inboundMediaUrl = undefined;
     }
+    // fileResult === null means non-text extension, keep original resolveContent result
   }
 
   // Media URLs are passed directly to the Agent (storage is public-read, no auth needed)
@@ -739,6 +1025,7 @@ export async function handleInboundMessage(params: {
         sender: message.from_uid,
         body: rawBody,
         mediaUrl: inboundMediaUrl,
+        msgType: message.payload?.type,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
       });
       const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
@@ -789,6 +1076,7 @@ export async function handleInboundMessage(params: {
           const entry: any = {
             sender: m.from_uid,
             body,
+            msgType: m.type,
             timestamp: m.timestamp,
           };
           // For media message types, resolve the URL directly (storage is public-read)
@@ -811,6 +1099,7 @@ export async function handleInboundMessage(params: {
     // Build history context manually (JSON format)
     // Collect media URLs from history entries for attachment to the inbound context
     historyMediaUrls = entries
+      .filter((e: any) => e.msgType !== MessageType.File)
       .map((e: any) => e.mediaUrl)
       .filter((url: string | undefined): url is string => Boolean(url));
 
@@ -907,9 +1196,10 @@ export async function handleInboundMessage(params: {
     BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
     RawBody: rawBody,
     CommandBody: rawBody,
-    MediaUrl: inboundMediaUrl,
+    MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     MediaUrls: (() => {
-      const urls = [...(inboundMediaUrl ? [inboundMediaUrl] : []), ...historyMediaUrls];
+      const current = isFileMessage ? undefined : inboundMediaUrl;
+      const urls = [...(current ? [current] : []), ...historyMediaUrls];
       return urls.length > 0 ? urls : undefined;
     })(),
     MediaTypes: resolved.mediaType ? [resolved.mediaType] : undefined,
