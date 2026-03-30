@@ -5,7 +5,16 @@ import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
-import { extractMentionMatches } from "./mention-utils.js";
+import {
+  extractMentionMatches,
+  extractMentionUids,
+  convertContentForLLM,
+  buildSenderPrefix,
+  parseStructuredMentions,
+  convertStructuredMentions,
+  buildEntitiesFromFallback,
+} from "./mention-utils.js";
+import type { MentionPayload, MentionEntity } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate } from "./group-md.js";
 import { createWriteStream } from "node:fs";
 import { mkdir, unlink, readdir, stat } from "node:fs/promises";
@@ -891,6 +900,20 @@ async function refreshGroupMemberCache(opts: {
   }
 }
 
+export function buildMemberListPrefix(uidToNameMap: Map<string, string>): string {
+  if (uidToNameMap.size === 0) return "";
+
+  if (uidToNameMap.size <= 10) {
+    const members = Array.from(uidToNameMap.entries());
+    const memberLines = members
+      .map(([uid, name]) => `  ${name} (${uid})`)
+      .join("\n");
+    return `[Group Members]\n${memberLines}\n\nWhen mentioning a group member, use the format @[uid:displayName] (e.g. @[${members[0][0]}:${members[0][1]}]). I will convert it to the correct format before sending.\n\n`;
+  }
+
+  return `[Group Info] This group has ${uidToNameMap.size} members. Use the group management tool to look up member info when needed. When mentioning a group member, use the format @[uid:displayName].\n\n`;
+}
+
 export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
@@ -1082,39 +1105,8 @@ export async function handleInboundMessage(params: {
     await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
 
-  // Build displayName -> uid mapping from message content + mention.uids
-  // When user sends "@陈皮皮 @托马斯.福 xxx", the @ names in content correspond to mention.uids in order
-  if (isGroup) {
-    const allMentionUids: string[] = message.payload?.mention?.uids ?? [];
-    // Match all @xxx patterns (including Chinese characters, dots, hyphens)
-    // Uses shared utility for consistent regex across inbound/outbound (fixes #31)
-    const contentMentions = extractMentionMatches(rawBody);
-    
-    if (contentMentions.length > 0 && allMentionUids.length > 0) {
-      log?.debug?.(`dmwork: [MAPPING] content @names: ${JSON.stringify(contentMentions)}, mention.uids: ${JSON.stringify(allMentionUids)}`);
-      
-      // Pair them in order
-      const pairCount = Math.min(contentMentions.length, allMentionUids.length);
-      for (let i = 0; i < pairCount; i++) {
-        const displayName = contentMentions[i].slice(1); // Remove @ prefix
-        const uid = allMentionUids[i];
-        if (displayName && uid) {
-          // Update both mappings
-          if (!memberMap.has(displayName)) {
-            memberMap.set(displayName, uid);
-            log?.debug?.(`dmwork: [MAPPING] learned name->uid mapping`);
-          }
-          if (!uidToNameMap.has(uid)) {
-            uidToNameMap.set(uid, displayName);
-            log?.debug?.(`dmwork: [MAPPING] learned uid->name mapping`);
-          }
-        }
-      }
-    }
-  }
-
   if (isGroup && requireMention) {
-    const mentionUids: string[] = message.payload?.mention?.uids ?? [];
+    const mentionUids = extractMentionUids(message.payload?.mention);
     // mention.all can be boolean `true` or numeric `1` depending on API version
     const mentionAllRaw = message.payload?.mention?.all;
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
@@ -1132,6 +1124,7 @@ export async function handleInboundMessage(params: {
       entries.push({
         sender: message.from_uid,
         body: rawBody,
+        mention: message.payload?.mention,
         mediaUrl: inboundMediaUrl,
         msgType: message.payload?.type,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
@@ -1184,6 +1177,7 @@ export async function handleInboundMessage(params: {
           const entry: any = {
             sender: m.from_uid,
             body,
+            mention: m.payload?.mention,
             msgType: m.type,
             timestamp: m.timestamp,
           };
@@ -1208,11 +1202,19 @@ export async function handleInboundMessage(params: {
     // History media URLs are kept in the text body only — not passed as MediaUrls
     // to Core (they are remote URLs; only local paths should go through MediaUrls)
     if (entries.length > 0) {
-      const messagesJson = JSON.stringify(entries.map((e: any) => ({
-        sender: e.sender,
-        body: e.body,
-        ...(e.mediaUrl ? { mediaUrl: e.mediaUrl } : {}),
-      })), null, 2);
+      const messagesJson = JSON.stringify(entries.map((e: any) => {
+        // Convert @name → @[uid:name] for LLM context
+        const bodyForLLM = e.mention
+          ? convertContentForLLM(e.body, e.mention, memberMap)
+          : e.body;
+        // sender format: displayName(uid)
+        const senderLabel = buildSenderPrefix(e.sender, uidToNameMap);
+        return {
+          sender: senderLabel,
+          body: bodyForLLM,
+          ...(e.mediaUrl ? { mediaUrl: e.mediaUrl } : {}),
+        };
+      }), null, 2);
       const template = account.config.historyPromptTemplate || DEFAULT_HISTORY_PROMPT_TEMPLATE;
       historyPrefix = template
         .replace("{messages}", messagesJson)
@@ -1281,7 +1283,12 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
-  const finalBody = (historyPrefix || quotePrefix) ? (historyPrefix + quotePrefix + rawBody) : rawBody;
+  // Inject member list for group messages to help LLM learn @[uid:name] format
+  const memberListPrefix = isGroup ? buildMemberListPrefix(uidToNameMap) : "";
+
+  const finalBody = (memberListPrefix || historyPrefix || quotePrefix)
+    ? (memberListPrefix + historyPrefix + quotePrefix + rawBody)
+    : rawBody;
 
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
@@ -1431,97 +1438,103 @@ export async function handleInboundMessage(params: {
         }
         if (!content) return;
 
-        // Build mentionUids from @mentions in content, using memberMap to resolve displayName -> uid
-        // The order of mentionUids MUST match the order of @xxx in content for correct linking!
+        // Build mentionUids + entities from @mentions in content
+        // Supports both @[uid:name] (v2 structured) and @name (v1 fallback)
         let replyMentionUids: string[] = [];
+        let replyMentionEntities: MentionEntity[] = [];
         let finalContent = content;
-        
+
         if (isGroup) {
-          // Parse all @mentions from content (support Chinese, English, dots, underscores, hex uids)
-          // Uses shared utility for consistent regex across inbound/outbound (fixes #31)
-          const contentMentions = extractMentionMatches(content);
-          
-          log?.debug?.(`dmwork: [REPLY] content @mentions count: ${contentMentions.length}`);
-          log?.debug?.(`dmwork: [REPLY] memberMap size: ${memberMap.size}, uidToNameMap size: ${uidToNameMap.size}`);
-          
-          // Track if we need to retry after cache refresh
-          let unresolvedNames: { name: string; index: number }[] = [];
-          
-          // Helper to resolve a single mention
-          const resolveMention = (name: string): { uid: string | null; newContent: string } => {
-            // First try memberMap (displayName -> uid)
-            let uid = findUidByName(name, memberMap);
-            let newContent = finalContent;
-            
-            if (uid) {
-              log?.debug?.(`dmwork: [REPLY] resolved displayName to uid`);
-              return { uid, newContent };
-            } else if (/^[a-f0-9]{32}$/i.test(name)) {
-              // Looks like a hex uid (32 chars) - try to find display name
-              const displayName = uidToNameMap.get(name);
-              if (displayName) {
-                newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                log?.debug?.(`dmwork: [REPLY] replaced uid with displayName`);
+          const structuredMentions = parseStructuredMentions(content);
+
+          if (structuredMentions.length > 0) {
+            // v2 path: LLM used @[uid:name] format
+            const validUids = new Set(uidToNameMap.keys());
+            const converted = convertStructuredMentions(
+              content,
+              structuredMentions,
+              validUids,
+            );
+            finalContent = converted.content;
+            replyMentionEntities = [...converted.entities];
+
+            // Mixed scenario: check for remaining @name in converted content
+            const remaining = buildEntitiesFromFallback(finalContent, memberMap);
+            const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
+            for (const rm of remaining.entities) {
+              if (!existingOffsets.has(rm.offset)) {
+                replyMentionEntities.push(rm);
+              }
+            }
+
+            log?.debug?.(
+              `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
+            );
+          } else {
+            // v1 fallback path: LLM used @name format
+            // Keep existing resolveMention logic for hex uid / uid-format handling
+            const contentMentions = extractMentionMatches(content);
+
+            let unresolvedNames: { name: string; index: number }[] = [];
+
+            const resolveMention = (name: string): { uid: string | null; newContent: string } => {
+              let uid = findUidByName(name, memberMap);
+              let newContent = finalContent;
+
+              if (uid) {
+                return { uid, newContent };
+              } else if (/^[a-f0-9]{32}$/i.test(name)) {
+                const displayName = uidToNameMap.get(name);
+                if (displayName) {
+                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
+                  return { uid: name, newContent };
+                }
                 return { uid: name, newContent };
-              } else {
-                log?.warn?.(`dmwork: [REPLY] unknown hex uid, no displayName found`);
+              } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
+                const displayName = uidToNameMap.get(name);
+                if (displayName) {
+                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
+                  return { uid: name, newContent };
+                }
                 return { uid: name, newContent };
               }
-            } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
-              // Looks like a uid format (alphanumeric + underscore)
-              const displayName = uidToNameMap.get(name);
-              if (displayName) {
-                newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                log?.debug?.(`dmwork: [REPLY] replaced uid with displayName`);
-                return { uid: name, newContent };
-              } else {
-                log?.debug?.(`dmwork: [REPLY] using mention as uid directly`);
-                return { uid: name, newContent };
-              }
-            } else {
-              // Chinese name not found - track for retry
               return { uid: null, newContent };
+            };
+
+            const resolvedUids: (string | null)[] = [];
+            for (const mention of contentMentions) {
+              const name = mention.slice(1);
+              const result = resolveMention(name);
+              finalContent = result.newContent;
+              resolvedUids.push(result.uid);
+              if (!result.uid) {
+                unresolvedNames.push({ name, index: resolvedUids.length - 1 });
+              }
             }
-          };
-          
-          // First pass: try to resolve all mentions, tracking indices for order preservation
-          const resolvedUids: (string | null)[] = [];
-          for (const mention of contentMentions) {
-            const name = mention.slice(1);
-            const result = resolveMention(name);
-            finalContent = result.newContent;
-            resolvedUids.push(result.uid); // null if unresolved
-            if (!result.uid) {
-              unresolvedNames.push({ name, index: resolvedUids.length - 1 });
-            }
-          }
-          
-          // If we have unresolved names, try refreshing the cache and retry
-          if (unresolvedNames.length > 0) {
-            log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
-            const refreshed = await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
-            
-            if (refreshed) {
-              // Retry unresolved names and insert at original positions
-              for (const { name, index } of unresolvedNames) {
-                const uid = findUidByName(name, memberMap);
-                if (uid) {
-                  resolvedUids[index] = uid; // Insert at original position
-                  log?.debug?.(`dmwork: [REPLY] after refresh: resolved @${name}`);
-                } else {
-                  log?.warn?.(`dmwork: [REPLY] after refresh: still cannot resolve @${name}`);
+
+            if (unresolvedNames.length > 0) {
+              log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
+              const refreshed = await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
+              if (refreshed) {
+                for (const { name, index } of unresolvedNames) {
+                  const uid = findUidByName(name, memberMap);
+                  if (uid) {
+                    resolvedUids[index] = uid;
+                  }
                 }
               }
             }
+
+            replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
+            // Build entities from fallback for the final content
+            const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
+            replyMentionEntities = fallbackResult.entities;
           }
-          
-          // Build final mention UIDs array preserving original order
-          replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
-          
-          
-          if (replyMentionUids.length > 0) {
-            log?.debug?.(`dmwork: [REPLY] final mentionUids count: ${replyMentionUids.length}`);
-            log?.debug?.(`dmwork: [REPLY] final content length: ${finalContent.length}`);
+
+          // Sort entities by offset and rebuild uids from sorted entities
+          if (replyMentionEntities.length > 0) {
+            replyMentionEntities.sort((a, b) => a.offset - b.offset);
+            replyMentionUids = replyMentionEntities.map((e) => e.uid);
           }
         }
 
@@ -1532,6 +1545,7 @@ export async function handleInboundMessage(params: {
           channelType: replyChannelType,
           content: finalContent,
           ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
+          ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
         });
 
         statusSink?.({ lastOutboundAt: Date.now(), lastError: null });

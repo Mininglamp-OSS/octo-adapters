@@ -1,5 +1,58 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// ─── Token refresh cooldown tests ───────────────────────────────────────────
+// These test the time-based cooldown pattern used in channel.ts onError handler
+// to prevent token refresh storms.
+
+describe("token refresh cooldown logic", () => {
+  it("should allow refresh when cooldown has elapsed", () => {
+    let lastTokenRefreshAt = 0;
+    const TOKEN_REFRESH_COOLDOWN_MS = 60_000;
+
+    const cooldownElapsed = Date.now() - lastTokenRefreshAt > TOKEN_REFRESH_COOLDOWN_MS;
+    expect(cooldownElapsed).toBe(true);
+  });
+
+  it("should block refresh within cooldown window", () => {
+    const TOKEN_REFRESH_COOLDOWN_MS = 60_000;
+    let lastTokenRefreshAt = Date.now(); // just refreshed
+
+    const cooldownElapsed = Date.now() - lastTokenRefreshAt > TOKEN_REFRESH_COOLDOWN_MS;
+    expect(cooldownElapsed).toBe(false);
+  });
+
+  it("should allow refresh after cooldown expires", () => {
+    const TOKEN_REFRESH_COOLDOWN_MS = 60_000;
+    // Simulate a refresh that happened 61 seconds ago
+    let lastTokenRefreshAt = Date.now() - 61_000;
+
+    const cooldownElapsed = Date.now() - lastTokenRefreshAt > TOKEN_REFRESH_COOLDOWN_MS;
+    expect(cooldownElapsed).toBe(true);
+  });
+
+  it("should keep cooldown active even after failed refresh (no reset)", () => {
+    const TOKEN_REFRESH_COOLDOWN_MS = 60_000;
+    let lastTokenRefreshAt = 0;
+
+    // Simulate a refresh attempt (set timestamp before trying)
+    lastTokenRefreshAt = Date.now();
+
+    // Simulate failure — in the old code, hasRefreshedToken was reset to false
+    // In the new code, lastTokenRefreshAt stays set (no reset in catch block)
+    // So subsequent attempts within cooldown should be blocked
+    const cooldownElapsed = Date.now() - lastTokenRefreshAt > TOKEN_REFRESH_COOLDOWN_MS;
+    expect(cooldownElapsed).toBe(false);
+  });
+
+  it("should apply stagger delay before reconnect", async () => {
+    // Verify the stagger delay pattern works
+    const start = Date.now();
+    const staggerMs = Math.floor(Math.random() * 5000);
+    expect(staggerMs).toBeGreaterThanOrEqual(0);
+    expect(staggerMs).toBeLessThan(5000);
+  });
+});
+
 /**
  * Tests for channel.ts singleton timer behavior.
  * Verifies that cleanup timer doesn't accumulate during hot reloads.

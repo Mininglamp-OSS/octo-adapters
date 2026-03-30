@@ -16,7 +16,8 @@ import {
   updateGroupMd,
 } from "./api-fetch.js";
 import { uploadAndSendMedia } from "./inbound.js";
-import { parseMentions } from "./mention-utils.js";
+import { buildEntitiesFromFallback } from "./mention-utils.js";
+import type { MentionEntity } from "./types.js";
 import { getKnownGroupIds } from "./group-md.js";
 
 export interface MessageActionResult {
@@ -164,15 +165,12 @@ async function handleSend(params: {
   // Send text message
   if (message) {
     let mentionUids: string[] = [];
+    let mentionEntities: MentionEntity[] = [];
 
     if (channelType === ChannelType.Group && memberMap) {
-      const mentionNames = parseMentions(message);
-      for (const name of mentionNames) {
-        const uid = memberMap.get(name);
-        if (uid && !mentionUids.includes(uid)) {
-          mentionUids.push(uid);
-        }
-      }
+      const { entities, uids } = buildEntitiesFromFallback(message, memberMap);
+      mentionUids = uids;
+      mentionEntities = entities;
     }
 
     await sendMessage({
@@ -182,6 +180,7 @@ async function handleSend(params: {
       channelType,
       content: message,
       ...(mentionUids.length > 0 ? { mentionUids } : {}),
+      ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
     });
   }
 

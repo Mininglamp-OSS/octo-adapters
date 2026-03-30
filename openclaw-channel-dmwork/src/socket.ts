@@ -260,6 +260,7 @@ export class WKSocket extends EventEmitter {
   private heartTimer: ReturnType<typeof setInterval> | null = null;
   private pingRetryCount = 0;
   private readonly pingMaxRetry = 3;
+  private reconnectAttempts = 0;
 
   // Per-instance crypto state (set after CONNACK)
   private aesKey = "";
@@ -338,6 +339,11 @@ export class WKSocket extends EventEmitter {
     });
 
     ws.on("close", () => {
+      // Ignore close events from stale WebSocket instances.
+      // When onError triggers disconnect()+connect(), the old WS close event
+      // fires asynchronously and must not trigger a phantom reconnect.
+      if (this.ws !== ws) return;
+
       if (this.connected) {
         this.connected = false;
         this.opts.onDisconnected?.();
@@ -356,11 +362,18 @@ export class WKSocket extends EventEmitter {
 
   private scheduleReconnect(): void {
     this.stopReconnectTimer();
+    const baseDelay = 3000;
+    const maxDelay = 60000;
+    const exponentialDelay = Math.min(baseDelay * Math.pow(2, this.reconnectAttempts), maxDelay);
+    // Add ±25% random jitter to prevent thundering herd
+    const jitter = exponentialDelay * (0.75 + Math.random() * 0.5);
+    const delay = Math.floor(jitter);
+    this.reconnectAttempts++;
     this.reconnectTimer = setTimeout(() => {
       if (this.needReconnect) {
         this.doConnect();
       }
-    }, 3000);
+    }, delay);
   }
 
   private stopReconnectTimer(): void {
@@ -539,6 +552,7 @@ export class WKSocket extends EventEmitter {
       this.aesIV = salt && salt.length > 16 ? salt.substring(0, 16) : salt;
 
       this.connected = true;
+      this.reconnectAttempts = 0;
       this.restartHeart();
       this.opts.onConnected?.();
     } else if (reasonCode === 0) {

@@ -3,7 +3,7 @@
  * These are used by inbound/outbound where the full DMWorkAPI class is not available.
  */
 
-import { ChannelType, MessageType } from "./types.js";
+import { ChannelType, MessageType, type MentionEntity } from "./types.js";
 import path from "path";
 import { open } from "node:fs/promises";
 // @ts-ignore — cos-nodejs-sdk-v5 has incomplete TypeScript definitions
@@ -63,6 +63,7 @@ export async function sendMediaMessage(params: {
   width?: number;
   height?: number;
   mentionUids?: string[];
+  mentionEntities?: MentionEntity[];
   signal?: AbortSignal;
 }): Promise<void> {
   const payload: Record<string, unknown> = {
@@ -79,8 +80,18 @@ export async function sendMediaMessage(params: {
     if (params.size != null) payload.size = params.size;
   }
 
-  if (params.mentionUids && params.mentionUids.length > 0) {
-    payload.mention = { uids: params.mentionUids };
+  if (
+    (params.mentionUids && params.mentionUids.length > 0) ||
+    (params.mentionEntities && params.mentionEntities.length > 0)
+  ) {
+    const mention: Record<string, unknown> = {};
+    if (params.mentionUids && params.mentionUids.length > 0) {
+      mention.uids = params.mentionUids;
+    }
+    if (params.mentionEntities && params.mentionEntities.length > 0) {
+      mention.entities = params.mentionEntities;
+    }
+    payload.mention = mention;
   }
   await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
@@ -169,6 +180,7 @@ export async function sendMessage(params: {
   channelType: ChannelType;
   content: string;
   mentionUids?: string[];
+  mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
   streamNo?: string;
   replyMsgId?: string;
@@ -178,11 +190,18 @@ export async function sendMessage(params: {
     type: MessageType.Text,
     content: params.content,
   };
-  // Add mention field if any UIDs specified or mentionAll
-  if ((params.mentionUids && params.mentionUids.length > 0) || params.mentionAll) {
+  // Add mention field if any UIDs specified, entities present, or mentionAll
+  if (
+    (params.mentionUids && params.mentionUids.length > 0) ||
+    (params.mentionEntities && params.mentionEntities.length > 0) ||
+    params.mentionAll
+  ) {
     const mention: Record<string, unknown> = {};
     if (params.mentionUids && params.mentionUids.length > 0) {
       mention.uids = params.mentionUids;
+    }
+    if (params.mentionEntities && params.mentionEntities.length > 0) {
+      mention.entities = params.mentionEntities;
     }
     if (params.mentionAll) {
       mention.all = true;

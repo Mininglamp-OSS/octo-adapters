@@ -47,8 +47,22 @@ export interface BotMessage {
   payload: MessagePayload;
 }
 
+/**
+ * 单个 mention 的精确位置描述。
+ * offset/length 的单位为 UTF-16 code units（与 JS string.length 一致）。
+ */
+export interface MentionEntity {
+  /** 被 @ 用户的唯一标识符 */
+  uid: string;
+  /** @name 在 content 中的起始位置（包括 @ 符号） */
+  offset: number;
+  /** @name 的完整长度（包括 @ 符号） */
+  length: number;
+}
+
 export interface MentionPayload {
   uids?: string[];
+  entities?: MentionEntity[];
   all?: boolean | number; // true or 1 = @all (API returns either depending on version)
 }
 

@@ -1,5 +1,17 @@
 import { describe, it, expect } from "vitest";
-import { parseMentions, extractMentionMatches, MENTION_PATTERN } from "./mention-utils.js";
+import {
+  parseMentions,
+  extractMentionMatches,
+  MENTION_PATTERN,
+  STRUCTURED_MENTION_PATTERN,
+  parseStructuredMentions,
+  convertStructuredMentions,
+  buildEntitiesFromFallback,
+  extractMentionUids,
+  convertContentForLLM,
+  buildSenderPrefix,
+} from "./mention-utils.js";
+import type { MentionPayload } from "./types.js";
 
 /**
  * Tests for shared @mention parsing utilities.
@@ -53,9 +65,19 @@ describe("parseMentions", () => {
     expect(result).toEqual(["start", "end"]);
   });
 
-  it("should handle consecutive mentions", () => {
-    const result = parseMentions("@user1@user2@user3");
-    expect(result).toEqual(["user1", "user2", "user3"]);
+  it("should NOT match email addresses", () => {
+    const result = parseMentions("Send to user@company.com");
+    expect(result).toEqual([]);
+  });
+
+  it("行首的 @mention 应正常匹配", () => {
+    const result = parseMentions("@陈皮皮 你好");
+    expect(result).toEqual(["陈皮皮"]);
+  });
+
+  it("空白后的 @mention 应正常匹配", () => {
+    const result = parseMentions("你好 @Bob 请看");
+    expect(result).toEqual(["Bob"]);
   });
 });
 
@@ -81,7 +103,6 @@ describe("MENTION_PATTERN", () => {
   });
 
   it("should match Chinese characters (CJK range)", () => {
-    // Test the pattern directly
     const testStr = "@中文名字";
     const regex = new RegExp(MENTION_PATTERN.source, "g");
     const match = testStr.match(regex);
@@ -93,5 +114,375 @@ describe("MENTION_PATTERN", () => {
     const regex = new RegExp(MENTION_PATTERN.source, "g");
     const match = testStr.match(regex);
     expect(match).toEqual(["@user_name_123"]);
+  });
+});
+
+describe("parseStructuredMentions", () => {
+  it("应解析 @[uid:name] 格式", () => {
+    const text = "Hi @[uid_bob:Bob] and @[uid_chen:陈皮皮]";
+    const result = parseStructuredMentions(text);
+    expect(result).toEqual([
+      { uid: "uid_bob", name: "Bob", offset: 3, length: 14 },
+      { uid: "uid_chen", name: "陈皮皮", offset: 22, length: 15 },
+    ]);
+    expect(text.substring(3, 3 + 14)).toBe("@[uid_bob:Bob]");
+    expect(text.substring(22, 22 + 15)).toBe("@[uid_chen:陈皮皮]");
+  });
+
+  it("应处理含点号和连字符的 uid", () => {
+    const text = "@[thomas.ford-1:Thomas Ford]";
+    const result = parseStructuredMentions(text);
+    expect(result).toEqual([
+      {
+        uid: "thomas.ford-1",
+        name: "Thomas Ford",
+        offset: 0,
+        length: 28,
+      },
+    ]);
+  });
+
+  it("应处理32位十六进制 uid", () => {
+    const text = "@[11be65096f214886b69ef9d8fcfa5c55:张三]";
+    const result = parseStructuredMentions(text);
+    expect(result).toHaveLength(1);
+    expect(result[0].uid).toBe("11be65096f214886b69ef9d8fcfa5c55");
+    expect(result[0].name).toBe("张三");
+    expect(result[0].offset).toBe(0);
+    expect(result[0].length).toBe(38);
+  });
+
+  it("无匹配时返回空数组", () => {
+    const result = parseStructuredMentions("Hello @Bob no structured");
+    expect(result).toEqual([]);
+  });
+
+  it("不应匹配含换行的格式", () => {
+    const result = parseStructuredMentions("@[uid:name\nmore]");
+    expect(result).toEqual([]);
+  });
+});
+
+describe("convertStructuredMentions", () => {
+  it("应正确转换单个 mention", () => {
+    const text = "Hi @[uid_bob:Bob]!";
+    const mentions = parseStructuredMentions(text);
+    const validUids = new Set(["uid_bob"]);
+    const result = convertStructuredMentions(text, mentions, validUids);
+
+    expect(result.content).toBe("Hi @Bob!");
+    expect(result.entities).toEqual([
+      { uid: "uid_bob", offset: 3, length: 4 },
+    ]);
+    expect(result.uids).toEqual(["uid_bob"]);
+    expect(result.content.substring(3, 7)).toBe("@Bob");
+  });
+
+  it("应处理多个 mention", () => {
+    const text = "@[uid_a:Alice] and @[uid_b:Bob]";
+    const mentions = parseStructuredMentions(text);
+    const validUids = new Set(["uid_a", "uid_b"]);
+    const result = convertStructuredMentions(text, mentions, validUids);
+
+    expect(result.content).toBe("@Alice and @Bob");
+    expect(result.entities).toHaveLength(2);
+    expect(result.entities[0]).toEqual({ uid: "uid_a", offset: 0, length: 6 });
+    expect(result.entities[1]).toEqual({ uid: "uid_b", offset: 11, length: 4 });
+    expect(result.content.substring(0, 6)).toBe("@Alice");
+    expect(result.content.substring(11, 15)).toBe("@Bob");
+  });
+
+  it("应处理无效 uid（不加入 entities 但保留 @name 文本）", () => {
+    const text = "@[fake:Bob] and @[uid_bob:Bob]";
+    const mentions = parseStructuredMentions(text);
+    const validUids = new Set(["uid_bob"]);
+    const result = convertStructuredMentions(text, mentions, validUids);
+
+    expect(result.content).toBe("@Bob and @Bob");
+    expect(result.entities).toEqual([
+      { uid: "uid_bob", offset: 9, length: 4 },
+    ]);
+    expect(result.content.substring(9, 13)).toBe("@Bob");
+  });
+
+  it("应处理中文用户名", () => {
+    const text = "你好 @[uid_chen:陈皮皮] 和 @[uid_bob:Bob]";
+    const mentions = parseStructuredMentions(text);
+    const validUids = new Set(["uid_chen", "uid_bob"]);
+    const result = convertStructuredMentions(text, mentions, validUids);
+
+    expect(result.content).toBe("你好 @陈皮皮 和 @Bob");
+    expect(result.entities).toHaveLength(2);
+    expect(result.entities[0]).toEqual({ uid: "uid_chen", offset: 3, length: 4 });
+    expect(result.entities[1]).toEqual({ uid: "uid_bob", offset: 10, length: 4 });
+    expect(result.content.substring(3, 7)).toBe("@陈皮皮");
+    expect(result.content.substring(10, 14)).toBe("@Bob");
+  });
+});
+
+describe("buildEntitiesFromFallback", () => {
+  it("应从 memberMap 解析 @name", () => {
+    const memberMap = new Map([
+      ["陈皮皮", "uid_chen"],
+      ["Bob", "uid_bob"],
+    ]);
+    const { entities, uids } = buildEntitiesFromFallback(
+      "你好 @陈皮皮 和 @Bob",
+      memberMap,
+    );
+
+    expect(uids).toEqual(["uid_chen", "uid_bob"]);
+    expect(entities).toHaveLength(2);
+    expect(entities[0]).toEqual({ uid: "uid_chen", offset: 3, length: 4 });
+    expect(entities[1]).toEqual({ uid: "uid_bob", offset: 10, length: 4 });
+  });
+
+  it("应忽略 memberMap 中不存在的 @name", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback(
+      "@Unknown @Bob",
+      memberMap,
+    );
+
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0]).toEqual({ uid: "uid_bob", offset: 9, length: 4 });
+  });
+
+  it("空 memberMap 返回空结果", () => {
+    const { entities, uids } = buildEntitiesFromFallback(
+      "@Bob @陈皮皮",
+      new Map(),
+    );
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+});
+
+describe("extractMentionUids", () => {
+  it("应从 entities 提取 uid", () => {
+    const mention: MentionPayload = {
+      entities: [
+        { uid: "uid_a", offset: 0, length: 4 },
+        { uid: "uid_b", offset: 5, length: 4 },
+      ],
+      uids: ["uid_old"],
+    };
+    expect(extractMentionUids(mention)).toEqual(["uid_a", "uid_b"]);
+  });
+
+  it("entities 全部无效时应 fallback 到 uids", () => {
+    const mention: MentionPayload = {
+      entities: [{} as any, null as any],
+      uids: ["bot_uid"],
+    };
+    expect(extractMentionUids(mention)).toEqual(["bot_uid"]);
+  });
+
+  it("无 entities 时应使用 uids", () => {
+    const mention: MentionPayload = {
+      uids: ["uid_a", "uid_b"],
+    };
+    expect(extractMentionUids(mention)).toEqual(["uid_a", "uid_b"]);
+  });
+
+  it("均无时返回空数组", () => {
+    expect(extractMentionUids(undefined)).toEqual([]);
+    expect(extractMentionUids({})).toEqual([]);
+  });
+
+  it("应过滤非 string 类型的 uid", () => {
+    const mention: MentionPayload = {
+      uids: ["uid_a", 123 as any, null as any, "uid_b"],
+    };
+    expect(extractMentionUids(mention)).toEqual(["uid_a", "uid_b"]);
+  });
+});
+
+describe("convertContentForLLM", () => {
+  it("entities 路径：应将 @name 转换为 @[uid:name]", () => {
+    const content = "你好 @陈皮皮 和 @Bob 请看下";
+    const mention: MentionPayload = {
+      uids: ["uid_chen", "uid_bob"],
+      entities: [
+        { uid: "uid_chen", offset: 3, length: 4 },
+        { uid: "uid_bob", offset: 10, length: 4 },
+      ],
+    };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("你好 @[uid_chen:陈皮皮] 和 @[uid_bob:Bob] 请看下");
+  });
+
+  it("entities 无效时应 fallback 到 uids", () => {
+    const content = "@Alice @Bob";
+    const mention: MentionPayload = {
+      entities: [{} as any],
+      uids: ["uid_a", "uid_b"],
+    };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("@[uid_a:Alice] @[uid_b:Bob]");
+  });
+
+  it("entities offset 越界应跳过", () => {
+    const content = "Hi @Bob";
+    const mention: MentionPayload = {
+      entities: [
+        { uid: "uid_bob", offset: 3, length: 4 },
+        { uid: "uid_x", offset: 100, length: 5 },
+      ],
+    };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("Hi @[uid_bob:Bob]");
+  });
+
+  it("无 mention 返回原始 content", () => {
+    expect(convertContentForLLM("Hello world")).toBe("Hello world");
+    expect(convertContentForLLM("Hello world", undefined)).toBe("Hello world");
+  });
+
+  it("同名用户不同 uid 应正确转换", () => {
+    const content = "请 @陈皮皮 和 @陈皮皮 一起看下";
+    const mention: MentionPayload = {
+      uids: ["uid_chen_a", "uid_chen_b"],
+      entities: [
+        { uid: "uid_chen_a", offset: 2, length: 4 },
+        { uid: "uid_chen_b", offset: 9, length: 4 },
+      ],
+    };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toContain("@[uid_chen_a:陈皮皮]");
+    expect(result).toContain("@[uid_chen_b:陈皮皮]");
+  });
+
+  it("v1 with memberMap: known names resolved, unknown left as-is", () => {
+    const content = "@Angie 你好 @阿达西不在家";
+    const mention: MentionPayload = { uids: ["angie_bot", "unknown_uid"] };
+    const memberMap = new Map([["Angie", "angie_bot"]]);
+    const result = convertContentForLLM(content, mention, memberMap);
+    expect(result).toBe("@[angie_bot:Angie] 你好 @阿达西不在家");
+  });
+
+  it("v1 without memberMap: backward compat positional pairing", () => {
+    const content = "@Alice @Bob";
+    const mention: MentionPayload = { uids: ["uid_a", "uid_b"] };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("@[uid_a:Alice] @[uid_b:Bob]");
+  });
+
+  it("v1 with email in content: email NOT matched, mentions correctly resolved", () => {
+    const content = "发给xinyi@mininglamp.com 然后找 @Angie";
+    const mention: MentionPayload = { uids: ["angie_bot"] };
+    const memberMap = new Map([["Angie", "angie_bot"]]);
+    const result = convertContentForLLM(content, mention, memberMap);
+    expect(result).toContain("@[angie_bot:Angie]");
+    // Email should remain unchanged (not converted to @[...] format)
+    expect(result).toContain("xinyi@mininglamp.com");
+    expect(result).toBe("发给xinyi@mininglamp.com 然后找 @[angie_bot:Angie]");
+  });
+
+  it("v1 with empty memberMap: no replacements", () => {
+    const content = "@Alice @Bob";
+    const mention: MentionPayload = { uids: ["uid_a", "uid_b"] };
+    const emptyMap = new Map<string, string>();
+    const result = convertContentForLLM(content, mention, emptyMap);
+    // Empty memberMap means hasMemberMap is false, falls back to uids
+    expect(result).toBe("@[uid_a:Alice] @[uid_b:Bob]");
+  });
+
+  it("v1 with empty uids and no memberMap: returns original", () => {
+    const content = "@Alice @Bob";
+    const mention: MentionPayload = { uids: [] };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("@Alice @Bob");
+  });
+});
+
+describe("buildSenderPrefix", () => {
+  it("should return name(uid) when name is found", () => {
+    const map = new Map([["uid1", "Alice"]]);
+    expect(buildSenderPrefix("uid1", map)).toBe("Alice(uid1)");
+  });
+
+  it("should return uid when name is not found", () => {
+    const map = new Map<string, string>();
+    expect(buildSenderPrefix("uid1", map)).toBe("uid1");
+  });
+});
+
+describe("边界情况", () => {
+  it("entity.offset 超出 content 长度", () => {
+    const result = convertContentForLLM("Hi", {
+      entities: [{ uid: "uid", offset: 100, length: 4 }],
+    });
+    expect(result).toBe("Hi");
+  });
+
+  it("entity.length 为 0", () => {
+    const result = convertContentForLLM("@Bob", {
+      entities: [{ uid: "uid", offset: 0, length: 0 }],
+    });
+    expect(result).toBe("@Bob");
+  });
+
+  it("entity.offset 为负数", () => {
+    const result = convertContentForLLM("@Bob", {
+      entities: [{ uid: "uid", offset: -1, length: 4 }],
+    });
+    expect(result).toBe("@Bob");
+  });
+
+  it("entity.offset 或 length 为 NaN", () => {
+    const result = convertContentForLLM("@Bob", {
+      entities: [{ uid: "uid", offset: NaN, length: 4 }],
+    });
+    expect(result).toBe("@Bob");
+  });
+
+  it("entity.offset 或 length 为 Infinity", () => {
+    const result = convertContentForLLM("@Bob", {
+      entities: [{ uid: "uid", offset: 0, length: Infinity }],
+    });
+    expect(result).toBe("@Bob");
+  });
+
+  it("entities 数组包含 null", () => {
+    const uids = extractMentionUids({
+      entities: [null as any, { uid: "valid_uid", offset: 0, length: 4 }],
+    });
+    expect(uids).toEqual(["valid_uid"]);
+  });
+
+  it("content 在 entity.offset 处不以 @ 开头", () => {
+    const result = convertContentForLLM("Hello world", {
+      entities: [{ uid: "uid", offset: 0, length: 5 }],
+    });
+    expect(result).toBe("Hello world");
+  });
+
+  it("Emoji 用户名：UTF-16 offset/length 正确", () => {
+    const content = "@张三🐱 你好";
+    const mention: MentionPayload = {
+      entities: [{ uid: "uid_zhang", offset: 0, length: 5 }],
+    };
+    const result = convertContentForLLM(content, mention);
+    expect(result).toBe("@[uid_zhang:张三🐱] 你好");
+  });
+
+  it("混合 v2 + fallback 后 uids 顺序", () => {
+    const text = "Hi @[uid_chen:Chen] and @Bob";
+    const structured = parseStructuredMentions(text);
+    const validUids = new Set(["uid_chen"]);
+    const converted = convertStructuredMentions(text, structured, validUids);
+
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const remaining = buildEntitiesFromFallback(converted.content, memberMap);
+
+    const allEntities = [...converted.entities, ...remaining.entities];
+    allEntities.sort((a, b) => a.offset - b.offset);
+    const uids = allEntities.map((e) => e.uid);
+
+    expect(uids).toEqual(["uid_chen", "uid_bob"]);
+    expect(allEntities[0]).toEqual({ uid: "uid_chen", offset: 3, length: 5 });
+    expect(allEntities[1]).toEqual({ uid: "uid_bob", offset: 13, length: 4 });
   });
 });

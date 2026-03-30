@@ -8,3 +8,4 @@ src/**/*.d.ts
 .env.*
 *.tgz
 .DS_Store
+openclaw-channel-dmwork.bak/
