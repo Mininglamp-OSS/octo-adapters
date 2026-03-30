@@ -716,3 +716,81 @@ describe("sendMediaMessage", () => {
     expect(payload.height).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// ensureTextCharset
+// ---------------------------------------------------------------------------
+describe("ensureTextCharset", () => {
+  it("appends charset=utf-8 to text/plain", async () => {
+    const { ensureTextCharset } = await import("./api-fetch.js");
+    expect(ensureTextCharset("text/plain")).toBe("text/plain; charset=utf-8");
+  });
+
+  it("appends charset=utf-8 to text/markdown", async () => {
+    const { ensureTextCharset } = await import("./api-fetch.js");
+    expect(ensureTextCharset("text/markdown")).toBe("text/markdown; charset=utf-8");
+  });
+
+  it("appends charset=utf-8 to text/html", async () => {
+    const { ensureTextCharset } = await import("./api-fetch.js");
+    expect(ensureTextCharset("text/html")).toBe("text/html; charset=utf-8");
+  });
+
+  it("does not modify image/jpeg", async () => {
+    const { ensureTextCharset } = await import("./api-fetch.js");
+    expect(ensureTextCharset("image/jpeg")).toBe("image/jpeg");
+  });
+
+  it("does not double-add charset if already present", async () => {
+    const { ensureTextCharset } = await import("./api-fetch.js");
+    expect(ensureTextCharset("text/plain; charset=utf-8")).toBe("text/plain; charset=utf-8");
+  });
+
+  it("does not override existing charset=gbk", async () => {
+    const { ensureTextCharset } = await import("./api-fetch.js");
+    expect(ensureTextCharset("text/plain; charset=gbk")).toBe("text/plain; charset=gbk");
+  });
+
+  it("does not modify application/json", async () => {
+    const { ensureTextCharset } = await import("./api-fetch.js");
+    expect(ensureTextCharset("application/json")).toBe("application/json");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// uploadFileToCOS — putParams includes ContentType
+// ---------------------------------------------------------------------------
+describe("uploadFileToCOS putParams ContentType", () => {
+  it("passes ContentType to cos.putObject", async () => {
+    let capturedParams: any = null;
+
+    vi.resetModules();
+
+    // Mock cos-nodejs-sdk-v5 before importing api-fetch
+    vi.doMock("cos-nodejs-sdk-v5", () => {
+      return {
+        default: class FakeCOS {
+          putObject(params: any, cb: any) {
+            capturedParams = params;
+            cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
+          }
+        },
+      };
+    });
+
+    const { uploadFileToCOS } = await import("./api-fetch.js");
+    await uploadFileToCOS({
+      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+      startTime: 0,
+      expiredTime: 9999999999,
+      bucket: "test-bucket",
+      region: "ap-test",
+      key: "test/file.txt",
+      fileBody: Buffer.from("hello"),
+      contentType: "text/plain; charset=utf-8",
+    });
+
+    expect(capturedParams).not.toBeNull();
+    expect(capturedParams.ContentType).toBe("text/plain; charset=utf-8");
+  });
+});

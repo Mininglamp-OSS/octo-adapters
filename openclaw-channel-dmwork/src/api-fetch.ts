@@ -114,9 +114,23 @@ export function inferContentType(filename: string): string {
     ".pdf": "application/pdf", ".zip": "application/zip",
     ".doc": "application/msword", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xls": "application/vnd.ms-excel", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    ".txt": "text/plain", ".json": "application/json",
+    ".txt": "text/plain", ".md": "text/markdown", ".markdown": "text/markdown",
+    ".csv": "text/csv", ".html": "text/html", ".htm": "text/html",
+    ".css": "text/css", ".xml": "text/xml", ".yaml": "text/yaml", ".yml": "text/yaml",
+    ".json": "application/json",
   };
   return map[ext] ?? "application/octet-stream";
+}
+
+/**
+ * Ensure text/* content types include a charset parameter.
+ * If the content type starts with "text/" and has no charset, appends "; charset=utf-8".
+ */
+export function ensureTextCharset(contentType: string): string {
+  if (contentType.startsWith("text/") && !contentType.includes("charset")) {
+    return contentType + "; charset=utf-8";
+  }
+  return contentType;
 }
 
 /**
@@ -577,6 +591,7 @@ export async function uploadFileToCOS(params: {
     Region: params.region,
     Key: params.key,
     Body: params.fileBody,
+    ContentType: params.contentType,
   };
   if (params.fileSize != null) {
     putParams.ContentLength = params.fileSize;

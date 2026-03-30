@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -445,7 +445,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         tempPath = dl.tempPath;
         localFilePath = dl.tempPath;
         contentType = dl.contentType;
-        if (!contentType) contentType = inferContentType(filename);
+        if (!contentType || contentType === "application/octet-stream") contentType = inferContentType(filename);
         const st = statSync(tempPath);
         fileBody = createReadStream(tempPath);
         fileSize = st.size;
@@ -469,7 +469,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           key: creds.key,
           fileBody,
           fileSize,
-          contentType,
+          contentType: ensureTextCharset(contentType),
           cdnBaseUrl: creds.cdnBaseUrl,
         });
 
