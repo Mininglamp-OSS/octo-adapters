@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -10,6 +10,7 @@ import {
   extractMentionUids,
   convertContentForLLM,
   buildSenderPrefix,
+  resolveSenderName,
   parseStructuredMentions,
   convertStructuredMentions,
   buildEntitiesFromFallback,
@@ -1035,6 +1036,14 @@ export async function handleInboundMessage(params: {
   const resolved = resolveContent(message.payload, account.config.apiUrl, log, account.config.cdnUrl);
   let rawBody = resolved.text;
   let inboundMediaUrl = resolved.mediaUrl;
+
+  // Opportunistic uid→name cache fill from MultipleForward payloads
+  if (message.payload?.type === MessageType.MultipleForward && Array.isArray(message.payload.users)) {
+    for (const u of message.payload.users as Array<{ uid?: string; name?: string }>) {
+      if (u.uid && u.name) uidToNameMap.set(u.uid, u.name);
+    }
+  }
+
   // For Image/GIF/Voice/Video: download media to local temp file so Core reads
   // local files instead of remote URLs (avoids hang on large/slow downloads in Core)
   const mediaDownloadTypes = [MessageType.Image, MessageType.GIF, MessageType.Voice, MessageType.Video];
@@ -1091,6 +1100,10 @@ export async function handleInboundMessage(params: {
       quotePrefix = `[Quoted message from ${replyFrom}]: ${replyContent}\n---\n`;
       log?.info?.(`dmwork: message quotes a reply (${quotePrefix.length} chars)`);
     }
+    // Cache reply sender name for uid→name resolution (opportunistic fill)
+    if (replyData.from_uid && replyData.from_name) {
+      uidToNameMap.set(replyData.from_uid, replyData.from_name);
+    }
   }
 
   // --- Mention gating for group messages ---
@@ -1105,15 +1118,18 @@ export async function handleInboundMessage(params: {
     await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
 
-  if (isGroup && requireMention) {
+  // Compute isMentioned at top level so it's available for WasMentioned in finalizeInboundContext
+  let isMentioned = false;
+  if (isGroup) {
     const mentionUids = extractMentionUids(message.payload?.mention);
-    // mention.all can be boolean `true` or numeric `1` depending on API version
     const mentionAllRaw = message.payload?.mention?.all;
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
-    const isMentioned = mentionAll || mentionUids.includes(botUid);
-    
+    isMentioned = mentionAll || mentionUids.includes(botUid);
+  }
+
+  if (isGroup && requireMention) {
     // Debug: log received mention info
-    log?.debug?.(`dmwork: [RECV] mention payload: uidsCount=${mentionUids.length}, all=${mentionAll}, originalCount=${originalMentionUids.length}`);
+    log?.debug?.(`dmwork: [RECV] mention payload: isMentioned=${isMentioned}, originalCount=${originalMentionUids.length}`);
 
     if (!isMentioned) {
       // Record as pending history context (manual — avoids SDK format incompatibility)
@@ -1302,6 +1318,29 @@ export async function handleInboundMessage(params: {
   // Inject GROUP.md as GroupSystemPrompt for group messages
   const groupSystemPrompt = isGroup && groupMdCache ? groupMdCache.get(message.channel_id!)?.content : undefined;
 
+  // Resolve sender display name — async fallback for DM users not in cache
+  let senderName = resolveSenderName(message.from_uid, uidToNameMap);
+  if (!senderName && !isGroup) {
+    // DM user not in any group cache — try backend user info API
+    // Skip if we already tried and failed (negative cache sentinel "")
+    const cached = uidToNameMap.get(message.from_uid);
+    if (cached === undefined) {
+      const userInfo = await fetchUserInfo({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken ?? "",
+        uid: message.from_uid,
+        log,
+      });
+      if (userInfo?.name) {
+        senderName = userInfo.name;
+        uidToNameMap.set(message.from_uid, userInfo.name);
+      } else {
+        // Negative cache — prevent repeated API calls for unknown UIDs
+        uidToNameMap.set(message.from_uid, "");
+      }
+    }
+  }
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
@@ -1321,6 +1360,9 @@ export async function handleInboundMessage(params: {
     ChatType: isGroup ? "group" : "direct",
     ConversationLabel: fromLabel,
     SenderId: message.from_uid,
+    SenderName: senderName,
+    SenderUsername: message.from_uid,
+    WasMentioned: isGroup ? isMentioned : undefined,
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,

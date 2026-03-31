@@ -486,3 +486,75 @@ describe("边界情况", () => {
     expect(allEntities[1]).toEqual({ uid: "uid_bob", offset: 13, length: 4 });
   });
 });
+
+// --- extractBaseUid & resolveSenderName ---
+import { extractBaseUid, resolveSenderName } from "./mention-utils.js";
+
+describe("extractBaseUid", () => {
+  it("strips space prefix", () => {
+    expect(extractBaseUid("s14_abc123")).toBe("abc123");
+  });
+
+  it("handles multi-digit space id", () => {
+    expect(extractBaseUid("s1234_user456")).toBe("user456");
+  });
+
+  it("returns uid unchanged when no space prefix", () => {
+    expect(extractBaseUid("abc123")).toBe("abc123");
+  });
+
+  it("returns uid unchanged for 's' without underscore", () => {
+    expect(extractBaseUid("system")).toBe("system");
+  });
+
+  it("does not strip non-numeric space prefix (e.g. service_bot)", () => {
+    expect(extractBaseUid("service_bot")).toBe("service_bot");
+    expect(extractBaseUid("support_team")).toBe("support_team");
+  });
+});
+
+describe("resolveSenderName", () => {
+  it("returns direct match", () => {
+    const map = new Map([["s14_abc", "Alice"]]);
+    expect(resolveSenderName("s14_abc", map)).toBe("Alice");
+  });
+
+  it("returns undefined when no match", () => {
+    const map = new Map([["s14_abc", "Alice"]]);
+    expect(resolveSenderName("s14_xyz", map)).toBeUndefined();
+  });
+
+  it("falls back to base uid (non-space entry)", () => {
+    const map = new Map([["abc", "Alice"]]);
+    expect(resolveSenderName("s14_abc", map)).toBe("Alice");
+  });
+
+  it("falls back to cross-space variant", () => {
+    // User known as s10_abc in one space, DM from s14_abc
+    const map = new Map([["s10_abc", "Alice"]]);
+    expect(resolveSenderName("s14_abc", map)).toBe("Alice");
+  });
+
+  it("does not cross-space fallback for non-prefixed uid", () => {
+    // uid "abc" without space prefix should not scan
+    const map = new Map([["s10_abc", "Alice"]]);
+    expect(resolveSenderName("abc", map)).toBeUndefined();
+  });
+
+  it("prefers direct match over cross-space", () => {
+    const map = new Map([["s14_abc", "Alice-14"], ["s10_abc", "Alice-10"]]);
+    expect(resolveSenderName("s14_abc", map)).toBe("Alice-14");
+  });
+});
+
+describe("buildSenderPrefix with cross-space", () => {
+  it("shows name(uid) for cross-space hit", () => {
+    const map = new Map([["s10_abc", "Alice"]]);
+    expect(buildSenderPrefix("s14_abc", map)).toBe("Alice(s14_abc)");
+  });
+
+  it("shows raw uid when no match", () => {
+    const map = new Map([["s10_xyz", "Bob"]]);
+    expect(buildSenderPrefix("s14_abc", map)).toBe("s14_abc");
+  });
+});

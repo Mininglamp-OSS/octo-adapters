@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, getGroupMembers, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -155,7 +155,8 @@ function cleanupStaleCaches(): void {
       if (lastAccess < cutoff) {
         _historyMaps.get(accountId)?.delete(groupId);
         _memberMaps.get(accountId)?.delete(groupId);
-        _uidToNameMaps.get(accountId)?.delete(groupId);
+        // Note: uidToNameMap is a flat uid→name map (not keyed by groupId),
+        // so we don't delete from it here — names remain valid across groups.
         _groupCacheTimestamps.get(accountId)?.delete(groupId);
         activityMap.delete(groupId);
       }
@@ -593,27 +594,49 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // Check for updates in background (fire-and-forget)
       checkForUpdates(account.config.apiUrl, log).catch(() => {});
 
-      // Prefetch GROUP.md for all groups (fire-and-forget)
+      // Prefetch GROUP.md and group members for all groups (fire-and-forget)
       const groupMdCache = getOrCreateGroupMdCache(account.accountId);
       (async () => {
         try {
           const groups = await fetchBotGroups({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, log });
           registerBotGroupIds(groups.map(g => g.group_no));
+          let mdCount = 0;
+          let memberCount = 0;
           for (const g of groups) {
+            // Prefetch GROUP.md
             try {
               const md = await getGroupMd({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
               if (md.content) {
                 groupMdCache.set(g.group_no, { content: md.content, version: md.version });
+                mdCount++;
               }
             } catch {
               // Ignore per-group failures (group may not have GROUP.md)
             }
+            // Prefetch group members → fill uidToNameMap for SenderName resolution
+            try {
+              const members = await getGroupMembers({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
+              const prefetchMemberMap = getOrCreateMemberMap(account.accountId);
+              const prefetchUidMap = getOrCreateUidToNameMap(account.accountId);
+              for (const m of members) {
+                if (m.uid && m.name) {
+                  prefetchMemberMap.set(m.name, m.uid);
+                  prefetchUidMap.set(m.uid, m.name);
+                  memberCount++;
+                }
+              }
+            } catch {
+              // Ignore per-group failures
+            }
           }
-          if (groupMdCache.size > 0) {
-            log?.info?.(`dmwork: prefetched GROUP.md for ${groupMdCache.size} groups`);
+          if (mdCount > 0) {
+            log?.info?.(`dmwork: prefetched GROUP.md for ${mdCount} groups`);
+          }
+          if (memberCount > 0) {
+            log?.info?.(`dmwork: prefetched ${memberCount} member names from ${groups.length} groups`);
           }
         } catch (err) {
-          log?.error?.(`dmwork: GROUP.md prefetch failed: ${String(err)}`);
+          log?.error?.(`dmwork: group prefetch failed: ${String(err)}`);
         }
       })();
 

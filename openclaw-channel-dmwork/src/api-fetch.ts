@@ -649,3 +649,40 @@ export async function editMessage(params: {
     content_edit: params.contentEdit,
   }, params.signal);
 }
+
+/**
+ * Fetch user info by UID. Requires backend `/v1/bot/user/info` endpoint.
+ * Returns null if the endpoint is unavailable (404) or returns an error,
+ * so callers can gracefully degrade.
+ */
+export async function fetchUserInfo(params: {
+  apiUrl: string;
+  botToken: string;
+  uid: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ uid: string; name: string; avatar?: string } | null> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/user/info?uid=${encodeURIComponent(params.uid)}`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${params.botToken}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (resp.status === 404) {
+      // Endpoint not implemented yet — silent degrade
+      return null;
+    }
+    if (!resp.ok) {
+      params.log?.error?.(`dmwork: fetchUserInfo(${params.uid}) failed: ${resp.status}`);
+      return null;
+    }
+    const data = await resp.json() as { uid?: string; name?: string; avatar?: string };
+    if (data?.name) {
+      return { uid: data.uid ?? params.uid, name: data.name, avatar: data.avatar };
+    }
+    return null;
+  } catch (err) {
+    params.log?.error?.(`dmwork: fetchUserInfo(${params.uid}) error: ${String(err)}`);
+    return null;
+  }
+}

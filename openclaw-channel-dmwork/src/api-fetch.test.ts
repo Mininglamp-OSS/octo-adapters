@@ -794,3 +794,83 @@ describe("uploadFileToCOS putParams ContentType", () => {
     expect(capturedParams.ContentType).toBe("text/plain; charset=utf-8");
   });
 });
+
+// --- fetchUserInfo ---
+import { fetchUserInfo } from "./api-fetch.js";
+
+describe("fetchUserInfo", () => {
+  it("returns user info on success", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ uid: "s14_abc", name: "Alice", avatar: "https://example.com/a.png" }),
+    }) as any;
+
+    const result = await fetchUserInfo({
+      apiUrl: "http://localhost:8090",
+      botToken: "tok",
+      uid: "s14_abc",
+    });
+    expect(result).toEqual({ uid: "s14_abc", name: "Alice", avatar: "https://example.com/a.png" });
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      "http://localhost:8090/v1/bot/user/info?uid=s14_abc",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("returns null on 404 (endpoint not implemented)", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+    }) as any;
+
+    const result = await fetchUserInfo({
+      apiUrl: "http://localhost:8090",
+      botToken: "tok",
+      uid: "s14_abc",
+    });
+    expect(result).toBeNull();
+  });
+
+  it("returns null on 500 error", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+    }) as any;
+
+    const result = await fetchUserInfo({
+      apiUrl: "http://localhost:8090",
+      botToken: "tok",
+      uid: "s14_abc",
+      log: { error: vi.fn() },
+    });
+    expect(result).toBeNull();
+  });
+
+  it("returns null on network error", async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as any;
+
+    const result = await fetchUserInfo({
+      apiUrl: "http://localhost:8090",
+      botToken: "tok",
+      uid: "s14_abc",
+      log: { error: vi.fn() },
+    });
+    expect(result).toBeNull();
+  });
+
+  it("returns null when response has no name", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ uid: "s14_abc" }),
+    }) as any;
+
+    const result = await fetchUserInfo({
+      apiUrl: "http://localhost:8090",
+      botToken: "tok",
+      uid: "s14_abc",
+    });
+    expect(result).toBeNull();
+  });
+});

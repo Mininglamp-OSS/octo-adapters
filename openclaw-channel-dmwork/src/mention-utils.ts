@@ -319,13 +319,51 @@ export function convertContentForLLM(
 // ── Sender prefix utility ────────────────────────────────────────────────────
 
 /**
- * Build a sender label in the format "displayName(uid)" for history context.
- * Falls back to just uid if no name is found.
+/**
+ * Extract the base uid from a space-prefixed uid.
+ * "s14_abc123" → "abc123", "abc123" → "abc123"
  */
+export function extractBaseUid(uid: string): string {
+  // Space-prefixed format: s{digits}_{baseUid}
+  const match = uid.match(/^s(\d+)_(.+)$/);
+  if (match) return match[2];
+  return uid;
+}
+
+/**
+ * Resolve sender display name from uidToNameMap with cross-space fallback.
+ * 1. Direct lookup: uidToNameMap.get(from_uid)
+ * 2. Base uid fallback: strip space prefix and scan map for matching base uid
+ *    (covers DM users who appear in groups under a different space prefix)
+ */
+export function resolveSenderName(
+  fromUid: string,
+  uidToNameMap: Map<string, string>,
+): string | undefined {
+  // Direct hit (same space or no space prefix)
+  const direct = uidToNameMap.get(fromUid);
+  if (direct) return direct;
+
+  // Cross-space fallback: extract base uid and scan
+  const baseUid = extractBaseUid(fromUid);
+  if (baseUid !== fromUid) {
+    // Check if the base uid itself is in the map (non-space account)
+    const baseHit = uidToNameMap.get(baseUid);
+    if (baseHit) return baseHit;
+
+    // Scan for any space-prefixed variant with the same base uid
+    for (const [uid, name] of uidToNameMap) {
+      if (extractBaseUid(uid) === baseUid) return name;
+    }
+  }
+
+  return undefined;
+}
+
 export function buildSenderPrefix(
   fromUid: string,
   uidToNameMap: Map<string, string>,
 ): string {
-  const name = uidToNameMap.get(fromUid);
+  const name = resolveSenderName(fromUid, uidToNameMap);
   return name ? `${name}(${fromUid})` : fromUid;
 }
