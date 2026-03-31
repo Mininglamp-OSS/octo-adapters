@@ -161,20 +161,19 @@ describe("WKSocket reconnection", () => {
   });
 
   describe("reconnectAttempts reset on successful CONNACK", () => {
-    it("should reset reconnect attempts counter after successful connection", () => {
+    it("should reset reconnect attempts only after 30s stable timer fires", () => {
       const onConnected = vi.fn();
       const socket = createSocket({ onConnected });
       socket.connect();
 
       const ws = mockWsInstances[0];
 
-      // Build up reconnect attempts
+      // Build up reconnect attempts (5 close events → reconnectAttempts = 5)
       for (let i = 0; i < 5; i++) {
         ws.emit("close");
       }
 
       // Build a minimal CONNACK packet:
-      // Header byte: (CONNACK=2 << 4) | 1 (hasServerVersion flag)
       const serverVersion = 4;
       const reasonCode = 1; // success
       const serverKey = Buffer.from(new Uint8Array(32)).toString("base64");
@@ -182,19 +181,15 @@ describe("WKSocket reconnection", () => {
 
       const body: number[] = [];
       body.push(serverVersion);
-      // timeDiff (8 bytes)
-      for (let i = 0; i < 8; i++) body.push(0);
+      for (let i = 0; i < 8; i++) body.push(0); // timeDiff
       body.push(reasonCode);
-      // serverKey as string (2-byte length prefix + data)
       const keyBytes = [...Buffer.from(serverKey)];
       body.push((keyBytes.length >> 8) & 0xff, keyBytes.length & 0xff);
       body.push(...keyBytes);
-      // salt as string
       const saltBytes = [...Buffer.from(salt)];
       body.push((saltBytes.length >> 8) & 0xff, saltBytes.length & 0xff);
       body.push(...saltBytes);
-      // nodeId (8 bytes for version >= 4)
-      for (let i = 0; i < 8; i++) body.push(0);
+      for (let i = 0; i < 8; i++) body.push(0); // nodeId
 
       const header = (2 << 4) | 1; // CONNACK with hasServerVersion
       const packet = new Uint8Array([header, body.length, ...body]);
@@ -202,12 +197,17 @@ describe("WKSocket reconnection", () => {
       // Trigger the open event first so DH keypair is generated
       ws.emit("open");
 
-      // Now send CONNACK
+      // Send CONNACK — starts 30s stable timer but does NOT reset reconnectAttempts
       ws.emit("message", packet.buffer);
-
       expect(onConnected).toHaveBeenCalled();
 
-      // After successful CONNACK, next close+reconnect should use base delay
+      // Find the 30s stable timer callback and execute it
+      // (simulates 30s of stable connection)
+      const stableTimerCall = setTimeoutCalls.find(c => c.delay === 30_000);
+      expect(stableTimerCall).toBeDefined();
+      stableTimerCall!.fn();
+
+      // NOW after stable timer fires, next close+reconnect should use base delay
       setTimeoutCalls = [];
       ws.emit("close");
 
