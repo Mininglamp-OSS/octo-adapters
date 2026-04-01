@@ -133,4 +133,10 @@ export interface DMWorkGroupConfig {
   enabled?: boolean;
 }
 
-
+/** Minimal logger interface used across modules. */
+export type LogSink = {
+  info?: (msg: string) => void;
+  error?: (msg: string) => void;
+  warn?: (msg: string) => void;
+  debug?: (msg: string) => void;
+};

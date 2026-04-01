@@ -20,6 +20,8 @@ import type { MentionEntity } from "./types.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
+import { registerOwnerUid } from "./owner-registry.js";
+import { preloadGroupMemberCache } from "./member-cache.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -270,7 +272,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       } catch {
         return [];
       }
-      return ["send", "read"] as any; // TODO: remove when SDK types support this
+      return ["send", "read", "search"] as any; // TODO: remove when SDK types support this
     },
     extractToolSend: ({ args }: { args: Record<string, unknown> }) => {
       const target = args.target as string | undefined;
@@ -311,6 +313,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         uidToNameMap,
         groupMdCache,
         currentChannelId: ctx.toolContext?.currentChannelId ?? undefined,
+        requesterSenderId: ctx.requesterSenderId ?? undefined,
+        accountId,
         log: ctx.log,
       });
     },
@@ -650,12 +654,24 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // Track this bot's uid for bot-to-bot loop prevention
       _knownBotUids.add(credentials.robot_id);
 
+      // Register owner_uid for permission checks
+      if (credentials.owner_uid) {
+        registerOwnerUid(account.accountId, credentials.owner_uid);
+      }
+
       log?.info?.(
         `[${account.accountId}] bot registered as ${credentials.robot_id}`,
       );
 
       // Check for updates in background (fire-and-forget)
       checkForUpdates(account.config.apiUrl, log).catch(() => {});
+
+      // Preload member cache for cross-session permission checks (fire-and-forget)
+      preloadGroupMemberCache({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken!,
+        log,
+      }).catch(() => {});
 
       // Prefetch GROUP.md and group members for all groups (fire-and-forget)
       const groupMdCache = getOrCreateGroupMdCache(account.accountId);
