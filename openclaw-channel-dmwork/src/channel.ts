@@ -125,16 +125,26 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
 }
 
 
-// --- Group → Account mapping: tracks which account each group was received from ---
+// --- Group → Account mapping: tracks which accounts are active in each group ---
 // Used by handleAction to resolve the correct account when framework passes wrong accountId
-const _groupToAccount = new Map<string, string>(); // groupNo → accountId
+// A group may have multiple bots (1:N), so we store a Set of accountIds per group.
+const _groupToAccount = new Map<string, Set<string>>(); // groupNo → Set<accountId>
 
 export function registerGroupToAccount(groupNo: string, accountId: string): void {
-  _groupToAccount.set(groupNo, accountId);
+  let accounts = _groupToAccount.get(groupNo);
+  if (!accounts) {
+    accounts = new Set<string>();
+    _groupToAccount.set(groupNo, accounts);
+  }
+  accounts.add(accountId);
 }
 
 export function resolveAccountForGroup(groupNo: string): string | undefined {
-  return _groupToAccount.get(groupNo);
+  const accounts = _groupToAccount.get(groupNo);
+  if (!accounts || accounts.size === 0) return undefined;
+  // Only resolve when exactly one bot owns the group; multi-bot → ambiguous
+  if (accounts.size === 1) return accounts.values().next().value;
+  return undefined;
 }
 
 // --- Cache cleanup: evict groups inactive for >4 hours ---
@@ -253,11 +263,14 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     handleAction: async (ctx: any) => {
       // Resolve correct accountId: framework may pass wrong one when agent has multiple accounts.
       // Use currentChannelId to look up which account actually owns the group.
+      // When multiple bots share the same group, do NOT correct — the caller's accountId is authoritative.
       let accountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
       const currentChannelId = ctx.toolContext?.currentChannelId;
       if (currentChannelId) {
         const rawGroupNo = currentChannelId.replace(/^dmwork:/, '');
         const correctAccountId = resolveAccountForGroup(rawGroupNo);
+        // Only correct when resolveAccountForGroup returns a definitive answer
+        // (exactly one bot owns the group); multi-bot → undefined → no correction
         if (correctAccountId && correctAccountId !== accountId) {
           ctx.log?.info?.(`dmwork: handleAction accountId corrected: ${accountId} → ${correctAccountId} (group=${rawGroupNo})`);
           accountId = correctAccountId;
