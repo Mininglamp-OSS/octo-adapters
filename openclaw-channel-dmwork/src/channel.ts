@@ -240,6 +240,21 @@ export function resolveOutboundAccountId(ctxTo: string, fallbackAccountId: strin
   return fallbackAccountId;
 }
 
+/** Shared check: return available actions if at least one account is configured, else empty. */
+function getAvailableActions(cfg: any): string[] {
+  try {
+    const ids = listDmworkAccountIds(cfg);
+    const hasConfigured = ids.some((id) => {
+      const acct = resolveDmworkAccount({ cfg, accountId: id });
+      return acct.enabled && acct.configured && !!acct.config.botToken;
+    });
+    if (!hasConfigured) return [];
+  } catch {
+    return [];
+  }
+  return ["send", "read", "search"];
+}
+
 const meta = {
   id: "dmwork",
   label: "DMWork",
@@ -262,17 +277,13 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   reload: { configPrefixes: ["channels.dmwork"] },
   actions: {
     listActions: ({ cfg }: { cfg: any }) => {
-      try {
-        const ids = listDmworkAccountIds(cfg);
-        const hasConfigured = ids.some((id) => {
-          const acct = resolveDmworkAccount({ cfg, accountId: id });
-          return acct.enabled && acct.configured && !!acct.config.botToken;
-        });
-        if (!hasConfigured) return [];
-      } catch {
-        return [];
-      }
-      return ["send", "read", "search"] as any; // TODO: remove when SDK types support this
+      const actions = getAvailableActions(cfg);
+      return actions as any; // TODO: remove when SDK types support this
+    },
+    describeMessageTool: ({ cfg }: { cfg: any }) => {
+      const actions = getAvailableActions(cfg);
+      if (actions.length === 0) return null;
+      return { actions, capabilities: [] };
     },
     extractToolSend: ({ args }: { args: Record<string, unknown> }) => {
       const target = args.target as string | undefined;
@@ -326,6 +337,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       return [
         `When using the dmwork_management tool, pass accountId: "${accountId}".`,
         `For sending messages: if the target is a group, use target="group:<groupId>". If the target is a specific user (1v1 direct message), use target="user:<userId>". If sending to the current conversation, no prefix is needed.`,
+        `For reading message history: use action="read" with target="user:<uid>" to read DM history, or target="group:<groupId>" to read group message history. Cross-channel queries require the requester to be a participant of the target channel.`,
+        `For searching: use action="search" with query="shared-groups" to find groups that the bot and the current user both belong to.`,
       ];
     },
   },
