@@ -130,23 +130,29 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
 // --- Group → Account mapping: tracks which accounts are active in each group ---
 // Used by handleAction to resolve the correct account when framework passes wrong accountId
 // A group may have multiple bots (1:N), so we store a Set of accountIds per group.
-const _groupToAccount = new Map<string, Set<string>>(); // groupNo → Set<accountId>
+const _groupToAccounts = new Map<string, Set<string>>(); // groupNo → Set of accountIds
 
 export function registerGroupToAccount(groupNo: string, accountId: string): void {
-  let accounts = _groupToAccount.get(groupNo);
-  if (!accounts) {
-    accounts = new Set<string>();
-    _groupToAccount.set(groupNo, accounts);
-  }
-  accounts.add(accountId);
+  let s = _groupToAccounts.get(groupNo);
+  if (!s) { s = new Set(); _groupToAccounts.set(groupNo, s); }
+  s.add(accountId);
 }
 
+/**
+ * Resolve the correct accountId for a group.
+ * - If the group has exactly one registered account → return it (safe to correct).
+ * - If the group has multiple accounts (shared group) → return undefined (don't override).
+ * - If the group is unknown → return undefined.
+ */
 export function resolveAccountForGroup(groupNo: string): string | undefined {
-  const accounts = _groupToAccount.get(groupNo);
-  if (!accounts || accounts.size === 0) return undefined;
-  // Only resolve when exactly one bot owns the group; multi-bot → ambiguous
-  if (accounts.size === 1) return accounts.values().next().value;
-  return undefined;
+  const s = _groupToAccounts.get(groupNo);
+  if (!s || s.size !== 1) return undefined;
+  return s.values().next().value;
+}
+
+/** Check if a specific accountId is registered for a group. */
+export function isAccountRegisteredForGroup(groupNo: string, accountId: string): boolean {
+  return _groupToAccounts.get(groupNo)?.has(accountId) ?? false;
 }
 
 // --- Cache cleanup: evict groups inactive for >4 hours ---
@@ -297,12 +303,15 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       const currentChannelId = ctx.toolContext?.currentChannelId;
       if (currentChannelId) {
         const rawGroupNo = currentChannelId.replace(/^dmwork:/, '');
-        const correctAccountId = resolveAccountForGroup(rawGroupNo);
-        // Only correct when resolveAccountForGroup returns a definitive answer
-        // (exactly one bot owns the group); multi-bot → undefined → no correction
-        if (correctAccountId && correctAccountId !== accountId) {
-          ctx.log?.info?.(`dmwork: handleAction accountId corrected: ${accountId} → ${correctAccountId} (group=${rawGroupNo})`);
-          accountId = correctAccountId;
+        // Only correct if current accountId is NOT registered for this group
+        // (i.e., framework passed a clearly wrong accountId).
+        // For shared groups (multiple bots), don't override — respect framework's choice.
+        if (!isAccountRegisteredForGroup(rawGroupNo, accountId)) {
+          const correctAccountId = resolveAccountForGroup(rawGroupNo);
+          if (correctAccountId) {
+            ctx.log?.info?.(`dmwork: handleAction accountId corrected: ${accountId} → ${correctAccountId} (group=${rawGroupNo})`);
+            accountId = correctAccountId;
+          }
         }
       }
       const account = resolveDmworkAccount({
