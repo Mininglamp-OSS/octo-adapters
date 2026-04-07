@@ -1,6 +1,6 @@
 {
   "name": "openclaw-channel-dmwork",
-  "version": "0.5.15",
+  "version": "0.5.16",
   "description": "DMWork channel plugin for OpenClaw via WuKongIM WebSocket",
   "main": "index.ts",
   "type": "module",
@@ -41,11 +41,13 @@
     ]
   },
   "bundledDependencies": [
+    "cos-nodejs-sdk-v5",
     "crypto-js",
     "curve25519-js",
     "md5-typescript"
   ],
   "bundleDependencies": [
+    "cos-nodejs-sdk-v5",
     "crypto-js",
     "curve25519-js",
     "md5-typescript"
