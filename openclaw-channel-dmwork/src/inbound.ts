@@ -1416,8 +1416,17 @@ export async function handleInboundMessage(params: {
     replyOptions: {
       onPartialReply: async (partial: { text?: string; mediaUrls?: string[] }) => {
         if (streamFailed) return;
-        const text = partial.text?.trim();
+        let text = partial.text?.trim();
         if (!text) return;
+        // Convert @[uid:name] → @name for display (no entities — streaming should not trigger notifications)
+        if (isGroup) {
+          const structuredMentions = parseStructuredMentions(text);
+          if (structuredMentions.length > 0) {
+            const validUids = new Set(uidToNameMap.keys());
+            const converted = convertStructuredMentions(text, structuredMentions, validUids);
+            text = converted.content;
+          }
+        }
         try {
           if (!streamNo) {
             // Start stream
