@@ -148,6 +148,189 @@ describe("handleDmworkMessageAction", () => {
     });
   });
 
+  // -----------------------------------------------------------------------
+  // send — v2 structured mentions (@[uid:name])
+  // -----------------------------------------------------------------------
+  describe("send — v2 structured mentions converted to @name + entities", () => {
+    it("should convert @[uid:name] to @name with correct entities", async () => {
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const uidToNameMap = new Map([
+        ["uid_chen", "陈皮皮"],
+        ["uid_bob", "bob"],
+      ]);
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "Hello @[uid_chen:陈皮皮] and @[uid_bob:bob]!" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        uidToNameMap,
+      });
+
+      expect(result.ok).toBe(true);
+      // Content should have @name format (not @[uid:name])
+      expect(sentPayload.payload.content).toBe("Hello @陈皮皮 and @bob!");
+      // Entities should have correct offset/length/uid
+      const entities = sentPayload.payload.mention.entities;
+      expect(entities).toHaveLength(2);
+      expect(entities[0]).toMatchObject({ uid: "uid_chen", offset: 6, length: 4 });
+      expect(entities[1]).toMatchObject({ uid: "uid_bob", offset: 15, length: 4 });
+      // UIDs should be present
+      expect(sentPayload.payload.mention.uids).toEqual(["uid_chen", "uid_bob"]);
+    });
+  });
+
+  describe("send — @all detection", () => {
+    it("should set mentionAll when @all is present", async () => {
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "Attention @all please read" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sentPayload.payload.mention.all).toBe(1);
+    });
+  });
+
+  describe("send — @所有人 detection", () => {
+    it("should set mentionAll when @所有人 is present", async () => {
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "大家注意 @所有人 请查收" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sentPayload.payload.mention.all).toBe(1);
+    });
+  });
+
+  describe("send — mixed v1+v2 mentions", () => {
+    it("should resolve both @[uid:name] and @name in same message", async () => {
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const memberMap = new Map([["alice", "uid_alice"]]);
+      const uidToNameMap = new Map([
+        ["uid_chen", "陈皮皮"],
+        ["uid_alice", "alice"],
+      ]);
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "Hey @[uid_chen:陈皮皮] and @alice!" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        memberMap,
+        uidToNameMap,
+      });
+
+      expect(result.ok).toBe(true);
+      // Content should have both converted
+      expect(sentPayload.payload.content).toBe("Hey @陈皮皮 and @alice!");
+      const entities = sentPayload.payload.mention.entities;
+      expect(entities).toHaveLength(2);
+      // First entity from v2 conversion
+      expect(entities[0]).toMatchObject({ uid: "uid_chen", offset: 4, length: 4 });
+      // Second entity from v1 fallback
+      expect(entities[1]).toMatchObject({ uid: "uid_alice", offset: 13, length: 6 });
+    });
+  });
+
+  describe("send — v2 without uidToNameMap graceful fallback", () => {
+    it("should leave @[uid:name] unchanged when uidToNameMap is not provided", async () => {
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "Hello @[uid_chen:陈皮皮]!" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        // no uidToNameMap provided
+      });
+
+      expect(result.ok).toBe(true);
+      // Content should be unchanged — no conversion without uidToNameMap
+      expect(sentPayload.payload.content).toBe("Hello @[uid_chen:陈皮皮]!");
+    });
+  });
+
+  describe("send — invalid uid in v2 (uid not in uidToNameMap)", () => {
+    it("should convert format but not create entity for unknown uid", async () => {
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const uidToNameMap = new Map([
+        ["uid_bob", "bob"],
+      ]);
+      // uid_unknown is NOT in uidToNameMap
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "Hello @[uid_unknown:Ghost] and @[uid_bob:bob]!" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        uidToNameMap,
+      });
+
+      expect(result.ok).toBe(true);
+      // Format is still converted for both
+      expect(sentPayload.payload.content).toBe("Hello @Ghost and @bob!");
+      // Only valid uid gets an entity
+      const entities = sentPayload.payload.mention.entities;
+      expect(entities).toHaveLength(1);
+      expect(entities[0]).toMatchObject({ uid: "uid_bob" });
+    });
+  });
+
   describe("send — unresolvable @mentions still sends", () => {
     it("should send without mentionUids when names are unresolvable", async () => {
       let sentPayload: any = null;

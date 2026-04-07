@@ -16,7 +16,7 @@ import {
   updateGroupMd,
 } from "./api-fetch.js";
 import { uploadAndSendMedia } from "./inbound.js";
-import { buildEntitiesFromFallback } from "./mention-utils.js";
+import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
 import { getKnownGroupIds } from "./group-md.js";
 
@@ -110,7 +110,7 @@ export async function handleDmworkMessageAction(params: {
 
   switch (action) {
     case "send":
-      return handleSend({ args, apiUrl, botToken, memberMap, currentChannelId, log });
+      return handleSend({ args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, log });
     case "read":
       return handleRead({ args, apiUrl, botToken, uidToNameMap, currentChannelId, log });
     case "member-info":
@@ -137,10 +137,11 @@ async function handleSend(params: {
   apiUrl: string;
   botToken: string;
   memberMap?: Map<string, string>;
+  uidToNameMap?: Map<string, string>;
   currentChannelId?: string;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { args, apiUrl, botToken, memberMap, currentChannelId, log } = params;
+  const { args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, log } = params;
 
   const target = args.target as string | undefined;
   if (!target) {
@@ -166,21 +167,56 @@ async function handleSend(params: {
   if (message) {
     let mentionUids: string[] = [];
     let mentionEntities: MentionEntity[] = [];
+    let finalMessage = message;
 
-    if (channelType === ChannelType.Group && memberMap) {
-      const { entities, uids } = buildEntitiesFromFallback(message, memberMap);
-      mentionUids = uids;
-      mentionEntities = entities;
+    if (channelType === ChannelType.Group) {
+      // v2 path: convert @[uid:name] → @name + entities
+      if (uidToNameMap) {
+        const structuredMentions = parseStructuredMentions(finalMessage);
+        if (structuredMentions.length > 0) {
+          const validUids = new Set(uidToNameMap.keys());
+          const converted = convertStructuredMentions(finalMessage, structuredMentions, validUids);
+          finalMessage = converted.content;
+          mentionEntities = [...converted.entities];
+          mentionUids = [...converted.uids];
+        }
+      }
+
+      // v1 fallback: resolve remaining @name via memberMap
+      if (memberMap) {
+        const { entities, uids } = buildEntitiesFromFallback(finalMessage, memberMap);
+        const existingOffsets = new Set(mentionEntities.map(e => e.offset));
+        for (const entity of entities) {
+          if (!existingOffsets.has(entity.offset)) {
+            mentionEntities.push(entity);
+          }
+        }
+        for (const uid of uids) {
+          if (!mentionUids.includes(uid)) {
+            mentionUids.push(uid);
+          }
+        }
+      }
+
+      // Sort entities by offset and rebuild uids from sorted entities
+      if (mentionEntities.length > 0) {
+        mentionEntities.sort((a, b) => a.offset - b.offset);
+        mentionUids = mentionEntities.map(e => e.uid);
+      }
     }
+
+    // Detect @all/@所有人 in final content
+    const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalMessage);
 
     await sendMessage({
       apiUrl,
       botToken,
       channelId,
       channelType,
-      content: message,
+      content: finalMessage,
       ...(mentionUids.length > 0 ? { mentionUids } : {}),
       ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
+      mentionAll: hasAtAll || undefined,
     });
   }
 
