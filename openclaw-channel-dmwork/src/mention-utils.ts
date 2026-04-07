@@ -146,6 +146,36 @@ export function convertStructuredMentions(
 
 // ── Build entities from plain @name (fallback path) ──────────────────────────
 
+/** Name character class — mirrors MENTION_PATTERN's inner char set (without space) */
+const NAME_CHAR_RE =
+  /[\w\u00C0-\u024F\u4e00-\u9fff\u3040-\u30FF\uAC00-\uD7AF.\-]/;
+
+/**
+ * 从 @atPos 位置尝试匹配 memberMap 中最长的名称（支持含空格昵称）。
+ * sortedNames 必须按长度降序排列。
+ *
+ * 边界检查：匹配到的名称末尾之后的字符必须是终止字符（非"名字字符"），
+ * 防止 @Anyang Su 从 "@Anyang Superman" 中误匹配。
+ */
+export function tryLongestMemberMatch(
+  text: string,
+  atPos: number,
+  memberMap: Map<string, string>,
+  sortedNames: string[],
+): { name: string; uid: string } | undefined {
+  const after = text.substring(atPos + 1);
+  for (const candidate of sortedNames) {
+    if (after.startsWith(candidate)) {
+      const ch = text[atPos + 1 + candidate.length];
+      if (ch === undefined || !NAME_CHAR_RE.test(ch)) {
+        const uid = memberMap.get(candidate);
+        if (uid) return { name: candidate, uid };
+      }
+    }
+  }
+  return undefined;
+}
+
 /**
  * 从纯 @name 格式的文本中构建 entities（fallback 路径）。
  * 通过 memberMap（displayName → uid）解析每个 @name 对应的 uid。
@@ -163,15 +193,38 @@ export function buildEntitiesFromFallback(
   const pattern = new RegExp(MENTION_PATTERN.source, "g");
   let match;
 
+  // 按长度降序排列，优先匹配最长名称
+  const sortedNames = [...memberMap.keys()].sort((a, b) => b.length - a.length);
+
   while ((match = pattern.exec(content)) !== null) {
     const name = match[1];
-    const uid = memberMap.get(name);
+
+    // Skip @all / @All etc. — handled separately as mentionAll, not as entity
+    if (name.toLowerCase() === "all" || name === "所有人") continue;
+
+    let uid: string | undefined;
+    let matchedName = name;
+
+    // 优先尝试最长前缀匹配（支持含空格昵称）
+    const longer = tryLongestMemberMatch(
+      content, match.index, memberMap, sortedNames,
+    );
+    if (longer) {
+      uid = longer.uid;
+      matchedName = longer.name;
+    } else {
+      // 回退到精确正则匹配
+      uid = memberMap.get(name);
+    }
 
     if (!uid) continue;
 
-    const atName = `@${name}`;
+    const atName = `@${matchedName}`;
     entities.push({ uid, offset: match.index, length: atName.length });
     uids.push(uid);
+
+    // 跳过完整匹配长度，防止空格名称被部分重复匹配
+    pattern.lastIndex = match.index + atName.length;
   }
 
   return { entities, uids };
@@ -282,12 +335,27 @@ export function convertContentForLLM(
       replacement: string;
     }[] = [];
 
+    // 按长度降序排列，优先匹配最长名称
+    const sortedNames = hasMemberMap
+      ? [...memberMap!.keys()].sort((a, b) => b.length - a.length)
+      : [];
+
     while ((match = pattern.exec(content)) !== null) {
       const name = match[1];
       let uid: string | undefined;
+      let matchedName = name;
 
       if (hasMemberMap) {
-        uid = memberMap!.get(name);
+        // 优先尝试最长前缀匹配（支持含空格昵称）
+        const longer = tryLongestMemberMatch(
+          content, match.index, memberMap!, sortedNames,
+        );
+        if (longer) {
+          uid = longer.uid;
+          matchedName = longer.name;
+        } else {
+          uid = memberMap!.get(name);
+        }
       } else if (hasUids && i < mention.uids!.length) {
         const candidate = mention.uids![i];
         uid = typeof candidate === "string" ? candidate : undefined;
@@ -297,9 +365,14 @@ export function convertContentForLLM(
       if (uid) {
         replacements.push({
           start: match.index,
-          end: match.index + 1 + name.length,
-          replacement: `@[${uid}:${name}]`,
+          end: match.index + 1 + matchedName.length,
+          replacement: `@[${uid}:${matchedName}]`,
         });
+      }
+
+      // 跳过完整匹配长度
+      if (matchedName.length > name.length) {
+        pattern.lastIndex = match.index + 1 + matchedName.length;
       }
     }
 

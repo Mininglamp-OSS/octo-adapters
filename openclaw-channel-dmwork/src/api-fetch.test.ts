@@ -874,3 +874,67 @@ describe("fetchUserInfo", () => {
     expect(result).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// sendMessage — mentionAll serialization
+// ---------------------------------------------------------------------------
+describe("sendMessage — mentionAll serialization", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("mention.all 应序列化为数字 1 而非布尔 true", async () => {
+    let sentBody: any = null;
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "hello @all",
+      mentionAll: true,
+    });
+
+    expect(sentBody).not.toBeNull();
+    const mention = sentBody.payload.mention;
+    expect(mention.all).toBe(1);
+    expect(mention.all).not.toBe(true);
+    expect(typeof mention.all).toBe("number");
+  });
+
+  it("未设置 mentionAll 时不应包含 mention.all 字段", async () => {
+    let sentBody: any = null;
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "hello",
+    });
+
+    expect(sentBody.payload.mention).toBeUndefined();
+  });
+});

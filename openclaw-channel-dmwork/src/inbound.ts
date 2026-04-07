@@ -1580,6 +1580,9 @@ export async function handleInboundMessage(params: {
           }
         }
 
+        // Detect @all/@所有人 in final content
+        const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
+
         await sendMessage({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken ?? "",
@@ -1588,6 +1591,7 @@ export async function handleInboundMessage(params: {
           content: finalContent,
           ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
           ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
+          mentionAll: hasAtAll || undefined,
         });
 
         statusSink?.({ lastOutboundAt: Date.now(), lastError: null });

@@ -10,6 +10,7 @@ import {
   extractMentionUids,
   convertContentForLLM,
   buildSenderPrefix,
+  tryLongestMemberMatch,
 } from "./mention-utils.js";
 import type { MentionPayload } from "./types.js";
 
@@ -556,5 +557,132 @@ describe("buildSenderPrefix with cross-space", () => {
   it("shows raw uid when no match", () => {
     const map = new Map([["s10_xyz", "Bob"]]);
     expect(buildSenderPrefix("s14_abc", map)).toBe("s14_abc");
+  });
+});
+
+// ── Space-name @mention support ──────────────────────────────────────────────
+
+describe("buildEntitiesFromFallback — 空格昵称支持", () => {
+  it("应匹配含空格的昵称 @Anyang Su", () => {
+    const memberMap = new Map([
+      ["Anyang Su", "uid_anyang"],
+      ["Bob", "uid_bob"],
+    ]);
+    const { entities, uids } = buildEntitiesFromFallback(
+      "Hello @Anyang Su and @Bob",
+      memberMap,
+    );
+    expect(uids).toEqual(["uid_anyang", "uid_bob"]);
+    expect(entities).toHaveLength(2);
+    expect(entities[0]).toEqual({ uid: "uid_anyang", offset: 6, length: 10 });
+    expect(entities[1]).toEqual({ uid: "uid_bob", offset: 21, length: 4 });
+  });
+
+  it("应优先匹配最长名称", () => {
+    const memberMap = new Map([
+      ["Anyang", "uid_short"],
+      ["Anyang Su", "uid_full"],
+    ]);
+    const { entities, uids } = buildEntitiesFromFallback(
+      "@Anyang Su hello",
+      memberMap,
+    );
+    expect(uids).toEqual(["uid_full"]);
+    expect(entities[0]).toEqual({ uid: "uid_full", offset: 0, length: 10 });
+  });
+
+  it("不应跨词误匹配 @Anyang Superman", () => {
+    const memberMap = new Map([["Anyang Su", "uid_anyang"]]);
+    const { entities, uids } = buildEntitiesFromFallback(
+      "@Anyang Superman",
+      memberMap,
+    );
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+
+  it("应处理多个空格昵称", () => {
+    const memberMap = new Map([
+      ["Anyang Su", "uid_anyang"],
+      ["Li Wei", "uid_li"],
+    ]);
+    const { entities, uids } = buildEntitiesFromFallback(
+      "@Anyang Su @Li Wei",
+      memberMap,
+    );
+    expect(uids).toEqual(["uid_anyang", "uid_li"]);
+    expect(entities).toHaveLength(2);
+    expect(entities[0]).toEqual({ uid: "uid_anyang", offset: 0, length: 10 });
+    expect(entities[1]).toEqual({ uid: "uid_li", offset: 11, length: 7 });
+  });
+
+  it("无空格名称时行为不变", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@Bob hi", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities[0]).toEqual({ uid: "uid_bob", offset: 0, length: 4 });
+  });
+});
+
+describe("buildEntitiesFromFallback — @all 跳过", () => {
+  it("@all 不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@all @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0]).toEqual({ uid: "uid_bob", offset: 5, length: 4 });
+  });
+
+  it("@All (大小写) 也不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@All @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+  });
+
+  it("@ALL 全大写不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@ALL please check", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+
+  it("@all 单独出现也不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@all", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+
+  it("@所有人 不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@所有人 @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+    expect(entities[0]).toEqual({ uid: "uid_bob", offset: 5, length: 4 });
+  });
+
+  it("@所有人 单独出现也不应生成 entity", () => {
+    const memberMap = new Map<string, string>();
+    const { entities, uids } = buildEntitiesFromFallback("@所有人", memberMap);
+    expect(uids).toEqual([]);
+    expect(entities).toEqual([]);
+  });
+
+  it("混合 @all 和 @所有人 都不应生成 entity", () => {
+    const memberMap = new Map([["Bob", "uid_bob"]]);
+    const { entities, uids } = buildEntitiesFromFallback("@all @所有人 @Bob", memberMap);
+    expect(uids).toEqual(["uid_bob"]);
+    expect(entities).toHaveLength(1);
+  });
+});
+
+describe("convertContentForLLM — 空格昵称支持", () => {
+  it("v1 memberMap 路径应匹配空格昵称", () => {
+    const content = "@Anyang Su 你好";
+    const mention: MentionPayload = { uids: ["uid_anyang"] };
+    const memberMap = new Map([["Anyang Su", "uid_anyang"]]);
+    const result = convertContentForLLM(content, mention, memberMap);
+    expect(result).toBe("@[uid_anyang:Anyang Su] 你好");
   });
 });

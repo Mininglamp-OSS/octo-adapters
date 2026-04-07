@@ -218,7 +218,7 @@ export async function sendMessage(params: {
       mention.entities = params.mentionEntities;
     }
     if (params.mentionAll) {
-      mention.all = true;
+      mention.all = 1;
     }
     payload.mention = mention;
   }
