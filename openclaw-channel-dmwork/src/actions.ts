@@ -470,17 +470,22 @@ async function handleMemberInfo(params: {
 
   const { channelId } = parseTarget(target);
 
-  const members = await getGroupMembers({
-    apiUrl,
-    botToken,
-    groupNo: channelId,
-    log: log
-      ? {
-          info: (...a: unknown[]) => log.info?.(String(a[0])),
-          error: (...a: unknown[]) => log.error?.(String(a[0])),
-        }
-      : undefined,
-  });
+  let members;
+  try {
+    members = await getGroupMembers({
+      apiUrl,
+      botToken,
+      groupNo: channelId,
+      log: log
+        ? {
+            info: (...a: unknown[]) => log.info?.(String(a[0])),
+            error: (...a: unknown[]) => log.error?.(String(a[0])),
+          }
+        : undefined,
+    });
+  } catch (err) {
+    return { ok: false, error: `Failed to get group members: ${err instanceof Error ? err.message : String(err)}` };
+  }
 
   return { ok: true, data: { members, count: members.length } };
 }

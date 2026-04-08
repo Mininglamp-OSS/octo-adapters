@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, getGroupMembers, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -21,7 +21,7 @@ import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
-import { preloadGroupMemberCache } from "./member-cache.js";
+import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -718,8 +718,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
               // Ignore per-group failures (group may not have GROUP.md)
             }
             // Prefetch group members → fill uidToNameMap for SenderName resolution
+            // Uses cache so preloadGroupMemberCache() results are reused
             try {
-              const members = await getGroupMembers({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
+              const members = await getGroupMembersFromCache({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
               const prefetchMemberMap = getOrCreateMemberMap(account.accountId);
               const prefetchUidMap = getOrCreateUidToNameMap(account.accountId);
               for (const m of members) {

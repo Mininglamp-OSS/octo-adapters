@@ -72,17 +72,26 @@ async function refreshGroupMembers(params: {
   groupName?: string;
   log?: LogSink;
 }): Promise<GroupMember[]> {
-  const members = await getGroupMembers({
-    apiUrl: params.apiUrl,
-    botToken: params.botToken,
-    groupNo: params.groupNo,
-    log: params.log
-      ? {
-          info: (...a: unknown[]) => params.log!.info?.(String(a[0])),
-          error: (...a: unknown[]) => params.log!.error?.(String(a[0])),
-        }
-      : undefined,
-  });
+  let members: GroupMember[];
+  try {
+    members = await getGroupMembers({
+      apiUrl: params.apiUrl,
+      botToken: params.botToken,
+      groupNo: params.groupNo,
+      log: params.log
+        ? {
+            info: (...a: unknown[]) => params.log!.info?.(String(a[0])),
+            error: (...a: unknown[]) => params.log!.error?.(String(a[0])),
+          }
+        : undefined,
+    });
+  } catch (err) {
+    // Don't cache on API failure — preserve stale cache or leave empty
+    params.log?.error?.(
+      `dmwork: refreshGroupMembers(${params.groupNo}) failed, skipping cache update: ${err}`,
+    );
+    throw err;
+  }
   purgeReverseIndex(params.groupNo);
   _memberCache.set(params.groupNo, {
     members,
@@ -162,6 +171,11 @@ export function evictGroupFromCache(groupNo: string): void {
 export function _clearMemberCache(): void {
   _memberCache.clear();
   _userGroupIndex.clear();
+}
+
+/** Visible for testing — check if a cache entry exists (ignoring expiry). */
+export function _hasCacheEntry(groupNo: string): boolean {
+  return _memberCache.has(groupNo);
 }
 
 /** Visible for testing — directly set cache entry. */

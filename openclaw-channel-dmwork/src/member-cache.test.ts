@@ -7,6 +7,7 @@ import {
   evictGroupFromCache,
   _clearMemberCache,
   _setCacheEntry,
+  _hasCacheEntry,
 } from "./member-cache.js";
 
 const originalFetch = globalThis.fetch;
@@ -100,6 +101,58 @@ describe("member-cache", () => {
       expect(result).toHaveLength(1);
       expect(result[0].uid).toBe("new");
     });
+
+    it("should throw on HTTP error and not cache empty result", async () => {
+      globalThis.fetch = mockFetch({
+        "/members": async () => new Response("Internal Server Error", { status: 500 }),
+      });
+
+      await expect(
+        getGroupMembersFromCache({
+          apiUrl: "http://localhost:8090",
+          botToken: "test-token",
+          groupNo: "grp1",
+        }),
+      ).rejects.toThrow("getGroupMembers failed: 500");
+
+      // Cache should remain empty — not populated with []
+      expect(findSharedGroupsFromCache("u1")).toBeNull();
+    });
+
+    it("should preserve stale cache when refresh fails", async () => {
+      // Populate cache then expire it
+      _setCacheEntry("grp1", [{ uid: "u1", name: "Alice" }], "Team", -1);
+
+      globalThis.fetch = mockFetch({
+        "/members": async () => new Response("Service Unavailable", { status: 503 }),
+      });
+
+      // Refresh should throw
+      await expect(
+        getGroupMembersFromCache({
+          apiUrl: "http://localhost:8090",
+          botToken: "test-token",
+          groupNo: "grp1",
+        }),
+      ).rejects.toThrow();
+
+      // Stale entry should still exist (not overwritten with [])
+      expect(_hasCacheEntry("grp1")).toBe(true);
+    });
+
+    it("should throw on network error and not cache empty result", async () => {
+      globalThis.fetch = mockFetch({
+        "/members": async () => { throw new Error("ECONNREFUSED"); },
+      });
+
+      await expect(
+        getGroupMembersFromCache({
+          apiUrl: "http://localhost:8090",
+          botToken: "test-token",
+          groupNo: "grp1",
+        }),
+      ).rejects.toThrow("ECONNREFUSED");
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -187,20 +240,48 @@ describe("member-cache", () => {
       expect(shared!.some((g) => g.groupNo === "grp1")).toBe(true);
     });
 
-    it("should not throw when preload fails", async () => {
+    it("should skip groups with member-fetch failures and continue", async () => {
+      globalThis.fetch = mockFetch({
+        "/members": async (url) => {
+          if (url.includes("grp1")) {
+            return new Response("Server Error", { status: 500 });
+          }
+          return jsonResponse([{ uid: "u2", name: "Bob" }]);
+        },
+        "/v1/bot/groups": async () => {
+          return jsonResponse([
+            { group_no: "grp1", name: "Broken" },
+            { group_no: "grp2", name: "Working" },
+          ]);
+        },
+      });
+
+      await preloadGroupMemberCache({
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      // grp1 should NOT be cached (API returned 500)
+      // grp2 should be cached
+      const shared = findSharedGroupsFromCache("u2");
+      expect(shared).not.toBeNull();
+      expect(shared!.some((g) => g.groupNo === "grp2")).toBe(true);
+      expect(shared!.some((g) => g.groupNo === "grp1")).toBe(false);
+    });
+
+    it("should throw when preload encounters network error", async () => {
       globalThis.fetch = mockFetch({
         "/v1/bot/groups": async () => {
           throw new Error("network error");
         },
       });
 
-      // Should not throw
       await expect(
         preloadGroupMemberCache({
           apiUrl: "http://localhost:8090",
           botToken: "test-token",
         }),
-      ).rejects.toThrow(); // fetchBotGroups will throw for network errors
+      ).rejects.toThrow("network error");
     });
   });
 
