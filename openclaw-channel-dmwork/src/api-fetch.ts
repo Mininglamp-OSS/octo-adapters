@@ -339,30 +339,26 @@ export async function getGroupMembers(params: {
   log?: { info?: (msg: string) => void; error?: (msg: string) => void };
 }): Promise<GroupMember[]> {
   const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/members`;
-  try {
-    const resp = await fetch(url, {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${params.botToken}`,
-      },
-      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-    });
-    if (!resp.ok) {
-      params.log?.error?.(`dmwork: getGroupMembers failed: ${resp.status}`);
-      return [];
-    }
-    const data = await resp.json();
-    // Normalize to strict array to prevent silent failures
-    const members = Array.isArray(data?.members)
-      ? data.members
-      : Array.isArray(data)
-        ? data
-        : [];
-    return members as GroupMember[];
-  } catch (err) {
-    params.log?.error?.(`dmwork: getGroupMembers error: ${err}`);
-    return [];
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Authorization": `Bearer ${params.botToken}`,
+    },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const msg = `getGroupMembers failed: ${resp.status}`;
+    params.log?.error?.(`dmwork: ${msg}`);
+    throw new Error(msg);
   }
+  const data = await resp.json();
+  // Normalize to strict array to prevent silent failures
+  const members = Array.isArray(data?.members)
+    ? data.members
+    : Array.isArray(data)
+      ? data
+      : [];
+  return members as GroupMember[];
 }
 
 /**
