@@ -20,6 +20,11 @@ import {
   getGroupMembers,
   getGroupMd,
   updateGroupMd,
+  createGroup,
+  updateGroup,
+  addGroupMembers,
+  removeGroupMembers,
+  searchSpaceMembers,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate } from "./group-md.js";
 
@@ -79,6 +84,11 @@ export function createDmworkManagementTools(params: {
               "group-members",
               "group-md-read",
               "group-md-update",
+              "search-members",
+              "create-group",
+              "update-group",
+              "add-members",
+              "remove-members",
             ],
             description:
               "The management action to perform.",
@@ -92,6 +102,32 @@ export function createDmworkManagementTools(params: {
             type: "string",
             description:
               "The new GROUP.md content. Required for group-md-update.",
+          },
+          keyword: {
+            type: "string",
+            description:
+              "Search keyword for search-members action. Fuzzy matches user names in the bot's Space.",
+          },
+          members: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Array of member UIDs. Required for create-group, add-members, remove-members.",
+          },
+          name: {
+            type: "string",
+            description:
+              "Group name. Optional for create-group, update-group.",
+          },
+          notice: {
+            type: "string",
+            description:
+              "Group notice/announcement. Optional for update-group.",
+          },
+          creator: {
+            type: "string",
+            description:
+              "UID of the user who requested group creation (becomes group owner). Required for create-group.",
           },
           accountId: {
             type: "string",
@@ -113,9 +149,16 @@ export function createDmworkManagementTools(params: {
         const content = (args.content ?? args.message) as string | undefined;
         const requestedAccountId = args.accountId as string | undefined;
 
-        // Resolve account
-        const accountId =
-          requestedAccountId ?? resolveDefaultDmworkAccountId(cfg);
+        // Resolve account — multi-bot setups require explicit accountId
+        const defaultAccountId = resolveDefaultDmworkAccountId(cfg);
+        const accountId = requestedAccountId ?? defaultAccountId;
+
+        if (!accountId) {
+          return makeError(
+            "accountId is required. Check your agent.md for your assigned accountId."
+          );
+        }
+
         const account = resolveDmworkAccount({ cfg, accountId });
 
         if (!account.config.botToken) {
@@ -157,6 +200,76 @@ export function createDmworkManagementTools(params: {
                 content,
                 accountId,
               });
+
+            case "search-members": {
+              const keyword = (args.keyword ?? args.name ?? args.content) as string | undefined;
+              const results = await searchSpaceMembers({
+                apiUrl,
+                botToken,
+                keyword: keyword || undefined,
+              });
+              return makeSuccess({ members: results });
+            }
+
+            case "create-group": {
+              const members = args.members as string[] | undefined;
+              if (!members?.length)
+                return makeError("members is required for create-group");
+              const creatorUid = (args.creator ?? args.creatorUid) as string | undefined;
+              if (!creatorUid)
+                return makeError("creator is required for create-group");
+              const result = await createGroup({
+                apiUrl,
+                botToken,
+                name: (args.name as string | undefined) ?? undefined,
+                members,
+                creator: creatorUid,
+              });
+              return makeSuccess(result);
+            }
+
+            case "update-group": {
+              if (!groupId)
+                return makeError("groupId is required for update-group");
+              await updateGroup({
+                apiUrl,
+                botToken,
+                groupNo: groupId,
+                name: args.name as string | undefined,
+                notice: args.notice as string | undefined,
+              });
+              return makeSuccess({ updated: true, groupId });
+            }
+
+            case "add-members": {
+              if (!groupId)
+                return makeError("groupId is required for add-members");
+              const members = args.members as string[] | undefined;
+              if (!members?.length)
+                return makeError("members is required for add-members");
+              const result = await addGroupMembers({
+                apiUrl,
+                botToken,
+                groupNo: groupId,
+                members,
+              });
+              return makeSuccess(result);
+            }
+
+            case "remove-members": {
+              if (!groupId)
+                return makeError("groupId is required for remove-members");
+              const members = args.members as string[] | undefined;
+              if (!members?.length)
+                return makeError("members is required for remove-members");
+              const result = await removeGroupMembers({
+                apiUrl,
+                botToken,
+                groupNo: groupId,
+                members,
+              });
+              return makeSuccess(result);
+            }
 
             default:
               return makeError(`Unknown action: ${action}`);

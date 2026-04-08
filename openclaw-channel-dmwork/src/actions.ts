@@ -14,6 +14,10 @@ import {
   getGroupInfo,
   getGroupMd,
   updateGroupMd,
+  createGroup,
+  updateGroup,
+  addGroupMembers,
+  removeGroupMembers,
 } from "./api-fetch.js";
 import { uploadAndSendMedia } from "./inbound.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
@@ -123,6 +127,14 @@ export async function handleDmworkMessageAction(params: {
       return handleGroupMdRead({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
     case "group-md-update":
       return handleGroupMdUpdate({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
+    case "create-group":
+      return handleCreateGroupAction({ args, apiUrl, botToken, log });
+    case "update-group":
+      return handleUpdateGroupAction({ args, apiUrl, botToken, currentChannelId, log });
+    case "add-members":
+      return handleAddMembersAction({ args, apiUrl, botToken, currentChannelId, log });
+    case "remove-members":
+      return handleRemoveMembersAction({ args, apiUrl, botToken, currentChannelId, log });
     default:
       return { ok: false, error: `Unknown action: ${action}` };
   }
@@ -475,5 +487,121 @@ async function handleGroupMdUpdate(params: {
     return { ok: true, data: { version: result.version } };
   } catch (err) {
     return { ok: false, error: `Failed to update GROUP.md: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// create-group
+// ---------------------------------------------------------------------------
+
+async function handleCreateGroupAction(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken } = params;
+  const members = args.members as string[] | undefined;
+  if (!members?.length) {
+    return { ok: false, error: "Missing required parameter: members" };
+  }
+  const creator = (args.creator ?? args.creatorUid) as string | undefined;
+  try {
+    const result = await createGroup({
+      apiUrl,
+      botToken,
+      name: args.name as string | undefined,
+      members,
+      creator: creator || members[0],
+    });
+    return { ok: true, data: result };
+  } catch (err) {
+    return { ok: false, error: `Failed to create group: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// update-group
+// ---------------------------------------------------------------------------
+
+async function handleUpdateGroupAction(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  currentChannelId?: string;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken, currentChannelId } = params;
+  const groupId = resolveGroupId(args, currentChannelId);
+  if (!groupId) {
+    return { ok: false, error: "Missing required parameter: groupId" };
+  }
+  try {
+    await updateGroup({
+      apiUrl,
+      botToken,
+      groupNo: groupId,
+      name: args.name as string | undefined,
+      notice: args.notice as string | undefined,
+    });
+    return { ok: true, data: { updated: true, groupId } };
+  } catch (err) {
+    return { ok: false, error: `Failed to update group: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// add-members
+// ---------------------------------------------------------------------------
+
+async function handleAddMembersAction(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  currentChannelId?: string;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken, currentChannelId } = params;
+  const groupId = resolveGroupId(args, currentChannelId);
+  if (!groupId) {
+    return { ok: false, error: "Missing required parameter: groupId" };
+  }
+  const members = args.members as string[] | undefined;
+  if (!members?.length) {
+    return { ok: false, error: "Missing required parameter: members" };
+  }
+  try {
+    const result = await addGroupMembers({ apiUrl, botToken, groupNo: groupId, members });
+    return { ok: true, data: result };
+  } catch (err) {
+    return { ok: false, error: `Failed to add members: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// remove-members
+// ---------------------------------------------------------------------------
+
+async function handleRemoveMembersAction(params: {
+  args: Record<string, unknown>;
+  apiUrl: string;
+  botToken: string;
+  currentChannelId?: string;
+  log?: LogSink;
+}): Promise<MessageActionResult> {
+  const { args, apiUrl, botToken, currentChannelId } = params;
+  const groupId = resolveGroupId(args, currentChannelId);
+  if (!groupId) {
+    return { ok: false, error: "Missing required parameter: groupId" };
+  }
+  const members = args.members as string[] | undefined;
+  if (!members?.length) {
+    return { ok: false, error: "Missing required parameter: members" };
+  }
+  try {
+    const result = await removeGroupMembers({ apiUrl, botToken, groupNo: groupId, members });
+    return { ok: true, data: result };
+  } catch (err) {
+    return { ok: false, error: `Failed to remove members: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
