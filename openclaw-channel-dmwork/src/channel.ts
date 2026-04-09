@@ -11,7 +11,7 @@ import {
   resolveDmworkAccount,
   type ResolvedDmworkAccount,
 } from "./accounts.js";
-import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, getGroupMembers, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -20,6 +20,8 @@ import type { MentionEntity } from "./types.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
+import { registerOwnerUid } from "./owner-registry.js";
+import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -128,23 +130,29 @@ function getOrCreateGroupCacheTimestamps(accountId: string): Map<string, number>
 // --- Group → Account mapping: tracks which accounts are active in each group ---
 // Used by handleAction to resolve the correct account when framework passes wrong accountId
 // A group may have multiple bots (1:N), so we store a Set of accountIds per group.
-const _groupToAccount = new Map<string, Set<string>>(); // groupNo → Set<accountId>
+const _groupToAccounts = new Map<string, Set<string>>(); // groupNo → Set of accountIds
 
 export function registerGroupToAccount(groupNo: string, accountId: string): void {
-  let accounts = _groupToAccount.get(groupNo);
-  if (!accounts) {
-    accounts = new Set<string>();
-    _groupToAccount.set(groupNo, accounts);
-  }
-  accounts.add(accountId);
+  let s = _groupToAccounts.get(groupNo);
+  if (!s) { s = new Set(); _groupToAccounts.set(groupNo, s); }
+  s.add(accountId);
 }
 
+/**
+ * Resolve the correct accountId for a group.
+ * - If the group has exactly one registered account → return it (safe to correct).
+ * - If the group has multiple accounts (shared group) → return undefined (don't override).
+ * - If the group is unknown → return undefined.
+ */
 export function resolveAccountForGroup(groupNo: string): string | undefined {
-  const accounts = _groupToAccount.get(groupNo);
-  if (!accounts || accounts.size === 0) return undefined;
-  // Only resolve when exactly one bot owns the group; multi-bot → ambiguous
-  if (accounts.size === 1) return accounts.values().next().value;
-  return undefined;
+  const s = _groupToAccounts.get(groupNo);
+  if (!s || s.size !== 1) return undefined;
+  return s.values().next().value;
+}
+
+/** Check if a specific accountId is registered for a group. */
+export function isAccountRegisteredForGroup(groupNo: string, accountId: string): boolean {
+  return _groupToAccounts.get(groupNo)?.has(accountId) ?? false;
 }
 
 // --- Cache cleanup: evict groups inactive for >4 hours ---
@@ -238,6 +246,21 @@ export function resolveOutboundAccountId(ctxTo: string, fallbackAccountId: strin
   return fallbackAccountId;
 }
 
+/** Shared check: return available actions if at least one account is configured, else empty. */
+function getAvailableActions(cfg: any): string[] {
+  try {
+    const ids = listDmworkAccountIds(cfg);
+    const hasConfigured = ids.some((id) => {
+      const acct = resolveDmworkAccount({ cfg, accountId: id });
+      return acct.enabled && acct.configured && !!acct.config.botToken;
+    });
+    if (!hasConfigured) return [];
+  } catch {
+    return [];
+  }
+  return ["send", "read", "search"];
+}
+
 const meta = {
   id: "dmwork",
   label: "DMWork",
@@ -260,17 +283,13 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   reload: { configPrefixes: ["channels.dmwork"] },
   actions: {
     listActions: ({ cfg }: { cfg: any }) => {
-      try {
-        const ids = listDmworkAccountIds(cfg);
-        const hasConfigured = ids.some((id) => {
-          const acct = resolveDmworkAccount({ cfg, accountId: id });
-          return acct.enabled && acct.configured && !!acct.config.botToken;
-        });
-        if (!hasConfigured) return [];
-      } catch {
-        return [];
-      }
-      return ["send", "read"] as any; // TODO: remove when SDK types support this
+      const actions = getAvailableActions(cfg);
+      return actions as any; // TODO: remove when SDK types support this
+    },
+    describeMessageTool: ({ cfg }: { cfg: any }) => {
+      const actions = getAvailableActions(cfg);
+      if (actions.length === 0) return null;
+      return { actions, capabilities: [] };
     },
     extractToolSend: ({ args }: { args: Record<string, unknown> }) => {
       const target = args.target as string | undefined;
@@ -284,12 +303,15 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       const currentChannelId = ctx.toolContext?.currentChannelId;
       if (currentChannelId) {
         const rawGroupNo = currentChannelId.replace(/^dmwork:/, '');
-        const correctAccountId = resolveAccountForGroup(rawGroupNo);
-        // Only correct when resolveAccountForGroup returns a definitive answer
-        // (exactly one bot owns the group); multi-bot → undefined → no correction
-        if (correctAccountId && correctAccountId !== accountId) {
-          ctx.log?.info?.(`dmwork: handleAction accountId corrected: ${accountId} → ${correctAccountId} (group=${rawGroupNo})`);
-          accountId = correctAccountId;
+        // Only correct if current accountId is NOT registered for this group
+        // (i.e., framework passed a clearly wrong accountId).
+        // For shared groups (multiple bots), don't override — respect framework's choice.
+        if (!isAccountRegisteredForGroup(rawGroupNo, accountId)) {
+          const correctAccountId = resolveAccountForGroup(rawGroupNo);
+          if (correctAccountId) {
+            ctx.log?.info?.(`dmwork: handleAction accountId corrected: ${accountId} → ${correctAccountId} (group=${rawGroupNo})`);
+            accountId = correctAccountId;
+          }
         }
       }
       const account = resolveDmworkAccount({
@@ -311,6 +333,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         uidToNameMap,
         groupMdCache,
         currentChannelId: ctx.toolContext?.currentChannelId ?? undefined,
+        requesterSenderId: ctx.requesterSenderId ?? undefined,
+        accountId,
         log: ctx.log,
       });
     },
@@ -322,6 +346,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       return [
         `IMPORTANT: Your DMWork accountId is "${accountId}". You MUST always pass accountId: "${accountId}" when using the dmwork_management tool. Do NOT use any other accountId.`,
         `For sending messages: if the target is a group, use target="group:<groupId>". If the target is a specific user (1v1 direct message), use target="user:<userId>". If sending to the current conversation, no prefix is needed.`,
+        `For reading message history: use action="read" with target="user:<uid>" to read DM history, or target="group:<groupId>" to read group message history. Cross-channel queries require the requester to be a participant of the target channel.`,
+        `For searching: use action="search" with query="shared-groups" to find groups that the bot and the current user both belong to.`,
       ];
     },
   },
@@ -650,12 +676,24 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       // Track this bot's uid for bot-to-bot loop prevention
       _knownBotUids.add(credentials.robot_id);
 
+      // Register owner_uid for permission checks
+      if (credentials.owner_uid) {
+        registerOwnerUid(account.accountId, credentials.owner_uid);
+      }
+
       log?.info?.(
         `[${account.accountId}] bot registered as ${credentials.robot_id}`,
       );
 
       // Check for updates in background (fire-and-forget)
       checkForUpdates(account.config.apiUrl, log).catch(() => {});
+
+      // Preload member cache for cross-session permission checks (fire-and-forget)
+      preloadGroupMemberCache({
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken!,
+        log,
+      }).catch(() => {});
 
       // Prefetch GROUP.md and group members for all groups (fire-and-forget)
       const groupMdCache = getOrCreateGroupMdCache(account.accountId);
@@ -680,8 +718,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
               // Ignore per-group failures (group may not have GROUP.md)
             }
             // Prefetch group members → fill uidToNameMap for SenderName resolution
+            // Uses cache so preloadGroupMemberCache() results are reused
             try {
-              const members = await getGroupMembers({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
+              const members = await getGroupMembersFromCache({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
               const prefetchMemberMap = getOrCreateMemberMap(account.accountId);
               const prefetchUidMap = getOrCreateUidToNameMap(account.accountId);
               for (const m of members) {
