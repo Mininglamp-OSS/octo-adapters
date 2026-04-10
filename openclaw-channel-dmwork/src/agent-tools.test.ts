@@ -286,6 +286,7 @@ describe("createDmworkManagementTools", () => {
   // -----------------------------------------------------------------------
   describe("accountId resolution", () => {
     it("uses provided accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["default", "acct2"]);
       vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
         accountId: accountId ?? "default",
         enabled: true,
@@ -596,6 +597,7 @@ describe("createDmworkManagementTools", () => {
     // Multi-account tests
 
     it("voice-context-read uses specified accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
       vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
         if (accountId === "secondary") {
           return {
@@ -641,6 +643,7 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("voice-context-update uses specified accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
       vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
         if (accountId === "secondary") {
           return {
@@ -684,6 +687,7 @@ describe("createDmworkManagementTools", () => {
     });
 
     it("voice-context-delete uses specified accountId", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
       vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
         if (accountId === "secondary") {
           return {
@@ -750,6 +754,54 @@ describe("createDmworkManagementTools", () => {
       });
 
       expect(result.content[0].text).not.toContain("tok-secondary-secret-123");
+    });
+
+    // -- strict accountId validation --
+
+    it("voice-context-read with non-existent accountId returns error", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      const execute = getExecute();
+
+      const result = await execute("tc", {
+        action: "voice-context-read",
+        accountId: "nonexistent",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.error).toContain("Account not found");
+      expect(parsed.error).toContain("nonexistent");
+      expect(getVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-update with non-existent accountId returns error", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      const execute = getExecute();
+
+      const result = await execute("tc", {
+        action: "voice-context-update",
+        content: "some terms",
+        accountId: "nonexistent",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.error).toContain("Account not found");
+      expect(parsed.error).toContain("nonexistent");
+      expect(updateVoiceContext).not.toHaveBeenCalled();
+    });
+
+    it("voice-context-delete with non-existent accountId returns error", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
+      const execute = getExecute();
+
+      const result = await execute("tc", {
+        action: "voice-context-delete",
+        accountId: "nonexistent",
+      });
+      const parsed = JSON.parse(result.content[0].text);
+
+      expect(parsed.error).toContain("Account not found");
+      expect(parsed.error).toContain("nonexistent");
+      expect(deleteVoiceContext).not.toHaveBeenCalled();
     });
 
     // -- botToken not configured --
