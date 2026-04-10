@@ -278,7 +278,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     chatTypes: ["direct", "group"],
     media: true,
     reactions: false,
-    threads: false,
+    threads: true,
   },
   reload: { configPrefixes: ["channels.dmwork"] },
   actions: {
