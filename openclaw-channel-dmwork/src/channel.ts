@@ -278,7 +278,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     chatTypes: ["direct", "group"],
     media: true,
     reactions: false,
-    threads: false,
+    threads: true,
   },
   reload: { configPrefixes: ["channels.dmwork"] },
   actions: {
@@ -344,7 +344,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
     messageToolHints: ({ cfg, accountId }: { cfg: any; accountId?: string | null }) => {
       if (!accountId) return [];
       return [
-        `When using the dmwork_management tool, pass accountId: "${accountId}".`,
+        `IMPORTANT: Your DMWork accountId is "${accountId}". You MUST always pass accountId: "${accountId}" when using the dmwork_management tool. Do NOT use any other accountId.`,
         `For sending messages: if the target is a group, use target="group:<groupId>". If the target is a specific user (1v1 direct message), use target="user:<userId>". If sending to the current conversation, no prefix is needed.`,
         `For reading message history: use action="read" with target="user:<uid>" to read DM history, or target="group:<groupId>" to read group message history. Cross-channel queries require the requester to be a participant of the target channel.`,
         `For searching: use action="search" with query="shared-groups" to find groups that the bot and the current user both belong to.`,
@@ -355,7 +355,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   config: {
     listAccountIds: (cfg) => listDmworkAccountIds(cfg),
     resolveAccount: (cfg, accountId) => resolveDmworkAccount({ cfg, accountId }),
-    defaultAccountId: (cfg) => resolveDefaultDmworkAccountId(cfg),
+    defaultAccountId: (cfg) => resolveDefaultDmworkAccountId(cfg) ?? listDmworkAccountIds(cfg)[0] ?? DEFAULT_ACCOUNT_ID,
     isEnabled: (account) => account.enabled,
     isConfigured: (account) => account.configured,
     describeAccount: (account) => ({

@@ -123,6 +123,8 @@ export async function handleDmworkMessageAction(params: {
       return handleGroupMdRead({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
     case "group-md-update":
       return handleGroupMdUpdate({ args, apiUrl, botToken, groupMdCache, currentChannelId, log });
+    // 群管理操作（create-group/update-group/add-members/remove-members）
+    // 统一通过 dmwork_management tool 入口，不走 message action
     default:
       return { ok: false, error: `Unknown action: ${action}` };
   }
@@ -643,3 +645,4 @@ async function handleGroupMdUpdate(params: {
     return { ok: false, error: `Failed to update GROUP.md: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
+
