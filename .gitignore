@@ -9,3 +9,4 @@ src/**/*.d.ts
 *.tgz
 .DS_Store
 openclaw-channel-dmwork.bak/
+.idea/
