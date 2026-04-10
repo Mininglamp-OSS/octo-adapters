@@ -123,6 +123,18 @@ export function createDmworkManagementTools(params: {
         // Resolve account
         const accountId =
           requestedAccountId ?? resolveDefaultDmworkAccountId(cfg);
+
+        // Strict validation: reject explicitly requested accountIds that
+        // don't correspond to a real account entry.  Without this check
+        // resolveDmworkAccount() silently falls back to the top-level
+        // channel config, which is a cross-account data isolation risk.
+        if (requestedAccountId) {
+          const knownIds = listDmworkAccountIds(cfg);
+          if (!knownIds.includes(requestedAccountId)) {
+            return makeError(`Account not found: ${requestedAccountId}`);
+          }
+        }
+
         const account = resolveDmworkAccount({ cfg, accountId });
 
         if (!account.config.botToken) {
@@ -287,7 +299,12 @@ async function handleGroupMdUpdate(params: {
 // ---------------------------------------------------------------------------
 
 /**
- * Read the owner's personal voice correction context.
+ * Read the bot owner's personal voice correction context.
+ *
+ * Operates on the owner associated with the resolved bot account.
+ * The `accountId` parameter in the parent execute() selects which bot
+ * (and thus which owner) to operate on.
+ *
  * Returns { has_context, context, updated_at } — normalized by getVoiceContext().
  */
 async function handleVoiceContextRead(params: {
@@ -302,9 +319,16 @@ async function handleVoiceContextRead(params: {
 }
 
 /**
- * Set or update the owner's personal voice correction context.
- * Content validation (empty string rejection) is done in the execute() switch
- * before this handler is called.
+ * Set or replace the bot owner's personal voice correction context.
+ *
+ * Operates on the owner associated with the resolved bot account.
+ * The `accountId` parameter in the parent execute() selects which bot
+ * (and thus which owner) to operate on.
+ *
+ * The `content` param is the full voice-context body (not to be confused
+ * with GROUP.md content used by group-md-update). Content validation
+ * (empty string rejection) is done in the execute() switch before this
+ * handler is called.
  */
 async function handleVoiceContextUpdate(params: {
   apiUrl: string;
@@ -320,7 +344,12 @@ async function handleVoiceContextUpdate(params: {
 }
 
 /**
- * Delete the owner's personal voice correction context.
+ * Delete the bot owner's personal voice correction context.
+ *
+ * Operates on the owner associated with the resolved bot account.
+ * The `accountId` parameter in the parent execute() selects which bot
+ * (and thus which owner) to operate on.
+ *
  * Idempotent — deleting non-existent context is not an error.
  */
 async function handleVoiceContextDelete(params: {
