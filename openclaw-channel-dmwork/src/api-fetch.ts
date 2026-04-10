@@ -437,6 +437,117 @@ export async function updateGroupMd(params: {
   return await resp.json();
 }
 
+// ---- Bot JSON Request Helper ----
+
+/**
+ * Generic helper for bot JSON API requests (GET / PUT / DELETE).
+ * Centralizes URL construction, auth headers, timeout, and error handling.
+ *
+ * @throws Error on non-2xx responses with status code and response body.
+ */
+async function botFetchJson<T = void>(params: {
+  apiUrl: string;
+  botToken: string;
+  path: string;
+  method: "GET" | "PUT" | "DELETE";
+  body?: Record<string, unknown>;
+}): Promise<T> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}${params.path}`;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${params.botToken}`,
+  };
+  if (params.body) {
+    Object.assign(headers, DEFAULT_HEADERS);
+  }
+  const resp = await fetch(url, {
+    method: params.method,
+    headers,
+    body: params.body ? JSON.stringify(params.body) : undefined,
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `Bot API ${params.method} ${params.path} failed (${resp.status}): ${text || resp.statusText}`,
+    );
+  }
+  if (params.method === "GET") {
+    return (await resp.json()) as T;
+  }
+  return undefined as T;
+}
+
+// ---- Voice Context API ----
+
+/**
+ * Query the owner's personal voice correction context.
+ * GET /v1/bot/voice/context
+ *
+ * Returns normalized response with defensive defaults:
+ * - has_context defaults to false if missing from backend response
+ * - context defaults to empty string if missing
+ * - updated_at defaults to empty string if missing
+ */
+export async function getVoiceContext(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<{ has_context: boolean; context: string; updated_at: string }> {
+  const raw = await botFetchJson<Record<string, unknown>>({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    path: "/v1/bot/voice/context",
+    method: "GET",
+  });
+
+  // Defensive normalization — do not blindly pass-through.
+  // If backend omits has_context, treat as false.
+  return {
+    has_context: raw.has_context === true,
+    context: typeof raw.context === "string" ? raw.context : "",
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : "",
+  };
+}
+
+/**
+ * Set the owner's personal voice correction context (PUT upsert).
+ * PUT /v1/bot/voice/context
+ *
+ * Content must not be empty — empty strings are rejected at the adapter
+ * validation layer (agent-tools.ts) before this function is called.
+ * Backend also rejects empty context with 400.
+ */
+export async function updateVoiceContext(params: {
+  apiUrl: string;
+  botToken: string;
+  content: string;
+}): Promise<void> {
+  await botFetchJson({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    path: "/v1/bot/voice/context",
+    method: "PUT",
+    body: { context: params.content },
+  });
+}
+
+/**
+ * Delete the owner's personal voice correction context.
+ * DELETE /v1/bot/voice/context
+ *
+ * Idempotent — deleting a non-existent record returns 200.
+ */
+export async function deleteVoiceContext(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<void> {
+  await botFetchJson({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    path: "/v1/bot/voice/context",
+    method: "DELETE",
+  });
+}
+
 /**
  * 获取频道历史消息（用于注入上下文）
  * @param params.log - Optional logger for consistent logging with OpenClaw log system

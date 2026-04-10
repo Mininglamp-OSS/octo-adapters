@@ -876,6 +876,269 @@ describe("fetchUserInfo", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Voice Context API
+// ---------------------------------------------------------------------------
+import { getVoiceContext, updateVoiceContext, deleteVoiceContext } from "./api-fetch.js";
+
+describe("Voice Context API", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  // -- getVoiceContext --
+
+  describe("getVoiceContext", () => {
+    it("sends GET /v1/bot/voice/context with correct auth header", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          status: 200,
+          has_context: true,
+          context: "correction terms",
+          updated_at: "2026-04-09T13:00:00+08:00",
+        }),
+      }) as unknown as typeof fetch;
+
+      const result = await getVoiceContext({
+        apiUrl: "https://api.test/",
+        botToken: "tok-secret",
+      });
+
+      // Verify URL construction (trailing slash stripped)
+      const callUrl = (global.fetch as any).mock.calls[0][0];
+      expect(callUrl).toBe("https://api.test/v1/bot/voice/context");
+
+      // Verify auth header
+      const callInit = (global.fetch as any).mock.calls[0][1];
+      expect(callInit.method).toBe("GET");
+      expect(callInit.headers.Authorization).toBe("Bearer tok-secret");
+
+      // Verify normalized response (status field stripped)
+      expect(result).toEqual({
+        has_context: true,
+        context: "correction terms",
+        updated_at: "2026-04-09T13:00:00+08:00",
+      });
+      // status field must not appear in result
+      expect((result as any).status).toBeUndefined();
+    });
+
+    it("defaults has_context to false when field is missing", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          status: 200,
+          // has_context field intentionally omitted
+          context: "",
+          updated_at: "",
+        }),
+      }) as unknown as typeof fetch;
+
+      const result = await getVoiceContext({
+        apiUrl: "https://api.test",
+        botToken: "tok",
+      });
+
+      expect(result.has_context).toBe(false);
+    });
+
+    it("defaults has_context to false when field is undefined", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          status: 200,
+          has_context: undefined,
+          context: "",
+          updated_at: "",
+        }),
+      }) as unknown as typeof fetch;
+
+      const result = await getVoiceContext({
+        apiUrl: "https://api.test",
+        botToken: "tok",
+      });
+
+      expect(result.has_context).toBe(false);
+    });
+
+    it("returns has_context: false with empty context when not set", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          status: 200,
+          has_context: false,
+          context: "",
+          updated_at: "",
+        }),
+      }) as unknown as typeof fetch;
+
+      const result = await getVoiceContext({
+        apiUrl: "https://api.test",
+        botToken: "tok",
+      });
+
+      expect(result).toEqual({
+        has_context: false,
+        context: "",
+        updated_at: "",
+      });
+    });
+
+    it("throws on non-2xx response with status and body", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+        text: vi.fn().mockResolvedValue('{"status":401,"msg":"invalid bot token"}'),
+      }) as unknown as typeof fetch;
+
+      await expect(
+        getVoiceContext({ apiUrl: "https://api.test", botToken: "bad-tok" }),
+      ).rejects.toThrow(/failed \(401\)/);
+    });
+
+    it("includes method and path in error message", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        text: vi.fn().mockResolvedValue(""),
+      }) as unknown as typeof fetch;
+
+      await expect(
+        getVoiceContext({ apiUrl: "https://api.test", botToken: "tok" }),
+      ).rejects.toThrow("Bot API GET /v1/bot/voice/context failed (500)");
+    });
+  });
+
+  // -- updateVoiceContext --
+
+  describe("updateVoiceContext", () => {
+    it("sends PUT /v1/bot/voice/context with JSON body", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        text: vi.fn().mockResolvedValue('{"status":200,"msg":"ok"}'),
+      }) as unknown as typeof fetch;
+
+      await updateVoiceContext({
+        apiUrl: "https://api.test/",
+        botToken: "tok-secret",
+        content: "correction terms",
+      });
+
+      const [callUrl, callInit] = (global.fetch as any).mock.calls[0];
+      expect(callUrl).toBe("https://api.test/v1/bot/voice/context");
+      expect(callInit.method).toBe("PUT");
+      expect(callInit.headers.Authorization).toBe("Bearer tok-secret");
+      expect(callInit.headers["Content-Type"]).toBe("application/json");
+      expect(JSON.parse(callInit.body)).toEqual({ context: "correction terms" });
+    });
+
+    it("throws on 400 (content exceeds max length)", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        text: vi.fn().mockResolvedValue(
+          '{"status":400,"msg":"context exceeds max length (10000 characters)"}',
+        ),
+      }) as unknown as typeof fetch;
+
+      await expect(
+        updateVoiceContext({
+          apiUrl: "https://api.test",
+          botToken: "tok",
+          content: "x".repeat(10001),
+        }),
+      ).rejects.toThrow(/failed \(400\)/);
+    });
+  });
+
+  // -- deleteVoiceContext --
+
+  describe("deleteVoiceContext", () => {
+    it("sends DELETE /v1/bot/voice/context", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        text: vi.fn().mockResolvedValue('{"status":200,"msg":"ok"}'),
+      }) as unknown as typeof fetch;
+
+      await deleteVoiceContext({
+        apiUrl: "https://api.test/",
+        botToken: "tok-secret",
+      });
+
+      const [callUrl, callInit] = (global.fetch as any).mock.calls[0];
+      expect(callUrl).toBe("https://api.test/v1/bot/voice/context");
+      expect(callInit.method).toBe("DELETE");
+      expect(callInit.headers.Authorization).toBe("Bearer tok-secret");
+      // DELETE should not have Content-Type or body
+      expect(callInit.body).toBeUndefined();
+    });
+
+    it("succeeds on deleting non-existent record (idempotent)", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        text: vi.fn().mockResolvedValue('{"status":200,"msg":"ok"}'),
+      }) as unknown as typeof fetch;
+
+      // Should not throw
+      await deleteVoiceContext({
+        apiUrl: "https://api.test",
+        botToken: "tok",
+      });
+    });
+  });
+
+  // -- botFetchJson helper --
+
+  describe("botFetchJson (via voice context functions)", () => {
+    it("strips multiple trailing slashes from apiUrl", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          status: 200,
+          has_context: false,
+          context: "",
+          updated_at: "",
+        }),
+      }) as unknown as typeof fetch;
+
+      await getVoiceContext({
+        apiUrl: "https://api.test///",
+        botToken: "tok",
+      });
+
+      const callUrl = (global.fetch as any).mock.calls[0][0];
+      expect(callUrl).toBe("https://api.test/v1/bot/voice/context");
+    });
+
+    it("uses AbortSignal.timeout for request timeout", async () => {
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi.fn().mockResolvedValue({
+          status: 200,
+          has_context: false,
+          context: "",
+          updated_at: "",
+        }),
+      }) as unknown as typeof fetch;
+
+      await getVoiceContext({
+        apiUrl: "https://api.test",
+        botToken: "tok",
+      });
+
+      const callInit = (global.fetch as any).mock.calls[0][1];
+      expect(callInit.signal).toBeDefined();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // sendMessage — mentionAll serialization
 // ---------------------------------------------------------------------------
 describe("sendMessage — mentionAll serialization", () => {

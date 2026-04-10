@@ -20,6 +20,9 @@ import {
   getGroupMembers,
   getGroupMd,
   updateGroupMd,
+  getVoiceContext,
+  updateVoiceContext,
+  deleteVoiceContext,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate } from "./group-md.js";
 
@@ -66,8 +69,9 @@ export function createDmworkManagementTools(params: {
       name: "dmwork_management",
       label: "DMWork Management",
       description:
-        "Manage DMWork groups: list groups the bot belongs to, get group info/members, read or update GROUP.md (group rules/context). " +
-        "Use this tool for any DMWork group management operations.",
+        "Manage DMWork groups and personal voice correction context: list groups, get group info/members, " +
+        "read or update GROUP.md, and manage personal voice correction context (read/update/delete). " +
+        "Use this tool for any DMWork management operations.",
       parameters: {
         type: "object",
         properties: {
@@ -79,6 +83,9 @@ export function createDmworkManagementTools(params: {
               "group-members",
               "group-md-read",
               "group-md-update",
+              "voice-context-read",
+              "voice-context-update",
+              "voice-context-delete",
             ],
             description:
               "The management action to perform.",
@@ -86,12 +93,12 @@ export function createDmworkManagementTools(params: {
           groupId: {
             type: "string",
             description:
-              "The group_no (group ID). Required for all actions except list-groups.",
+              "The group_no (group ID). Required for group-info, group-members, group-md-read, group-md-update.",
           },
           content: {
             type: "string",
             description:
-              "The new GROUP.md content. Required for group-md-update.",
+              "The new content. Required for group-md-update and voice-context-update.",
           },
           accountId: {
             type: "string",
@@ -116,6 +123,18 @@ export function createDmworkManagementTools(params: {
         // Resolve account
         const accountId =
           requestedAccountId ?? resolveDefaultDmworkAccountId(cfg);
+
+        // Strict validation: reject explicitly requested accountIds that
+        // don't correspond to a real account entry.  Without this check
+        // resolveDmworkAccount() silently falls back to the top-level
+        // channel config, which is a cross-account data isolation risk.
+        if (requestedAccountId) {
+          const knownIds = listDmworkAccountIds(cfg);
+          if (!knownIds.includes(requestedAccountId)) {
+            return makeError(`Account not found: ${requestedAccountId}`);
+          }
+        }
+
         const account = resolveDmworkAccount({ cfg, accountId });
 
         if (!account.config.botToken) {
@@ -157,6 +176,31 @@ export function createDmworkManagementTools(params: {
                 content,
                 accountId,
               });
+
+            case "voice-context-read":
+              return await handleVoiceContextRead({ apiUrl, botToken });
+
+            case "voice-context-update": {
+              // Content must NOT be empty. Empty strings have no meaning
+              // for ASR correction.
+              if (
+                content === undefined ||
+                content === null ||
+                content.trim() === ""
+              ) {
+                return makeError(
+                  "content is required for voice-context-update and must not be empty",
+                );
+              }
+              return await handleVoiceContextUpdate({
+                apiUrl,
+                botToken,
+                content,
+              });
+            }
+
+            case "voice-context-delete":
+              return await handleVoiceContextDelete({ apiUrl, botToken });
 
             default:
               return makeError(`Unknown action: ${action}`);
@@ -248,6 +292,75 @@ async function handleGroupMdUpdate(params: {
   });
 
   return makeSuccess({ updated: true, version: result.version });
+}
+
+// ---------------------------------------------------------------------------
+// Voice Context Handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the bot owner's personal voice correction context.
+ *
+ * Operates on the owner associated with the resolved bot account.
+ * The `accountId` parameter in the parent execute() selects which bot
+ * (and thus which owner) to operate on.
+ *
+ * Returns { has_context, context, updated_at } — normalized by getVoiceContext().
+ */
+async function handleVoiceContextRead(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<ToolResult> {
+  const result = await getVoiceContext({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+  });
+  return makeSuccess(result);
+}
+
+/**
+ * Set or replace the bot owner's personal voice correction context.
+ *
+ * Operates on the owner associated with the resolved bot account.
+ * The `accountId` parameter in the parent execute() selects which bot
+ * (and thus which owner) to operate on.
+ *
+ * The `content` param is the full voice-context body (not to be confused
+ * with GROUP.md content used by group-md-update). Content validation
+ * (empty string rejection) is done in the execute() switch before this
+ * handler is called.
+ */
+async function handleVoiceContextUpdate(params: {
+  apiUrl: string;
+  botToken: string;
+  content: string;
+}): Promise<ToolResult> {
+  await updateVoiceContext({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    content: params.content,
+  });
+  return makeSuccess({ updated: true });
+}
+
+/**
+ * Delete the bot owner's personal voice correction context.
+ *
+ * Operates on the owner associated with the resolved bot account.
+ * The `accountId` parameter in the parent execute() selects which bot
+ * (and thus which owner) to operate on.
+ *
+ * Idempotent — deleting non-existent context is not an error.
+ */
+async function handleVoiceContextDelete(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<ToolResult> {
+  await deleteVoiceContext({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+  });
+  return makeSuccess({ deleted: true });
 }
 
 // ---------------------------------------------------------------------------
