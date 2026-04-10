@@ -799,3 +799,135 @@ export async function removeGroupMembers(params: {
   }
   return (await resp.json()) as { ok: boolean; removed: number };
 }
+
+// ========== Bot Thread APIs ==========
+
+export async function createThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  name: string;
+  sourceMessageId?: number;
+}): Promise<{ short_id: string; name: string; creator_uid: string }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads`;
+  const body: Record<string, unknown> = { name: params.name };
+  if (params.sourceMessageId != null) body.source_message_id = params.sourceMessageId;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${params.botToken}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`createThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as { short_id: string; name: string; creator_uid: string };
+}
+
+export async function listThreads(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+}): Promise<Array<{ short_id: string; name: string; creator_uid: string; status: number }>> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`listThreads failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as Array<{ short_id: string; name: string; creator_uid: string; status: number }>;
+}
+
+export async function getThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<{ short_id: string; name: string; creator_uid: string; status: number; member_count: number }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`getThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as { short_id: string; name: string; creator_uid: string; status: number; member_count: number };
+}
+
+export async function deleteThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<void> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}`;
+  const resp = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`deleteThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+}
+
+export async function listThreadMembers(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<Array<{ uid: string; role: number }>> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/members`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`listThreadMembers failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as Array<{ uid: string; role: number }>;
+}
+
+export async function joinThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<void> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/join`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`joinThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+}
+
+export async function leaveThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<void> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/leave`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`leaveThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+}

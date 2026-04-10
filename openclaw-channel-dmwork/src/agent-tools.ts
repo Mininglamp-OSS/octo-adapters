@@ -25,6 +25,13 @@ import {
   addGroupMembers,
   removeGroupMembers,
   searchSpaceMembers,
+  createThread,
+  listThreads,
+  getThread,
+  deleteThread,
+  listThreadMembers,
+  joinThread,
+  leaveThread,
 } from "./api-fetch.js";
 import { broadcastGroupMdUpdate } from "./group-md.js";
 
@@ -89,6 +96,13 @@ export function createDmworkManagementTools(params: {
               "update-group",
               "add-members",
               "remove-members",
+              "create-thread",
+              "list-threads",
+              "get-thread",
+              "delete-thread",
+              "list-thread-members",
+              "join-thread",
+              "leave-thread",
             ],
             description:
               "The management action to perform.",
@@ -128,6 +142,16 @@ export function createDmworkManagementTools(params: {
             type: "string",
             description:
               "UID of the user who requested group creation (becomes group owner). Required for create-group.",
+          },
+          threadName: {
+            type: "string",
+            description:
+              "Thread name. Required for create-thread.",
+          },
+          shortId: {
+            type: "string",
+            description:
+              "Thread short ID. Required for get-thread, delete-thread, list-thread-members, join-thread, leave-thread.",
           },
           accountId: {
             type: "string",
@@ -269,6 +293,80 @@ export function createDmworkManagementTools(params: {
                 members,
               });
               return makeSuccess(result);
+            }
+
+            // ========== Thread Actions ==========
+
+            case "create-thread": {
+              if (!groupId)
+                return makeError("groupId is required for create-thread");
+              const threadName = (args.threadName ?? args.name) as string | undefined;
+              if (!threadName)
+                return makeError("threadName is required for create-thread");
+              const result = await createThread({
+                apiUrl,
+                botToken,
+                groupNo: groupId,
+                name: threadName,
+              });
+              return makeSuccess(result);
+            }
+
+            case "list-threads": {
+              if (!groupId)
+                return makeError("groupId is required for list-threads");
+              const threads = await listThreads({ apiUrl, botToken, groupNo: groupId });
+              return makeSuccess({ threads });
+            }
+
+            case "get-thread": {
+              if (!groupId)
+                return makeError("groupId is required for get-thread");
+              const shortId = args.shortId as string | undefined;
+              if (!shortId)
+                return makeError("shortId is required for get-thread");
+              const thread = await getThread({ apiUrl, botToken, groupNo: groupId, shortId });
+              return makeSuccess(thread);
+            }
+
+            case "delete-thread": {
+              if (!groupId)
+                return makeError("groupId is required for delete-thread");
+              const shortId = args.shortId as string | undefined;
+              if (!shortId)
+                return makeError("shortId is required for delete-thread");
+              await deleteThread({ apiUrl, botToken, groupNo: groupId, shortId });
+              return makeSuccess({ deleted: true, groupId, shortId });
+            }
+
+            case "list-thread-members": {
+              if (!groupId)
+                return makeError("groupId is required for list-thread-members");
+              const shortId = args.shortId as string | undefined;
+              if (!shortId)
+                return makeError("shortId is required for list-thread-members");
+              const members = await listThreadMembers({ apiUrl, botToken, groupNo: groupId, shortId });
+              return makeSuccess({ members });
+            }
+
+            case "join-thread": {
+              if (!groupId)
+                return makeError("groupId is required for join-thread");
+              const shortId = args.shortId as string | undefined;
+              if (!shortId)
+                return makeError("shortId is required for join-thread");
+              await joinThread({ apiUrl, botToken, groupNo: groupId, shortId });
+              return makeSuccess({ joined: true, groupId, shortId });
+            }
+
+            case "leave-thread": {
+              if (!groupId)
+                return makeError("groupId is required for leave-thread");
+              const shortId = args.shortId as string | undefined;
+              if (!shortId)
+                return makeError("shortId is required for leave-thread");
+              await leaveThread({ apiUrl, botToken, groupNo: groupId, shortId });
+              return makeSuccess({ left: true, groupId, shortId });
             }
 
             default:
