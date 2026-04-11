@@ -303,7 +303,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       let accountId = ctx.accountId ?? DEFAULT_ACCOUNT_ID;
       const currentChannelId = ctx.toolContext?.currentChannelId;
       if (currentChannelId) {
-        const rawGroupNo = currentChannelId.replace(/^dmwork:/, '');
+        const rawId = currentChannelId.replace(/^dmwork:/, '');
+        // 子区 channelID (groupNo____shortId) → 提取父群 groupNo
+        const rawGroupNo = rawId.includes("____") ? rawId.split("____")[0] : rawId;
         // Only correct if current accountId is NOT registered for this group
         // (i.e., framework passed a clearly wrong accountId).
         // For shared groups (multiple bots), don't override — respect framework's choice.
