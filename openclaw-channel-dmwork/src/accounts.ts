@@ -37,8 +37,15 @@ export function listDmworkAccountIds(cfg: OpenClawConfig): string[] {
   return [DEFAULT_ACCOUNT_ID];
 }
 
-export function resolveDefaultDmworkAccountId(_cfg: OpenClawConfig): string {
-  return DEFAULT_ACCOUNT_ID;
+export function resolveDefaultDmworkAccountId(cfg: OpenClawConfig): string | null {
+  const channel = (cfg.channels?.dmwork ?? {}) as DmworkAccountConfig;
+  const accountIds = Object.keys(channel.accounts ?? {});
+  // Single account or legacy config (no accounts map): safe to default
+  if (accountIds.length <= 1) {
+    return accountIds[0] ?? DEFAULT_ACCOUNT_ID;
+  }
+  // Multiple accounts: cannot guess, caller must specify
+  return null;
 }
 
 export function resolveDmworkAccount(params: {

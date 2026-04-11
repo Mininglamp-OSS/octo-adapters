@@ -112,6 +112,7 @@ export interface SendMessageResult {
 export enum ChannelType {
   DM = 1,
   Group = 2,
+  CommunityTopic = 5, // Thread/子区
 }
 
 /** Message content types */
@@ -133,4 +134,10 @@ export interface DMWorkGroupConfig {
   enabled?: boolean;
 }
 
-
+/** Minimal logger interface used across modules. */
+export type LogSink = {
+  info?: (msg: string) => void;
+  error?: (msg: string) => void;
+  warn?: (msg: string) => void;
+  debug?: (msg: string) => void;
+};

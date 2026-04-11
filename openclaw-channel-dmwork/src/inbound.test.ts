@@ -5,6 +5,7 @@ import {
   resolveInnerMessageText,
   resolveApiMessagePlaceholder,
   resolveMultipleForwardText,
+  buildMediaUrl,
   calcDownloadTimeout,
   formatSize,
   resolveFileContentWithRetry,
@@ -863,5 +864,206 @@ describe("buildMemberListPrefix", () => {
     const result = buildMemberListPrefix(map);
     expect(result).toContain("[Group Info]");
     expect(result).toContain("50 members");
+  });
+});
+
+/**
+ * Tests for buildMediaUrl — exported module-level URL builder.
+ */
+describe("buildMediaUrl", () => {
+  it("should return undefined for empty url", () => {
+    expect(buildMediaUrl(undefined)).toBeUndefined();
+    expect(buildMediaUrl("")).toBeUndefined();
+  });
+
+  it("should return absolute URL as-is", () => {
+    expect(buildMediaUrl("https://cdn.example.com/img.jpg")).toBe("https://cdn.example.com/img.jpg");
+    expect(buildMediaUrl("http://example.com/file.pdf")).toBe("http://example.com/file.pdf");
+  });
+
+  it("should use cdnUrl when provided", () => {
+    expect(buildMediaUrl("upload/abc123.jpg", "https://api.example.com", "https://cdn.example.com"))
+      .toBe("https://cdn.example.com/upload/abc123.jpg");
+  });
+
+  it("should strip trailing slashes from cdnUrl", () => {
+    expect(buildMediaUrl("upload/abc.jpg", undefined, "https://cdn.example.com///"))
+      .toBe("https://cdn.example.com/upload/abc.jpg");
+  });
+
+  it("should strip file/preview/ prefix with cdnUrl", () => {
+    expect(buildMediaUrl("file/preview/bucket/img.jpg", undefined, "https://cdn.example.com"))
+      .toBe("https://cdn.example.com/bucket/img.jpg");
+  });
+
+  it("should strip file/ prefix with cdnUrl", () => {
+    expect(buildMediaUrl("file/bucket/img.jpg", undefined, "https://cdn.example.com"))
+      .toBe("https://cdn.example.com/bucket/img.jpg");
+  });
+
+  it("should fall back to apiUrl when cdnUrl is not provided", () => {
+    expect(buildMediaUrl("upload/abc123.jpg", "https://api.example.com"))
+      .toBe("https://api.example.com/file/upload/abc123.jpg");
+  });
+
+  it("should strip trailing slashes from apiUrl", () => {
+    expect(buildMediaUrl("upload/abc.jpg", "https://api.example.com/"))
+      .toBe("https://api.example.com/file/upload/abc.jpg");
+  });
+
+  it("should strip file/ prefix with apiUrl fallback", () => {
+    expect(buildMediaUrl("file/bucket/img.jpg", "https://api.example.com"))
+      .toBe("https://api.example.com/file/bucket/img.jpg");
+  });
+
+  it("should return /file/path when neither cdnUrl nor apiUrl provided", () => {
+    expect(buildMediaUrl("upload/abc.jpg")).toBe("/file/upload/abc.jpg");
+  });
+});
+
+/**
+ * Tests for resolveInnerMessageText with buildUrl parameter.
+ */
+describe("resolveInnerMessageText with buildUrl", () => {
+  const mockBuildUrl = (url?: string) => url ? `https://cdn.example.com/${url}` : undefined;
+
+  it("should append URL for Image when buildUrl is provided", () => {
+    const result = resolveInnerMessageText(
+      { type: MessageType.Image, url: "img.jpg" },
+      mockBuildUrl,
+    );
+    expect(result).toBe("[图片]\nhttps://cdn.example.com/img.jpg");
+  });
+
+  it("should append URL for GIF when buildUrl is provided", () => {
+    const result = resolveInnerMessageText(
+      { type: MessageType.GIF, url: "anim.gif" },
+      mockBuildUrl,
+    );
+    expect(result).toBe("[GIF]\nhttps://cdn.example.com/anim.gif");
+  });
+
+  it("should append URL for Voice when buildUrl is provided", () => {
+    const result = resolveInnerMessageText(
+      { type: MessageType.Voice, url: "voice.mp3" },
+      mockBuildUrl,
+    );
+    expect(result).toBe("[语音]\nhttps://cdn.example.com/voice.mp3");
+  });
+
+  it("should append URL for Video when buildUrl is provided", () => {
+    const result = resolveInnerMessageText(
+      { type: MessageType.Video, url: "clip.mp4" },
+      mockBuildUrl,
+    );
+    expect(result).toBe("[视频]\nhttps://cdn.example.com/clip.mp4");
+  });
+
+  it("should append URL for File when buildUrl is provided", () => {
+    const result = resolveInnerMessageText(
+      { type: MessageType.File, name: "report.pdf", url: "report.pdf" },
+      mockBuildUrl,
+    );
+    expect(result).toBe("[文件: report.pdf]\nhttps://cdn.example.com/report.pdf");
+  });
+
+  it("should return placeholder without URL when buildUrl is not provided", () => {
+    expect(resolveInnerMessageText({ type: MessageType.Image, url: "img.jpg" })).toBe("[图片]");
+    expect(resolveInnerMessageText({ type: MessageType.GIF, url: "anim.gif" })).toBe("[GIF]");
+    expect(resolveInnerMessageText({ type: MessageType.Voice, url: "voice.mp3" })).toBe("[语音]");
+    expect(resolveInnerMessageText({ type: MessageType.Video, url: "clip.mp4" })).toBe("[视频]");
+    expect(resolveInnerMessageText({ type: MessageType.File, name: "doc.pdf", url: "doc.pdf" })).toBe("[文件: doc.pdf]");
+  });
+
+  it("should return placeholder when payload.url is missing even with buildUrl", () => {
+    expect(resolveInnerMessageText({ type: MessageType.Image }, mockBuildUrl)).toBe("[图片]");
+    expect(resolveInnerMessageText({ type: MessageType.Voice }, mockBuildUrl)).toBe("[语音]");
+    expect(resolveInnerMessageText({ type: MessageType.File, name: "doc.pdf" }, mockBuildUrl)).toBe("[文件: doc.pdf]");
+  });
+});
+
+/**
+ * Tests for resolveMultipleForwardText with apiUrl/cdnUrl — nested media URL resolution.
+ */
+describe("resolveMultipleForwardText with URL resolution", () => {
+  it("should include full URLs for media messages when apiUrl is provided", () => {
+    const payload = {
+      type: MessageType.MultipleForward,
+      users: [{ uid: "user1", name: "Alice" }],
+      msgs: [
+        { from_uid: "user1", payload: { type: MessageType.Image, url: "upload/img.jpg" } },
+        { from_uid: "user1", payload: { type: MessageType.File, name: "doc.pdf", url: "upload/doc.pdf" } },
+      ],
+    };
+
+    const result = resolveMultipleForwardText(payload, "https://api.example.com");
+    expect(result).toContain("Alice: [图片]\nhttps://api.example.com/file/upload/img.jpg");
+    expect(result).toContain("Alice: [文件: doc.pdf]\nhttps://api.example.com/file/upload/doc.pdf");
+  });
+
+  it("should use cdnUrl when provided", () => {
+    const payload = {
+      type: MessageType.MultipleForward,
+      users: [{ uid: "user1", name: "Bob" }],
+      msgs: [
+        { from_uid: "user1", payload: { type: MessageType.Video, url: "upload/clip.mp4" } },
+      ],
+    };
+
+    const result = resolveMultipleForwardText(payload, "https://api.example.com", "https://cdn.example.com");
+    expect(result).toContain("Bob: [视频]\nhttps://cdn.example.com/upload/clip.mp4");
+  });
+
+  it("should recursively resolve nested MultipleForward with URLs", () => {
+    const payload = {
+      type: MessageType.MultipleForward,
+      users: [{ uid: "user1", name: "张三" }],
+      msgs: [
+        {
+          from_uid: "user1",
+          payload: {
+            type: MessageType.MultipleForward,
+            users: [{ uid: "user2", name: "李四" }],
+            msgs: [
+              { from_uid: "user2", payload: { type: MessageType.File, name: "secret.docx", url: "upload/secret.docx" } },
+            ],
+          },
+        },
+      ],
+    };
+
+    const result = resolveMultipleForwardText(payload, "https://api.example.com");
+    expect(result).toContain("张三: [合并转发]");
+    expect(result).toContain("[合并转发: 聊天记录]");
+    expect(result).toContain("李四: [文件: secret.docx]\nhttps://api.example.com/file/upload/secret.docx");
+  });
+
+  it("should keep placeholders when no apiUrl or cdnUrl provided", () => {
+    const payload = {
+      type: MessageType.MultipleForward,
+      users: [{ uid: "user1", name: "Test" }],
+      msgs: [
+        { from_uid: "user1", payload: { type: MessageType.Image, url: "upload/img.jpg" } },
+      ],
+    };
+
+    const result = resolveMultipleForwardText(payload);
+    expect(result).toBe("[合并转发: 聊天记录]\nTest: [图片]");
+  });
+
+  it("should handle payload.url being empty in nested messages", () => {
+    const payload = {
+      type: MessageType.MultipleForward,
+      users: [{ uid: "user1", name: "Test" }],
+      msgs: [
+        { from_uid: "user1", payload: { type: MessageType.Image } },
+        { from_uid: "user1", payload: { type: MessageType.File, name: "doc.pdf" } },
+      ],
+    };
+
+    const result = resolveMultipleForwardText(payload, "https://api.example.com");
+    expect(result).toContain("Test: [图片]");
+    expect(result).toContain("Test: [文件: doc.pdf]");
+    expect(result).not.toContain("https://");
   });
 });
