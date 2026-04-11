@@ -40,9 +40,17 @@ export function parseTarget(
   currentChannelId?: string,
   knownGroupIds?: Set<string>,
 ): { channelId: string; channelType: ChannelType } {
+  const THREAD_SEP = "____";
+
   // Explicit prefixes always win
-  if (target.startsWith("group:"))
-    return { channelId: target.slice(6), channelType: ChannelType.Group };
+  if (target.startsWith("group:")) {
+    const channelId = target.slice(6);
+    // groupNo____shortId → CommunityTopic
+    if (channelId.includes(THREAD_SEP)) {
+      return { channelId, channelType: ChannelType.CommunityTopic };
+    }
+    return { channelId, channelType: ChannelType.Group };
+  }
   if (target.startsWith("user:"))
     return { channelId: target.slice(5), channelType: ChannelType.DM };
 
@@ -50,7 +58,12 @@ export function parseTarget(
   let bareId = target;
   if (bareId.startsWith("dmwork:")) bareId = bareId.slice(7);
 
-  // Bare ID: check knownGroupIds
+  // Thread channel ID (groupNo____shortId)
+  if (bareId.includes(THREAD_SEP)) {
+    return { channelId: bareId, channelType: ChannelType.CommunityTopic };
+  }
+
+  // Bare ID: check knownGroupIds, also check parent group for thread context
   const isGroup = knownGroupIds?.has(bareId) ?? false;
   return { channelId: bareId, channelType: isGroup ? ChannelType.Group : ChannelType.DM };
 }
@@ -171,7 +184,7 @@ async function handleSend(params: {
     let mentionEntities: MentionEntity[] = [];
     let finalMessage = message;
 
-    if (channelType === ChannelType.Group) {
+    if (channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic) {
       // v2 path: convert @[uid:name] → @name + entities
       if (uidToNameMap) {
         const structuredMentions = parseStructuredMentions(finalMessage);
@@ -263,9 +276,11 @@ async function handleRead(params: {
   // ====== Permission check ======
   // Strip dmwork: prefix from currentChannelId for comparison
   const bareCurrentChannelId = currentChannelId?.replace(/^dmwork:/, "");
-  // Infer the current channel type: if the bare ID is a known group, it's Group; otherwise DM
+  // Infer the current channel type
   const knownGroups = getKnownGroupIds();
-  const currentChannelType = knownGroups.has(bareCurrentChannelId ?? "") ? ChannelType.Group : ChannelType.DM;
+  const currentChannelType = bareCurrentChannelId?.includes("____")
+    ? ChannelType.CommunityTopic
+    : knownGroups.has(bareCurrentChannelId ?? "") ? ChannelType.Group : ChannelType.DM;
   // Must match both channelId AND channelType to be considered the same channel
   const isSameChannel = !!(bareCurrentChannelId && channelId === bareCurrentChannelId && channelType === currentChannelType);
 
