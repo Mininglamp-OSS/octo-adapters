@@ -112,6 +112,7 @@ export interface SendMessageResult {
 export enum ChannelType {
   DM = 1,
   Group = 2,
+  CommunityTopic = 5, // Thread/子区
 }
 
 /** Message content types */

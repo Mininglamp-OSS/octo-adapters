@@ -997,7 +997,7 @@ export async function handleInboundMessage(params: {
   const isGroup =
     typeof message.channel_id === "string" &&
     message.channel_id.length > 0 &&
-    message.channel_type === ChannelType.Group;
+    (message.channel_type === ChannelType.Group || message.channel_type === ChannelType.CommunityTopic);
 
   // --- GROUP.md: register group→account mapping and handle structured events ---
   if (isGroup && message.channel_id) {
@@ -1191,7 +1191,7 @@ export async function handleInboundMessage(params: {
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
           channelId: message.channel_id!,
-          channelType: ChannelType.Group,
+          channelType: message.channel_type ?? ChannelType.Group,
           limit: fetchLimit,
           log,
         });
@@ -1399,7 +1399,7 @@ export async function handleInboundMessage(params: {
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
 
   const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
-  const replyChannelType = isGroup ? ChannelType.Group : ChannelType.DM;
+  const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
 
   // 已读回执 + 正在输入 — fire-and-forget
   log?.info?.(`dmwork: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
