@@ -18,7 +18,6 @@ import {
 } from "./api-fetch.js";
 import { uploadAndSendMedia } from "./inbound.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
-import type { MentionEntity } from "./types.js";
 import { getKnownGroupIds } from "./group-md.js";
 import { checkPermission } from "./permission.js";
 import { emitAuditLog } from "./audit.js";
