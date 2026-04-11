@@ -239,8 +239,9 @@ export function resolveOutboundAccountId(ctxTo: string, fallbackAccountId: strin
     if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
   }
   const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
-  if (channelType === ChannelType.Group) {
-    const correctAccountId = resolveAccountForGroup(channelId);
+  if (channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic) {
+    const groupId = channelType === ChannelType.CommunityTopic ? channelId.split("____")[0] : channelId;
+    const correctAccountId = resolveAccountForGroup(groupId);
     if (correctAccountId) return correctAccountId;
   }
   return fallbackAccountId;
@@ -414,7 +415,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       let mentionEntities: MentionEntity[] = [];
       let finalContent = content;
 
-      if (channelType === ChannelType.Group) {
+      if (channelType === ChannelType.Group || channelType === ChannelType.CommunityTopic) {
         const accountMemberMap = getOrCreateMemberMap(accountId);
         const uidToNameMap = getOrCreateUidToNameMap(accountId);
 
@@ -854,8 +855,11 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           // Track cache activity for cleanup
           if (msg.channel_id) {
             touchCache(account.accountId, msg.channel_id);
-            if (msg.channel_type === ChannelType.Group) {
-              registerGroupToAccount(msg.channel_id, account.accountId);
+            if (msg.channel_type === ChannelType.Group || msg.channel_type === ChannelType.CommunityTopic) {
+              const groupId = msg.channel_type === ChannelType.CommunityTopic
+                ? msg.channel_id.split("____")[0]
+                : msg.channel_id;
+              registerGroupToAccount(groupId, account.accountId);
             }
           }
 

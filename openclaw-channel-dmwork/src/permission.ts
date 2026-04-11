@@ -61,5 +61,24 @@ export async function checkPermission(params: {
     return { allowed: true };
   }
 
+  if (channelType === ChannelType.CommunityTopic) {
+    // Thread/子区: channelId 格式为 groupNo____shortId，校验父群成员身份
+    const groupNo = channelId.split("____")[0];
+    if (!groupNo) {
+      return { allowed: false, reason: "无效的子区频道ID" };
+    }
+    const members = await getGroupMembersFromCache({
+      apiUrl: params.apiUrl,
+      botToken: params.botToken,
+      groupNo,
+      log: params.log,
+    });
+    const memberUids = members.map((m) => m.uid).filter(Boolean);
+    if (!memberUids.includes(requesterSenderId)) {
+      return { allowed: false, reason: "你不在该群中，无权访问子区" };
+    }
+    return { allowed: true };
+  }
+
   return { allowed: false, reason: `不支持的频道类型: ${channelType}` };
 }
