@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ChannelType } from "./types.js";
+import { registerOwnerUid, _clearOwnerRegistry } from "./owner-registry.js";
+import { _clearMemberCache, _setCacheEntry } from "./member-cache.js";
+import { registerBotGroupIds, _testReset as _resetGroupMd } from "./group-md.js";
 
 // Mock uploadAndSendMedia — the streaming COS upload uses its own SDK internals
 // that can't be tested via fetch mocks alone. Upload logic is tested in inbound.test.ts.
@@ -37,10 +40,16 @@ function jsonResponse(data: unknown, status = 200): Response {
 describe("handleDmworkMessageAction", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    _clearOwnerRegistry();
+    _clearMemberCache();
+    _resetGroupMd();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    _clearOwnerRegistry();
+    _clearMemberCache();
+    _resetGroupMd();
   });
 
   // -----------------------------------------------------------------------
@@ -448,8 +457,9 @@ describe("handleDmworkMessageAction", () => {
   // -----------------------------------------------------------------------
   // read action
   // -----------------------------------------------------------------------
-  describe("read — group messages", () => {
-    it("should read and return messages from a group", async () => {
+  describe("read — same-channel group messages", () => {
+    it("should read and return messages from current group (no permission check)", async () => {
+      registerBotGroupIds(["grp1"]);
       const fakeMessages = {
         messages: [
           {
@@ -477,6 +487,7 @@ describe("handleDmworkMessageAction", () => {
         args: { target: "group:grp1" },
         apiUrl: "http://localhost:8090",
         botToken: "test-token",
+        currentChannelId: "grp1",
       });
 
       expect(result.ok).toBe(true);
@@ -484,11 +495,15 @@ describe("handleDmworkMessageAction", () => {
       expect(data.count).toBe(2);
       expect(data.messages[0].content).toBe("Hello");
       expect(data.messages[1].content).toBe("Hi there");
+      expect(data.hasMore).toBe(false);
+      // Same-channel should NOT have prompt injection wrapper
+      expect(data.header).toBeUndefined();
     });
   });
 
-  describe("read — custom limit", () => {
-    it("should pass limit to API and cap at 100", async () => {
+  describe("read — custom limit (same channel)", () => {
+    it("should cap at 100+1 for same-channel reads", async () => {
+      registerBotGroupIds(["grp1"]);
       let requestBody: any = null;
 
       globalThis.fetch = mockFetch({
@@ -504,15 +519,17 @@ describe("handleDmworkMessageAction", () => {
         args: { target: "group:grp1", limit: 200 },
         apiUrl: "http://localhost:8090",
         botToken: "test-token",
+        currentChannelId: "grp1",
       });
 
-      // Should be capped at 100
-      expect(requestBody.limit).toBe(100);
+      // Same channel: capped at 100, but API receives limit+1
+      expect(requestBody.limit).toBe(101);
     });
   });
 
   describe("read — uid-to-name resolution", () => {
     it("should resolve from_uid to display names", async () => {
+      registerBotGroupIds(["grp1"]);
       const fakeMessages = {
         messages: [
           {
@@ -537,6 +554,7 @@ describe("handleDmworkMessageAction", () => {
         apiUrl: "http://localhost:8090",
         botToken: "test-token",
         uidToNameMap,
+        currentChannelId: "grp1",
       });
 
       expect(result.ok).toBe(true);
@@ -846,6 +864,553 @@ describe("handleDmworkMessageAction", () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toContain("content");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // read — cross-channel permission checks
+  // -----------------------------------------------------------------------
+  describe("read — cross-channel DM (self)", () => {
+    it("should allow user to read their own DM cross-channel", async () => {
+      const fakeMessages = {
+        messages: [
+          {
+            from_uid: "user-abc",
+            message_id: "m1",
+            timestamp: 1709654400,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: "Hello from DM" })).toString("base64"),
+          },
+        ],
+      };
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "user:user-abc" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "different-channel",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.messages[0].content).toBe("Hello from DM");
+      // Cross-channel should have prompt injection wrapper
+      expect(data.header).toBeDefined();
+      expect(data.footer).toBeDefined();
+      expect(data.metadata?.trustLevel).toBe("untrusted-data");
+    });
+  });
+
+  describe("read — cross-channel DM (unauthorized)", () => {
+    it("should deny non-owner reading another user's DM", async () => {
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "user:someone-else" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "different-channel",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("无权查询他人");
+    });
+  });
+
+  describe("read — cross-channel group (member)", () => {
+    it("should allow group member to read cross-channel", async () => {
+      _setCacheEntry("target-grp", [
+        { uid: "user-abc", name: "Alice" },
+        { uid: "user-xyz", name: "Bob" },
+      ]);
+
+      const fakeMessages = {
+        messages: [
+          {
+            from_uid: "user-xyz",
+            message_id: "m1",
+            timestamp: 1709654400,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: "Group msg" })).toString("base64"),
+          },
+        ],
+      };
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "group:target-grp" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "different-channel",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.messages[0].content).toBe("Group msg");
+      expect(data.header).toBeDefined();
+    });
+  });
+
+  describe("read — cross-channel group (non-member)", () => {
+    it("should deny non-member reading another group", async () => {
+      _setCacheEntry("target-grp", [
+        { uid: "user-xyz", name: "Bob" },
+      ]);
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "group:target-grp" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "different-channel",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("你不在该群中");
+    });
+  });
+
+  describe("read — cross-channel missing requesterSenderId", () => {
+    it("should deny when requester is unknown", async () => {
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "user:someone" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "different-channel",
+        // requesterSenderId not provided
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("无法识别");
+    });
+  });
+
+  describe("read — owner cross-channel access", () => {
+    it("should allow owner to read any DM", async () => {
+      registerOwnerUid("acct1", "owner-uid");
+
+      const fakeMessages = {
+        messages: [
+          {
+            from_uid: "someone-else",
+            message_id: "m1",
+            timestamp: 1709654400,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: "Private msg" })).toString("base64"),
+          },
+        ],
+      };
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "user:someone-else" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "different-channel",
+        requesterSenderId: "owner-uid",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+    });
+  });
+
+  describe("read — cross-channel limit cap at 50", () => {
+    it("should cap cross-channel reads at 50+1", async () => {
+      _setCacheEntry("target-grp", [{ uid: "user-abc", name: "Alice" }]);
+
+      let requestBody: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async (_url, init) => {
+          requestBody = JSON.parse(init?.body as string);
+          return jsonResponse({ messages: [] });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "group:target-grp", limit: 200 },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "different-channel",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      // Cross-channel: capped at 50, API receives limit+1
+      expect(requestBody.limit).toBe(51);
+    });
+  });
+
+  describe("read — hasMore detection", () => {
+    it("should set hasMore=true when more messages exist", async () => {
+      registerBotGroupIds(["grp1"]);
+      // Request limit=2, return 3 messages (limit+1 triggers hasMore)
+      const fakeMessages = {
+        messages: [
+          {
+            from_uid: "u1", message_id: "m1", timestamp: 1709654400,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: "A" })).toString("base64"),
+          },
+          {
+            from_uid: "u2", message_id: "m2", timestamp: 1709654401,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: "B" })).toString("base64"),
+          },
+          {
+            from_uid: "u3", message_id: "m3", timestamp: 1709654402,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: "C" })).toString("base64"),
+          },
+        ],
+      };
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "group:grp1", limit: 2 },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.hasMore).toBe(true);
+      expect(data.count).toBe(2); // Trimmed to requested limit
+    });
+  });
+
+  describe("read — content truncation and type tags", () => {
+    it("should truncate long text and show type tags for non-text messages", async () => {
+      registerBotGroupIds(["grp1"]);
+      const longContent = "A".repeat(600);
+      const fakeMessages = {
+        messages: [
+          {
+            from_uid: "u1", message_id: "m1", timestamp: 1709654400,
+            payload: Buffer.from(JSON.stringify({ type: 1, content: longContent })).toString("base64"),
+          },
+          {
+            from_uid: "u2", message_id: "m2", timestamp: 1709654401,
+            payload: Buffer.from(JSON.stringify({ type: 2, content: "" })).toString("base64"),
+          },
+          {
+            from_uid: "u3", message_id: "m3", timestamp: 1709654402,
+            payload: Buffer.from(JSON.stringify({ type: 4, content: "" })).toString("base64"),
+          },
+          {
+            from_uid: "u4", message_id: "m4", timestamp: 1709654403,
+            payload: Buffer.from(JSON.stringify({ type: 8, name: "report.pdf" })).toString("base64"),
+          },
+        ],
+      };
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse(fakeMessages),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "group:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      // Long text should be truncated to 500 + …
+      expect(data.messages[0].content).toHaveLength(501);
+      expect(data.messages[0].content.endsWith("…")).toBe(true);
+      // Image type tag
+      expect(data.messages[1].content).toBe("[图片]");
+      // Voice type tag
+      expect(data.messages[2].content).toBe("[语音]");
+      // File type tag
+      expect(data.messages[3].content).toBe("[文件: report.pdf]");
+    });
+  });
+
+  describe("read — dmwork: prefix stripped for same-channel check", () => {
+    it("should treat dmwork:grp1 currentChannelId as same channel for grp1 target", async () => {
+      registerBotGroupIds(["grp1"]);
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse({ messages: [] }),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "group:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "dmwork:grp1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      // Should be treated as same channel (no wrapper)
+      expect(data.header).toBeUndefined();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // search action
+  // -----------------------------------------------------------------------
+  describe("search — shared-groups", () => {
+    it("should return shared groups from cache", async () => {
+      _setCacheEntry("grp1", [
+        { uid: "user-abc", name: "Alice" },
+        { uid: "user-xyz", name: "Bob" },
+      ], "Dev Team");
+      _setCacheEntry("grp2", [
+        { uid: "user-abc", name: "Alice" },
+      ], "Support");
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "search",
+        args: { query: "shared-groups" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.total).toBe(2);
+      expect(data.sharedGroups.map((g: any) => g.groupNo).sort()).toEqual(["grp1", "grp2"]);
+    });
+  });
+
+  describe("search — shared-groups (no query defaults to shared-groups)", () => {
+    it("should default to shared-groups when query is empty", async () => {
+      _setCacheEntry("grp1", [
+        { uid: "user-abc", name: "Alice" },
+      ], "Dev Team");
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "search",
+        args: {},
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.total).toBe(1);
+    });
+  });
+
+  describe("search — missing requesterSenderId", () => {
+    it("should return error when requester is unknown", async () => {
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "search",
+        args: { query: "shared-groups" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        // no requesterSenderId
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("无法识别");
+    });
+  });
+
+  describe("search — unsupported query", () => {
+    it("should return error for unsupported query type", async () => {
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "search",
+        args: { query: "keyword-search" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "user-abc",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("Unsupported search query");
+    });
+  });
+
+  describe("search — shared-groups via API (cache miss)", () => {
+    it("should fall back to API when cache is empty", async () => {
+      globalThis.fetch = mockFetch({
+        // /members must come before /v1/bot/groups to avoid false match
+        "/members": async () =>
+          jsonResponse([
+            { uid: "user-abc", name: "Alice" },
+          ]),
+        "/v1/bot/groups": async () =>
+          jsonResponse([
+            { group_no: "grp1", name: "Dev Team" },
+          ]),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "search",
+        args: { query: "shared-groups" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.total).toBe(1);
+      expect(data.sharedGroups[0].groupNo).toBe("grp1");
+      expect(data.sharedGroups[0].groupName).toBe("Dev Team");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // read — isSameChannel channelType bypass prevention
+  // -----------------------------------------------------------------------
+  describe("read — channelType mismatch prevents same-channel bypass", () => {
+    it("should NOT treat user:grp1 as same-channel when currentChannelId is grp1 (group)", async () => {
+      registerBotGroupIds(["grp1"]);
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "user:grp1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      // channelId matches but channelType differs (DM vs Group) → cross-channel → permission denied
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("无权查询他人");
+    });
+
+    it("should NOT treat group:uid1 as same-channel when currentChannelId is uid1 (DM)", async () => {
+      // uid1 is NOT a known group, so currentChannelType = DM
+      // target is group:uid1 → channelType = Group → mismatch
+
+      // Need member cache so the group permission check can proceed
+      _setCacheEntry("uid1", [{ uid: "user-abc", name: "Alice" }]);
+
+      globalThis.fetch = mockFetch({
+        "/v1/bot/messages/sync": async () => jsonResponse({ messages: [] }),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "read",
+        args: { target: "group:uid1" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "uid1",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      // Cross-channel (channelType mismatch) → permission check runs → allowed (user is member)
+      // But response should include cross-channel wrapper
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      expect(data.header).toBeDefined();
+      expect(data.metadata?.trustLevel).toBe("untrusted-data");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // search — API fallback error handling
+  // -----------------------------------------------------------------------
+  describe("search — shared-groups fetchBotGroups failure", () => {
+    it("should return error when fetchBotGroups throws", async () => {
+      globalThis.fetch = mockFetch({
+        "/v1/bot/groups": async () => {
+          throw new Error("network timeout");
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "search",
+        args: { query: "shared-groups" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain("获取群列表失败");
+    });
+  });
+
+  describe("search — shared-groups per-group member fetch failure", () => {
+    it("should skip failed groups and return partial results", async () => {
+      globalThis.fetch = mockFetch({
+        // /members must come before /v1/bot/groups to avoid false match
+        "/members": async (url) => {
+          if (url.includes("grp2")) {
+            throw new Error("API error");
+          }
+          return jsonResponse([{ uid: "user-abc", name: "Alice" }]);
+        },
+        "/v1/bot/groups": async () =>
+          jsonResponse([
+            { group_no: "grp1", name: "Dev Team" },
+            { group_no: "grp2", name: "Broken Group" },
+          ]),
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "search",
+        args: { query: "shared-groups" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        requesterSenderId: "user-abc",
+        accountId: "acct1",
+      });
+
+      expect(result.ok).toBe(true);
+      const data = result.data as any;
+      // grp1 should succeed, grp2 should be skipped
+      expect(data.total).toBe(1);
+      expect(data.sharedGroups[0].groupNo).toBe("grp1");
     });
   });
 });

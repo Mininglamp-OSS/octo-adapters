@@ -339,30 +339,26 @@ export async function getGroupMembers(params: {
   log?: { info?: (msg: string) => void; error?: (msg: string) => void };
 }): Promise<GroupMember[]> {
   const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${params.groupNo}/members`;
-  try {
-    const resp = await fetch(url, {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${params.botToken}`,
-      },
-      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
-    });
-    if (!resp.ok) {
-      params.log?.error?.(`dmwork: getGroupMembers failed: ${resp.status}`);
-      return [];
-    }
-    const data = await resp.json();
-    // Normalize to strict array to prevent silent failures
-    const members = Array.isArray(data?.members)
-      ? data.members
-      : Array.isArray(data)
-        ? data
-        : [];
-    return members as GroupMember[];
-  } catch (err) {
-    params.log?.error?.(`dmwork: getGroupMembers error: ${err}`);
-    return [];
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Authorization": `Bearer ${params.botToken}`,
+    },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const msg = `getGroupMembers failed: ${resp.status}`;
+    params.log?.error?.(`dmwork: ${msg}`);
+    throw new Error(msg);
   }
+  const data = await resp.json();
+  // Normalize to strict array to prevent silent failures
+  const members = Array.isArray(data?.members)
+    ? data.members
+    : Array.isArray(data)
+      ? data
+      : [];
+  return members as GroupMember[];
 }
 
 /**
@@ -439,6 +435,117 @@ export async function updateGroupMd(params: {
     throw new Error(`updateGroupMd failed (${resp.status}): ${text || resp.statusText}`);
   }
   return await resp.json();
+}
+
+// ---- Bot JSON Request Helper ----
+
+/**
+ * Generic helper for bot JSON API requests (GET / PUT / DELETE).
+ * Centralizes URL construction, auth headers, timeout, and error handling.
+ *
+ * @throws Error on non-2xx responses with status code and response body.
+ */
+async function botFetchJson<T = void>(params: {
+  apiUrl: string;
+  botToken: string;
+  path: string;
+  method: "GET" | "PUT" | "DELETE";
+  body?: Record<string, unknown>;
+}): Promise<T> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}${params.path}`;
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${params.botToken}`,
+  };
+  if (params.body) {
+    Object.assign(headers, DEFAULT_HEADERS);
+  }
+  const resp = await fetch(url, {
+    method: params.method,
+    headers,
+    body: params.body ? JSON.stringify(params.body) : undefined,
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `Bot API ${params.method} ${params.path} failed (${resp.status}): ${text || resp.statusText}`,
+    );
+  }
+  if (params.method === "GET") {
+    return (await resp.json()) as T;
+  }
+  return undefined as T;
+}
+
+// ---- Voice Context API ----
+
+/**
+ * Query the owner's personal voice correction context.
+ * GET /v1/bot/voice/context
+ *
+ * Returns normalized response with defensive defaults:
+ * - has_context defaults to false if missing from backend response
+ * - context defaults to empty string if missing
+ * - updated_at defaults to empty string if missing
+ */
+export async function getVoiceContext(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<{ has_context: boolean; context: string; updated_at: string }> {
+  const raw = await botFetchJson<Record<string, unknown>>({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    path: "/v1/bot/voice/context",
+    method: "GET",
+  });
+
+  // Defensive normalization — do not blindly pass-through.
+  // If backend omits has_context, treat as false.
+  return {
+    has_context: raw.has_context === true,
+    context: typeof raw.context === "string" ? raw.context : "",
+    updated_at: typeof raw.updated_at === "string" ? raw.updated_at : "",
+  };
+}
+
+/**
+ * Set the owner's personal voice correction context (PUT upsert).
+ * PUT /v1/bot/voice/context
+ *
+ * Content must not be empty — empty strings are rejected at the adapter
+ * validation layer (agent-tools.ts) before this function is called.
+ * Backend also rejects empty context with 400.
+ */
+export async function updateVoiceContext(params: {
+  apiUrl: string;
+  botToken: string;
+  content: string;
+}): Promise<void> {
+  await botFetchJson({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    path: "/v1/bot/voice/context",
+    method: "PUT",
+    body: { context: params.content },
+  });
+}
+
+/**
+ * Delete the owner's personal voice correction context.
+ * DELETE /v1/bot/voice/context
+ *
+ * Idempotent — deleting a non-existent record returns 200.
+ */
+export async function deleteVoiceContext(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<void> {
+  await botFetchJson({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    path: "/v1/bot/voice/context",
+    method: "DELETE",
+  });
 }
 
 /**
@@ -684,5 +791,254 @@ export async function fetchUserInfo(params: {
   } catch (err) {
     params.log?.error?.(`dmwork: fetchUserInfo(${params.uid}) error: ${String(err)}`);
     return null;
+  }
+}
+
+// ========== Space Members API ==========
+
+export async function searchSpaceMembers(params: {
+  apiUrl: string;
+  botToken: string;
+  keyword?: string;
+  spaceId?: string;
+  limit?: number;
+}): Promise<Array<{ uid: string; name: string; robot: number }>> {
+  const query = new URLSearchParams();
+  if (params.keyword) query.set("keyword", params.keyword);
+  if (params.spaceId) query.set("space_id", params.spaceId);
+  if (params.limit) query.set("limit", String(params.limit));
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/space/members?${query}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`searchSpaceMembers failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as Array<{ uid: string; name: string; robot: number }>;
+}
+
+// ========== Bot Group Management APIs ==========
+
+export async function createGroup(params: {
+  apiUrl: string;
+  botToken: string;
+  name?: string;
+  members: string[];
+  creator: string;
+  spaceId?: string;
+}): Promise<{ group_no: string; name: string }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/createGroup`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${params.botToken}` },
+    body: JSON.stringify({
+      name: params.name,
+      members: params.members,
+      creator: params.creator,
+      ...(params.spaceId ? { space_id: params.spaceId } : {}),
+    }),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`createGroup failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as { group_no: string; name: string };
+}
+
+export async function updateGroup(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  name?: string;
+  notice?: string;
+}): Promise<void> {
+  const body: Record<string, string> = {};
+  if (params.name != null) body.name = params.name;
+  if (params.notice != null) body.notice = params.notice;
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/info`;
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${params.botToken}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`updateGroup failed (${resp.status}): ${text || resp.statusText}`);
+  }
+}
+
+export async function addGroupMembers(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  members: string[];
+}): Promise<{ ok: boolean; added: number }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/members/add`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${params.botToken}` },
+    body: JSON.stringify({ members: params.members }),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`addGroupMembers failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as { ok: boolean; added: number };
+}
+
+export async function removeGroupMembers(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  members: string[];
+}): Promise<{ ok: boolean; removed: number }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/members/remove`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${params.botToken}` },
+    body: JSON.stringify({ members: params.members }),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`removeGroupMembers failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as { ok: boolean; removed: number };
+}
+
+// ========== Bot Thread APIs ==========
+
+export async function createThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  name: string;
+  sourceMessageId?: number;
+}): Promise<{ short_id: string; name: string; creator_uid: string }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads`;
+  const body: Record<string, unknown> = { name: params.name };
+  if (params.sourceMessageId != null) body.source_message_id = params.sourceMessageId;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { ...DEFAULT_HEADERS, Authorization: `Bearer ${params.botToken}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`createThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as { short_id: string; name: string; creator_uid: string };
+}
+
+export async function listThreads(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+}): Promise<Array<{ short_id: string; name: string; creator_uid: string; status: number }>> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`listThreads failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as Array<{ short_id: string; name: string; creator_uid: string; status: number }>;
+}
+
+export async function getThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<{ short_id: string; name: string; creator_uid: string; status: number; member_count: number }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`getThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as { short_id: string; name: string; creator_uid: string; status: number; member_count: number };
+}
+
+export async function deleteThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<void> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}`;
+  const resp = await fetch(url, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`deleteThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+}
+
+export async function listThreadMembers(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<Array<{ uid: string; role: number }>> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/members`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`listThreadMembers failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return (await resp.json()) as Array<{ uid: string; role: number }>;
+}
+
+export async function joinThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<void> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/join`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`joinThread failed (${resp.status}): ${text || resp.statusText}`);
+  }
+}
+
+export async function leaveThread(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+}): Promise<void> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/leave`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`leaveThread failed (${resp.status}): ${text || resp.statusText}`);
   }
 }

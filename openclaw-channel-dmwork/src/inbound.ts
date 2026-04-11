@@ -243,26 +243,50 @@ export interface ForwardMessage {
   };
 }
 
+/** Build a full media URL from a relative storage path */
+export function buildMediaUrl(relUrl?: string, apiUrl?: string, cdnUrl?: string): string | undefined {
+  if (!relUrl) return undefined;
+  if (relUrl.startsWith("http")) return relUrl;
+  let storagePath = relUrl;
+  if (storagePath.startsWith("file/preview/")) {
+    storagePath = storagePath.substring("file/preview/".length);
+  } else if (storagePath.startsWith("file/")) {
+    storagePath = storagePath.substring("file/".length);
+  }
+  if (cdnUrl) {
+    const base = cdnUrl.replace(/\/+$/, "");
+    return `${base}/${storagePath}`;
+  }
+  const baseUrl = apiUrl?.replace(/\/+$/, "") ?? "";
+  return `${baseUrl}/file/${storagePath}`;
+}
+
 /** Resolve inner message type to display text for MultipleForward */
-export function resolveInnerMessageText(payload: ForwardMessage["payload"]): string {
+export function resolveInnerMessageText(
+  payload: ForwardMessage["payload"],
+  buildUrl?: (url?: string) => string | undefined,
+): string {
   if (!payload) return "";
+  const fullUrl = buildUrl?.(payload.url);
   switch (payload.type) {
     case MessageType.Text:
       return payload.content ?? "";
     case MessageType.Image:
-      return "[图片]";
+      return fullUrl ? `[图片]\n${fullUrl}` : "[图片]";
     case MessageType.GIF:
-      return "[GIF]";
+      return fullUrl ? `[GIF]\n${fullUrl}` : "[GIF]";
     case MessageType.Voice:
-      return "[语音]";
+      return fullUrl ? `[语音]\n${fullUrl}` : "[语音]";
     case MessageType.Video:
-      return "[视频]";
+      return fullUrl ? `[视频]\n${fullUrl}` : "[视频]";
     case MessageType.Location:
       return "[位置信息]";
     case MessageType.Card:
       return "[名片]";
-    case MessageType.File:
-      return payload.name ? `[文件: ${payload.name}]` : "[文件]";
+    case MessageType.File: {
+      const label = payload.name ? `[文件: ${payload.name}]` : "[文件]";
+      return fullUrl ? `${label}\n${fullUrl}` : label;
+    }
     case MessageType.MultipleForward:
       return "[合并转发]";
     default:
@@ -271,18 +295,27 @@ export function resolveInnerMessageText(payload: ForwardMessage["payload"]): str
 }
 
 /** Resolve MultipleForward payload into readable text */
-export function resolveMultipleForwardText(payload: any): string {
+export function resolveMultipleForwardText(payload: any, apiUrl?: string, cdnUrl?: string): string {
   const users: ForwardUser[] = payload?.users ?? [];
   const msgs: ForwardMessage[] = payload?.msgs ?? [];
   const userMap = new Map<string, string>();
   for (const u of users) {
     if (u.uid && u.name) userMap.set(u.uid, u.name);
   }
+  const buildUrl = (apiUrl || cdnUrl)
+    ? (url?: string) => buildMediaUrl(url, apiUrl, cdnUrl)
+    : undefined;
   const lines: string[] = ["[合并转发: 聊天记录]"];
   for (const m of msgs) {
     const senderName = userMap.get(m.from_uid) ?? m.from_uid;
-    const content = resolveInnerMessageText(m.payload);
-    lines.push(`${senderName}: ${content}`);
+    if (m.payload?.type === MessageType.MultipleForward) {
+      const nested = resolveMultipleForwardText(m.payload, apiUrl, cdnUrl);
+      lines.push(`${senderName}: [合并转发]`);
+      lines.push(nested);
+    } else {
+      const content = resolveInnerMessageText(m.payload, buildUrl);
+      lines.push(`${senderName}: ${content}`);
+    }
   }
   return lines.join("\n");
 }
@@ -290,26 +323,7 @@ export function resolveMultipleForwardText(payload: any): string {
 function resolveContent(payload: BotMessage["payload"], apiUrl?: string, log?: ChannelLogSink, cdnUrl?: string): ResolvedContent {
   if (!payload) return { text: "" };
 
-  const makeFullUrl = (relUrl?: string) => {
-    if (!relUrl) return undefined;
-    if (relUrl.startsWith("http")) return relUrl;
-    // Strip common path prefixes to get the raw storage path
-    let storagePath = relUrl;
-    // Remove "file/preview/" or "file/" prefix
-    if (storagePath.startsWith("file/preview/")) {
-      storagePath = storagePath.substring("file/preview/".length);
-    } else if (storagePath.startsWith("file/")) {
-      storagePath = storagePath.substring("file/".length);
-    }
-    if (cdnUrl) {
-      // CDN direct: public-read, no auth needed, LLM can access directly
-      const base = cdnUrl.replace(/\/+$/, "");
-      return `${base}/${storagePath}`;
-    }
-    // Fallback: Nginx public /file/ path (no auth)
-    const baseUrl = apiUrl?.replace(/\/+$/, "") ?? "";
-    return `${baseUrl}/file/${storagePath}`;
-  };
+  const makeFullUrl = (relUrl?: string) => buildMediaUrl(relUrl, apiUrl, cdnUrl);
 
   switch (payload.type) {
     case MessageType.Text:
@@ -353,7 +367,7 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string, log?: C
       return { text: cardText };
     }
     case MessageType.MultipleForward: {
-      return { text: resolveMultipleForwardText(payload) };
+      return { text: resolveMultipleForwardText(payload, apiUrl, cdnUrl) };
     }
     default:
       return { text: payload.content ?? payload.url ?? "" };
@@ -983,7 +997,7 @@ export async function handleInboundMessage(params: {
   const isGroup =
     typeof message.channel_id === "string" &&
     message.channel_id.length > 0 &&
-    message.channel_type === ChannelType.Group;
+    (message.channel_type === ChannelType.Group || message.channel_type === ChannelType.CommunityTopic);
 
   // --- GROUP.md: register group→account mapping and handle structured events ---
   if (isGroup && message.channel_id) {
@@ -1177,7 +1191,7 @@ export async function handleInboundMessage(params: {
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
           channelId: message.channel_id!,
-          channelType: ChannelType.Group,
+          channelType: message.channel_type ?? ChannelType.Group,
           limit: fetchLimit,
           log,
         });
@@ -1188,7 +1202,7 @@ export async function handleInboundMessage(params: {
           let body = m.content || resolveApiMessagePlaceholder(m.type, m.name);
           // For MultipleForward, expand the nested messages from full payload
           if (m.type === MessageType.MultipleForward && m.payload) {
-            body = resolveMultipleForwardText(m.payload);
+            body = resolveMultipleForwardText(m.payload, account.config.apiUrl, account.config.cdnUrl);
           }
           const entry: any = {
             sender: m.from_uid,
@@ -1385,7 +1399,7 @@ export async function handleInboundMessage(params: {
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
 
   const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
-  const replyChannelType = isGroup ? ChannelType.Group : ChannelType.DM;
+  const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
 
   // 已读回执 + 正在输入 — fire-and-forget
   log?.info?.(`dmwork: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
