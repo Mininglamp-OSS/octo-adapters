@@ -37,7 +37,7 @@
     "id": "openclaw-channel-dmwork",
     "type": "channel",
     "extensions": [
-      "index.ts"
+      "dist/index.js"
     ]
   },
   "bundledDependencies": [
