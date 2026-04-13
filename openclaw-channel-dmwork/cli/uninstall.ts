@@ -39,15 +39,19 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
     ? null
     : saveChannelConfigFromFile();
 
-  console.log("Uninstalling DMWork plugin...");
-  pluginsUninstall(PLUGIN_ID, opts.yes);
+  try {
+    console.log("Uninstalling DMWork plugin...");
+    pluginsUninstall(PLUGIN_ID, opts.yes);
+  } finally {
+    // Always restore config, even if uninstall fails partway through
+    if (!opts.removeConfig && savedConfig) {
+      restoreChannelConfigToFile(savedConfig);
+      console.log("Restored channels.dmwork config.");
+    }
+  }
 
-  // Restore or confirm removal
   if (opts.removeConfig) {
     console.log("Removed channels.dmwork config.");
-  } else if (savedConfig) {
-    restoreChannelConfigToFile(savedConfig);
-    console.log("Restored channels.dmwork config.");
   }
 
   console.log("Restarting gateway...");

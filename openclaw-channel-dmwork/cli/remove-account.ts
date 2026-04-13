@@ -7,6 +7,8 @@ import {
   configGetJson,
   configUnset,
   gatewayRestart,
+  saveChannelConfigFromFile,
+  restoreChannelConfigToFile,
   pluginsUninstall,
 } from "./openclaw-cli.js";
 import {
@@ -70,7 +72,18 @@ export async function runRemoveAccount(
       );
     }
     if (shouldUninstall) {
-      pluginsUninstall(PLUGIN_ID, true);
+      // Use same backup/restore pattern as uninstall command:
+      // openclaw plugins uninstall deletes channels.dmwork, so save first
+      const savedConfig = saveChannelConfigFromFile();
+      try {
+        pluginsUninstall(PLUGIN_ID, true);
+      } finally {
+        // Restore channels.dmwork (accounts section is now empty but
+        // top-level apiUrl etc. may still be useful for future reinstall)
+        if (savedConfig) {
+          restoreChannelConfigToFile(savedConfig);
+        }
+      }
       console.log("Plugin uninstalled.");
     }
   }

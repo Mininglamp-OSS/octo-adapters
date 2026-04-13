@@ -48,12 +48,15 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       ? saveChannelConfigFromFile()
       : null;
 
-    console.log("Installing DMWork plugin...");
-    pluginsInstall(PLUGIN_ID, opts.force);
-
-    if (savedConfig) {
-      restoreChannelConfigToFile(savedConfig);
-      console.log("Restored channels.dmwork config.");
+    try {
+      console.log("Installing DMWork plugin...");
+      pluginsInstall(PLUGIN_ID, opts.force);
+    } finally {
+      // Always restore config, even if install fails partway through
+      if (savedConfig) {
+        restoreChannelConfigToFile(savedConfig);
+        console.log("Restored channels.dmwork config.");
+      }
     }
 
     console.log("Plugin installed successfully.");
