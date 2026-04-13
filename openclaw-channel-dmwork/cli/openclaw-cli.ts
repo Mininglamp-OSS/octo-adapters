@@ -262,3 +262,43 @@ export function removeChannelConfigFromFile(): void {
     // best effort
   }
 }
+
+/**
+ * Read the full config object directly from file (for doctor phase-1 checks).
+ */
+export function readConfigFromFile(): Record<string, any> | null {
+  try {
+    const configPath = getConfigFilePathSafe();
+    const raw = readFileSync(configPath, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove orphaned dmwork bindings from the config file.
+ * If validAccountIds is provided, only removes bindings referencing accounts
+ * not in that list. Otherwise removes all dmwork bindings.
+ */
+export function removeOrphanedBindingsFromFile(
+  channel: string,
+  validAccountIds?: string[],
+): void {
+  try {
+    const configPath = getConfigFilePathSafe();
+    copyFileSync(configPath, configPath + ".bak");
+    const raw = readFileSync(configPath, "utf-8");
+    const cfg = JSON.parse(raw);
+    if (!Array.isArray(cfg.bindings)) return;
+    cfg.bindings = cfg.bindings.filter((b: any) => {
+      if (b.match?.channel !== channel) return true; // keep non-dmwork
+      if (!validAccountIds) return false; // remove all dmwork bindings
+      // Keep only if accountId is in valid list (or no accountId specified)
+      return !b.match.accountId || validAccountIds.includes(b.match.accountId);
+    });
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+  } catch {
+    // best effort
+  }
+}

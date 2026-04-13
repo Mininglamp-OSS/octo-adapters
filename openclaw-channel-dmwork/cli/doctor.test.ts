@@ -187,10 +187,13 @@ describe("formatDoctorResult", () => {
       ],
       errors: 1,
       warnings: 0,
+      fixed: 0,
     });
 
-    expect(text).toContain("[PASS] Plugin installed");
-    expect(text).toContain("[FAIL] Gateway running");
+    expect(text).toContain("[PASS]");
+    expect(text).toContain("Plugin installed");
+    expect(text).toContain("[FAIL]");
+    expect(text).toContain("Gateway running");
     expect(text).toContain("1 error(s)");
   });
 });

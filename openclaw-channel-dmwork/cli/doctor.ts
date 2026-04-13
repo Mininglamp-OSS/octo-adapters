@@ -1,15 +1,23 @@
 /**
- * doctor command: diagnose DMWork plugin health.
+ * doctor command: diagnose and optionally fix DMWork plugin health.
  *
  * Exports a pure check function reusable from both CLI mode
  * (using openclaw config get) and in-process mode (using ctx.config).
  */
 
+import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import {
   configGet,
   configGetJson,
+  configSet,
+  gatewayRestart,
   gatewayStatus,
   pluginsInspect,
+  pluginsInstall,
+  removeChannelConfigFromFile,
+  removeOrphanedBindingsFromFile,
+  readConfigFromFile,
 } from "./openclaw-cli.js";
 import { PLUGIN_ID, RECOMMENDED_DM_SCOPE } from "./utils.js";
 
@@ -17,7 +25,7 @@ import { PLUGIN_ID, RECOMMENDED_DM_SCOPE } from "./utils.js";
 // Types
 // ---------------------------------------------------------------------------
 
-export type CheckStatus = "PASS" | "FAIL" | "WARN";
+export type CheckStatus = "PASS" | "FAIL" | "WARN" | "FIXED";
 
 export interface CheckResult {
   name: string;
@@ -29,11 +37,7 @@ export interface DoctorResult {
   checks: CheckResult[];
   errors: number;
   warnings: number;
-}
-
-export interface DoctorOptions {
-  accountId?: string;
-  json?: boolean;
+  fixed: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,18 +81,79 @@ export function inProcessConfigReader(config: any): ConfigReader {
 }
 
 // ---------------------------------------------------------------------------
-// Doctor checks
+// Doctor checks (with optional fix)
 // ---------------------------------------------------------------------------
 
 export async function runDoctorChecks(params: {
   reader?: ConfigReader;
   accountId?: string;
   inProcess?: boolean;
+  fix?: boolean;
 }): Promise<DoctorResult> {
-  const reader = params.reader ?? cliConfigReader;
+  const fix = params.fix ?? false;
   const checks: CheckResult[] = [];
 
-  // 1. Plugin installed (skip in-process — if we're running, it's installed)
+  // =========================================================================
+  // Phase 1: Fatal config issues (OpenClaw CLI may not work)
+  // =========================================================================
+  if (!params.inProcess && fix) {
+    const cfg = readConfigFromFile();
+    if (cfg) {
+      const hasDmworkChannel = Boolean(cfg.channels?.dmwork);
+      // Check if plugin actually exists on disk, not just config records
+      const installPath = cfg.plugins?.installs?.["openclaw-channel-dmwork"]?.installPath;
+      const pluginOnDisk = installPath
+        ? existsSync(installPath.replace(/^~/, process.env.HOME ?? ""))
+        : false;
+
+      // channels.dmwork exists but plugin not on disk → residual config
+      if (hasDmworkChannel && !pluginOnDisk) {
+        removeChannelConfigFromFile();
+        checks.push({
+          name: "Residual channels.dmwork",
+          status: "FIXED",
+          detail: "Removed orphaned channel config (plugin not installed)",
+        });
+      }
+
+      // Orphaned dmwork bindings
+      const bindings = cfg.bindings as Array<{ agentId: string; match?: { channel?: string; accountId?: string } }> | undefined;
+      const dmworkBindings = bindings?.filter((b) => b.match?.channel === "dmwork") ?? [];
+      const configuredAccounts = cfg.channels?.dmwork?.accounts
+        ? Object.keys(cfg.channels.dmwork.accounts)
+        : [];
+
+      if (dmworkBindings.length > 0 && !hasDmworkChannel) {
+        // All dmwork bindings are orphaned — no channel config at all
+        removeOrphanedBindingsFromFile("dmwork");
+        checks.push({
+          name: "Orphaned bindings",
+          status: "FIXED",
+          detail: `Removed ${dmworkBindings.length} orphaned dmwork binding(s)`,
+        });
+      } else if (dmworkBindings.length > 0 && configuredAccounts.length > 0) {
+        // Check for bindings referencing non-existent accounts
+        const orphaned = dmworkBindings.filter(
+          (b) => b.match?.accountId && !configuredAccounts.includes(b.match.accountId),
+        );
+        if (orphaned.length > 0) {
+          removeOrphanedBindingsFromFile("dmwork", configuredAccounts);
+          checks.push({
+            name: "Orphaned bindings",
+            status: "FIXED",
+            detail: `Removed ${orphaned.length} binding(s) for non-existent account(s)`,
+          });
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Phase 2: Standard checks (with fix support)
+  // =========================================================================
+  const reader = params.reader ?? cliConfigReader;
+
+  // 1. Plugin installed
   if (!params.inProcess) {
     const inspect = pluginsInspect(PLUGIN_ID);
     if (inspect?.plugin) {
@@ -97,6 +162,23 @@ export async function runDoctorChecks(params: {
         status: "PASS",
         detail: `v${inspect.plugin.version}`,
       });
+    } else if (fix) {
+      try {
+        pluginsInstall(PLUGIN_ID, true);
+        const after = pluginsInspect(PLUGIN_ID);
+        checks.push({
+          name: "Plugin installed",
+          status: "FIXED",
+          detail: `Installed v${after?.plugin?.version ?? "unknown"}`,
+        });
+      } catch {
+        checks.push({
+          name: "Plugin installed",
+          status: "FAIL",
+          detail: "Not installed (auto-install failed)",
+        });
+        return summarize(checks);
+      }
     } else {
       checks.push({
         name: "Plugin installed",
@@ -107,19 +189,50 @@ export async function runDoctorChecks(params: {
     }
   }
 
-  // 2. Plugin enabled (skip in-process)
+  // 2. Plugin enabled
   if (!params.inProcess) {
     const enabled = reader.get(
-      `plugins.entries.openclaw-channel-dmwork.enabled`,
+      "plugins.entries.openclaw-channel-dmwork.enabled",
     );
-    checks.push({
-      name: "Plugin enabled",
-      status: enabled === "true" ? "PASS" : "FAIL",
-      detail: enabled === "true" ? "Yes" : "No",
-    });
+    if (enabled === "true") {
+      checks.push({ name: "Plugin enabled", status: "PASS", detail: "Yes" });
+    } else if (fix) {
+      try {
+        configSet("plugins.entries.openclaw-channel-dmwork.enabled", "true");
+        checks.push({ name: "Plugin enabled", status: "FIXED", detail: "Enabled" });
+      } catch {
+        checks.push({ name: "Plugin enabled", status: "FAIL", detail: "No (auto-fix failed)" });
+      }
+    } else {
+      checks.push({ name: "Plugin enabled", status: "FAIL", detail: "No" });
+    }
   }
 
-  // 3. Accounts configured (with legacy fallback)
+  // 3. node_modules check
+  if (!params.inProcess) {
+    const inspect = pluginsInspect(PLUGIN_ID);
+    const installPath = inspect?.install?.installPath;
+    if (installPath) {
+      const nmPath = installPath.replace(/^~/, process.env.HOME ?? "") + "/node_modules";
+      if (existsSync(nmPath)) {
+        checks.push({ name: "Dependencies", status: "PASS", detail: "node_modules exists" });
+      } else if (fix) {
+        try {
+          execFileSync("npm", ["install", "--production", "--ignore-scripts"], {
+            cwd: installPath.replace(/^~/, process.env.HOME ?? ""),
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+          checks.push({ name: "Dependencies", status: "FIXED", detail: "npm install completed" });
+        } catch {
+          checks.push({ name: "Dependencies", status: "FAIL", detail: "node_modules missing (npm install failed)" });
+        }
+      } else {
+        checks.push({ name: "Dependencies", status: "FAIL", detail: "node_modules missing" });
+      }
+    }
+  }
+
+  // 4. Accounts configured (with legacy fallback)
   const accounts = reader.getJson("channels.dmwork.accounts");
   const accountIds = accounts ? Object.keys(accounts) : [];
   const legacyToken = reader.get("channels.dmwork.botToken");
@@ -140,30 +253,30 @@ export async function runDoctorChecks(params: {
     checks.push({
       name: "Accounts configured",
       status: "FAIL",
-      detail: "No accounts or botToken configured",
+      detail: "No accounts configured (run install to add a bot)",
     });
-    return summarize(checks);
+    // Don't return early — continue checking other items
   }
 
-  // 4 & 5. Per-account checks: botToken + API reachability
+  // 5 & 6. Per-account checks: botToken + API reachability
   const targetAccounts = params.accountId
     ? [params.accountId]
     : accountIds.length > 0
       ? accountIds
-      : ["__legacy__"];
+      : legacyToken
+        ? ["__legacy__"]
+        : [];
 
   for (const acctId of targetAccounts) {
     const isLegacy = acctId === "__legacy__";
     const label = isLegacy ? "default" : acctId;
 
-    // botToken check
     const tokenPath = isLegacy
       ? "channels.dmwork.botToken"
       : `channels.dmwork.accounts.${acctId}.botToken`;
     const tokenVal = reader.get(tokenPath);
 
     if (tokenVal) {
-      // In-process mode can do bf_ format check
       if (params.inProcess && !tokenVal.startsWith("bf_")) {
         checks.push({
           name: `${label}: botToken format`,
@@ -186,12 +299,10 @@ export async function runDoctorChecks(params: {
       continue;
     }
 
-    // API reachability
     const apiUrlPath = isLegacy
       ? "channels.dmwork.apiUrl"
       : `channels.dmwork.accounts.${acctId}.apiUrl`;
     let apiUrl = reader.get(apiUrlPath);
-    // Fallback to top-level apiUrl
     if (!apiUrl) apiUrl = reader.get("channels.dmwork.apiUrl");
     if (!apiUrl) apiUrl = "http://localhost:8090";
 
@@ -212,36 +323,37 @@ export async function runDoctorChecks(params: {
     }
   }
 
-  // 6. Gateway running (skip in-process)
+  // 7. Gateway running
   if (!params.inProcess) {
     const gw = gatewayStatus();
-    checks.push({
-      name: "Gateway running",
-      status: gw.running ? "PASS" : "FAIL",
-      detail: gw.running ? "Yes" : "Not running",
-    });
+    if (gw.running) {
+      checks.push({ name: "Gateway running", status: "PASS", detail: "Yes" });
+    } else if (fix) {
+      if (gatewayRestart()) {
+        checks.push({ name: "Gateway running", status: "FIXED", detail: "Restarted" });
+      } else {
+        checks.push({ name: "Gateway running", status: "FAIL", detail: "Not running (restart failed)" });
+      }
+    } else {
+      checks.push({ name: "Gateway running", status: "FAIL", detail: "Not running" });
+    }
   }
 
-  // 7. session.dmScope
+  // 8. session.dmScope
   const dmScope = reader.get("session.dmScope");
-  if (!dmScope) {
-    checks.push({
-      name: "session.dmScope",
-      status: "WARN",
-      detail: `Not set (recommended: ${RECOMMENDED_DM_SCOPE})`,
-    });
-  } else if (dmScope === RECOMMENDED_DM_SCOPE) {
-    checks.push({
-      name: "session.dmScope",
-      status: "PASS",
-      detail: dmScope,
-    });
+  if (dmScope === RECOMMENDED_DM_SCOPE) {
+    checks.push({ name: "session.dmScope", status: "PASS", detail: dmScope });
+  } else if (!dmScope && fix) {
+    try {
+      configSet("session.dmScope", RECOMMENDED_DM_SCOPE);
+      checks.push({ name: "session.dmScope", status: "FIXED", detail: `Set to ${RECOMMENDED_DM_SCOPE}` });
+    } catch {
+      checks.push({ name: "session.dmScope", status: "WARN", detail: `Not set (recommended: ${RECOMMENDED_DM_SCOPE})` });
+    }
+  } else if (!dmScope) {
+    checks.push({ name: "session.dmScope", status: "WARN", detail: `Not set (recommended: ${RECOMMENDED_DM_SCOPE})` });
   } else {
-    checks.push({
-      name: "session.dmScope",
-      status: "WARN",
-      detail: `${dmScope} (recommended: ${RECOMMENDED_DM_SCOPE})`,
-    });
+    checks.push({ name: "session.dmScope", status: "WARN", detail: `${dmScope} (recommended: ${RECOMMENDED_DM_SCOPE})` });
   }
 
   return summarize(checks);
@@ -256,6 +368,7 @@ function summarize(checks: CheckResult[]): DoctorResult {
     checks,
     errors: checks.filter((c) => c.status === "FAIL").length,
     warnings: checks.filter((c) => c.status === "WARN").length,
+    fixed: checks.filter((c) => c.status === "FIXED").length,
   };
 }
 
@@ -264,15 +377,17 @@ export function formatDoctorResult(result: DoctorResult): string {
   for (const c of result.checks) {
     const tag =
       c.status === "PASS"
-        ? "[PASS]"
+        ? "[PASS] "
         : c.status === "WARN"
-          ? "[WARN]"
-          : "[FAIL]";
+          ? "[WARN] "
+          : c.status === "FIXED"
+            ? "[FIXED]"
+            : "[FAIL] ";
     lines.push(`  ${tag} ${c.name} (${c.detail})`);
   }
   lines.push("");
-  lines.push(
-    `${result.errors} error(s), ${result.warnings} warning(s).`,
-  );
+  const parts = [`${result.errors} error(s)`, `${result.warnings} warning(s)`];
+  if (result.fixed > 0) parts.push(`${result.fixed} fixed`);
+  lines.push(parts.join(", ") + ".");
   return lines.join("\n");
 }

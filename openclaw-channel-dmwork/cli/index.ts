@@ -87,12 +87,14 @@ program
   .command("doctor")
   .description("Diagnose DMWork plugin health")
   .option("--account-id <id>", "Check a specific account only")
+  .option("--fix", "Attempt to automatically fix issues", false)
   .option("--json", "Output JSON", false)
   .action(async (opts) => {
     ensureOpenClawCompat();
     const result = await runDoctorChecks({
       reader: cliConfigReader,
       accountId: opts.accountId,
+      fix: opts.fix,
     });
     if (opts.json) {
       console.log(JSON.stringify(result, null, 2));
