@@ -136,8 +136,11 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
         );
         process.exit(1);
       } else {
-        // No credentials provided at all — keep existing
+        // No credentials provided at all — keep existing, but still ensure binding/agent
         console.log(`Account "${accountId}" already configured. Keeping existing config.`);
+        const apiUrl = configGet(`channels.dmwork.accounts.${accountId}.apiUrl`)
+          ?? configGet("channels.dmwork.apiUrl") ?? "";
+        await ensureBindingAndAgent(accountId, apiUrl);
         ensureDmScope();
         return;
       }
@@ -148,6 +151,9 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
       );
       if (keep) {
         console.log("Keeping existing config.");
+        const apiUrl = configGet(`channels.dmwork.accounts.${accountId}.apiUrl`)
+          ?? configGet("channels.dmwork.apiUrl") ?? "";
+        await ensureBindingAndAgent(accountId, apiUrl);
         ensureDmScope();
         return;
       }
@@ -181,11 +187,53 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
   console.log(`  API: ${apiUrl}`);
 
   // Create binding + agent
-  const agentId = accountId.replace(/_bot$/, "");
-  ensureBinding(accountId, agentId);
-  ensureAgentMd(agentId, accountId, apiUrl);
+  await ensureBindingAndAgent(accountId, apiUrl);
 
   ensureDmScope();
+}
+
+// ---------------------------------------------------------------------------
+// Binding + Agent (with conflict detection)
+// ---------------------------------------------------------------------------
+
+async function ensureBindingAndAgent(accountId: string, apiUrl: string): Promise<void> {
+  let agentId = accountId.replace(/_bot$/, "");
+
+  // Check if agent already exists on disk
+  const agentMdPath = join(homedir(), ".openclaw", "agents", agentId, "agent", "agent.md");
+  if (existsSync(agentMdPath)) {
+    // Check if this agent is already bound to this accountId — that's fine
+    const bindings: Array<{ agentId: string; match?: { channel?: string; accountId?: string } }> =
+      configGetJson("bindings") ?? [];
+    const alreadyBound = bindings.some(
+      (b) => b.match?.channel === "dmwork" && b.match?.accountId === accountId && b.agentId === agentId,
+    );
+    if (alreadyBound) {
+      console.log(`Binding ${accountId} -> agent "${agentId}" already exists.`);
+      return;
+    }
+
+    // Agent exists but not bound to this accountId — potential conflict
+    if (isInteractive()) {
+      const reuse = await confirm(
+        `Agent "${agentId}" already exists. Use this agent for ${accountId}?`,
+        true,
+      );
+      if (!reuse) {
+        agentId = await prompt(`Enter a different agent ID for ${accountId}:`);
+        if (!agentId || !validateAccountId(agentId)) {
+          console.log("Invalid or empty agent ID. Skipping binding/agent setup.");
+          return;
+        }
+      }
+    } else {
+      // Non-interactive: reuse existing agent silently
+      console.log(`Using existing agent "${agentId}" for ${accountId}.`);
+    }
+  }
+
+  ensureBinding(accountId, agentId);
+  ensureAgentMd(agentId, accountId, apiUrl);
 }
 
 // ---------------------------------------------------------------------------
