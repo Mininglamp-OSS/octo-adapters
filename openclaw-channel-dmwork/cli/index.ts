@@ -12,7 +12,9 @@ import {
 } from "./doctor.js";
 import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
-import { ensureOpenClawCompat } from "./utils.js";
+import { ensureOpenClawCompat, PLUGIN_ID } from "./utils.js";
+import { getOpenClawVersion, pluginsInspect } from "./openclaw-cli.js";
+import { createRequire } from "node:module";
 
 const program = new Command();
 
@@ -20,6 +22,34 @@ program
   .name("openclaw-channel-dmwork")
   .description("DMWork channel plugin CLI for OpenClaw")
   .version("0.5.19");
+
+// --- info ---
+program
+  .command("info")
+  .description("Show CLI and plugin version info")
+  .action(() => {
+    const require = createRequire(import.meta.url);
+    const cliPkg = require("../package.json");
+    const openclawVersion = getOpenClawVersion() ?? "not found";
+    const inspect = pluginsInspect(PLUGIN_ID);
+    const installedVersion = inspect?.plugin?.version ?? "not installed";
+
+    // ANSI: \x1b[1m = bold, \x1b[32m = green, \x1b[4m = underline, \x1b[0m = reset
+    const b = "\x1b[1m";   // bold
+    const g = "\x1b[32m";  // green
+    const u = "\x1b[4m";   // underline
+    const r = "\x1b[0m";   // reset
+
+    console.log(`${b}openclaw-channel-dmwork-cli:${r} ${g}${cliPkg.version}${r}`);
+    console.log(`${b}openclaw:${r} ${g}${openclawVersion}${r}`);
+    console.log(`${b}openclaw-channel-dmwork:${r} ${g}${installedVersion}${r}`);
+    console.log(`${b}plugin package:${r} ${g}${PLUGIN_ID}${r}`);
+    console.log();
+    console.log(`${b}环境信息：${r}`);
+    console.log(`${b}OS:${r} ${g}${process.platform} ${process.arch}${r}`);
+    console.log(`${b}Node.js:${r} ${g}${process.version}${r}`);
+    console.log(`${b}Shell:${r} ${g}${process.env.SHELL ?? "unknown"}${r}`);
+  });
 
 // --- install ---
 program
