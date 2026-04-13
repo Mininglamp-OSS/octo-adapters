@@ -2,10 +2,14 @@
  * install command: install plugin via official CLI + interactive config setup.
  */
 
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import {
   configGet,
   configGetJson,
   configSet,
+  configSetJson,
   configUnset,
   gatewayRestart,
   pluginsInspect,
@@ -176,7 +180,88 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
   console.log(`Configured bot account: ${accountId}`);
   console.log(`  API: ${apiUrl}`);
 
+  // Create binding + agent
+  const agentId = accountId.replace(/_bot$/, "");
+  ensureBinding(accountId, agentId);
+  ensureAgentMd(agentId, accountId, apiUrl);
+
   ensureDmScope();
+}
+
+// ---------------------------------------------------------------------------
+// Binding
+// ---------------------------------------------------------------------------
+
+function ensureBinding(accountId: string, agentId: string): void {
+  try {
+    const bindings: Array<{ agentId: string; match?: { channel?: string; accountId?: string } }> =
+      configGetJson("bindings") ?? [];
+
+    // Check if binding already exists for this accountId
+    const exists = bindings.some(
+      (b) => b.match?.channel === "dmwork" && b.match?.accountId === accountId,
+    );
+    if (exists) {
+      console.log(`Binding for ${accountId} already exists.`);
+      return;
+    }
+
+    // Append binding at the end using numeric index
+    const index = bindings.length;
+    configSetJson(`bindings[${index}]`, {
+      agentId,
+      match: { channel: "dmwork", accountId },
+    });
+    console.log(`Created binding: ${accountId} -> agent "${agentId}"`);
+  } catch {
+    console.log(
+      `Warning: Could not create binding. Add manually: {"agentId":"${agentId}","match":{"channel":"dmwork","accountId":"${accountId}"}}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent.md
+// ---------------------------------------------------------------------------
+
+function ensureAgentMd(agentId: string, accountId: string, apiUrl: string): void {
+  const agentDir = join(homedir(), ".openclaw", "agents", agentId, "agent");
+  const agentMdPath = join(agentDir, "agent.md");
+
+  if (existsSync(agentMdPath)) {
+    console.log(`Agent "${agentId}" already exists. Keeping existing agent.md.`);
+    return;
+  }
+
+  try {
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(
+      agentMdPath,
+      `I am ${accountId}, a DMWork bot.
+
+## Credentials
+
+- Account ID: ${accountId}
+- API server: ${apiUrl}
+- accountId must be passed when using dmwork_management tool
+
+## Capabilities
+
+My full API capabilities are documented at ${apiUrl}/v1/bot/skill.md — read it when I need to perform an action I'm unsure about.
+
+## Rules
+
+- Respond in the user's language
+- Be helpful and concise
+`,
+      "utf-8",
+    );
+    console.log(`Created agent: ~/.openclaw/agents/${agentId}/agent/agent.md`);
+  } catch {
+    console.log(
+      `Warning: Could not create agent.md at ${agentMdPath}`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
