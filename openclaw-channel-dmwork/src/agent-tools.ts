@@ -40,6 +40,10 @@ import { broadcastGroupMdUpdate } from "./group-md.js";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
+// Matches DEFAULT_ACCOUNT_ID from openclaw/plugin-sdk — the semantic alias
+// used by the framework when no explicit account is specified.
+const DEFAULT_ACCOUNT_ID = "default";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -178,17 +182,14 @@ export function createDmworkManagementTools(params: {
           | string
           | undefined;
         const content = (args.content ?? args.message) as string | undefined;
-        const requestedAccountId = args.accountId as string | undefined;
+        const rawAccountId = args.accountId as string | undefined;
 
-        // Resolve account — multi-bot setups require explicit accountId
-        const defaultAccountId = resolveDefaultDmworkAccountId(cfg);
-        const accountId = requestedAccountId ?? defaultAccountId;
-
-        if (!accountId) {
-          return makeError(
-            "accountId is required. Check your agent.md for your assigned accountId."
-          );
-        }
+        // Treat DEFAULT_ACCOUNT_ID ("default") as a semantic alias — not a
+        // real account key — so normalise it to "unspecified".
+        const requestedAccountId =
+          rawAccountId && rawAccountId !== DEFAULT_ACCOUNT_ID
+            ? rawAccountId
+            : undefined;
 
         // Strict validation: reject explicitly requested accountIds that
         // don't correspond to a real account entry.
@@ -198,6 +199,14 @@ export function createDmworkManagementTools(params: {
             return makeError(`Account not found: ${requestedAccountId}`);
           }
         }
+
+        // Four-level fallback (consistent with channel.ts):
+        //   1. explicitly requested id  2. configured default  3. first account  4. DEFAULT_ACCOUNT_ID
+        const accountId =
+          requestedAccountId ??
+          resolveDefaultDmworkAccountId(cfg) ??
+          listDmworkAccountIds(cfg)[0] ??
+          DEFAULT_ACCOUNT_ID;
 
         const account = resolveDmworkAccount({ cfg, accountId });
 

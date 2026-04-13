@@ -318,6 +318,52 @@ describe("createDmworkManagementTools", () => {
       });
     });
 
+    it("multi-account: falls back to first account when no accountId and no default", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+        accountId,
+        enabled: true,
+        configured: true,
+        config: {
+          botToken: `tok-${accountId}`,
+          apiUrl: `http://api-${accountId}.test`,
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      }));
+      vi.mocked(fetchBotGroups).mockResolvedValue([]);
+      const execute = getExecute();
+      await execute("tc", { action: "list-groups" });
+      expect(fetchBotGroups).toHaveBeenCalledWith({
+        apiUrl: "http://api-bot-a.test",
+        botToken: "tok-bot-a",
+      });
+    });
+
+    it('multi-account: accountId="default" falls back to first account', async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+        accountId,
+        enabled: true,
+        configured: true,
+        config: {
+          botToken: `tok-${accountId}`,
+          apiUrl: `http://api-${accountId}.test`,
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      }));
+      vi.mocked(fetchBotGroups).mockResolvedValue([]);
+      const execute = getExecute();
+      await execute("tc", { action: "list-groups", accountId: "default" });
+      expect(fetchBotGroups).toHaveBeenCalledWith({
+        apiUrl: "http://api-bot-a.test",
+        botToken: "tok-bot-a",
+      });
+    });
+
     it("resolves correct account in multi-account setup", async () => {
       vi.mocked(listDmworkAccountIds).mockReturnValue(["primary", "secondary"]);
       vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => {
