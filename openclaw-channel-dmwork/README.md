@@ -43,7 +43,7 @@ npx -y openclaw-channel-dmwork update
 # Diagnose plugin health
 npx -y openclaw-channel-dmwork doctor
 
-# Uninstall (keeps bot config by default)
+# Uninstall (removes plugin and all bot configs)
 npx -y openclaw-channel-dmwork uninstall
 
 # Remove a single bot account
