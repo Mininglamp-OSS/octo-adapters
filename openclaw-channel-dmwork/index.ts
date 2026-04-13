@@ -9,6 +9,11 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { dmworkPlugin } from "./src/channel.js";
 import { setDmworkRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
+import {
+  inProcessConfigReader,
+  runDoctorChecks,
+  formatDoctorResult,
+} from "./cli/doctor.js";
 
 const plugin: {
   id: string;
@@ -22,6 +27,21 @@ const plugin: {
   register(api) {
     setDmworkRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });
+
+    api.registerCommand({
+      name: "dmwork_doctor",
+      description: "Check DMWork plugin status and connectivity",
+      acceptsArgs: true,
+      async handler(ctx) {
+        const reader = inProcessConfigReader(ctx.config);
+        const result = await runDoctorChecks({
+          reader,
+          accountId: ctx.args?.trim() || undefined,
+          inProcess: true,
+        });
+        return { text: formatDoctorResult(result) };
+      },
+    });
 
     console.log('[dmwork] registering before_prompt_build hook');
     api.on('before_prompt_build', (_event, ctx) => {
