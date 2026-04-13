@@ -43,7 +43,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   } else {
     const spec = opts.dev ? `${PLUGIN_ID}@dev` : PLUGIN_ID;
     console.log(`Installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
-    pluginsInstall(spec, opts.force);
+    pluginsInstall(spec, false, opts.force);
     console.log("Plugin installed successfully.");
   }
 

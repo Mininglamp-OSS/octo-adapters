@@ -88,10 +88,12 @@ export function configUnset(path: string): void {
 // Plugin helpers
 // ---------------------------------------------------------------------------
 
-export function pluginsInstall(spec: string, force?: boolean): void {
+export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): void {
   const args = ["plugins", "install", spec];
   if (force) args.push("--force");
-  execFileSync(OPENCLAW, args, { stdio: "inherit" });
+  execFileSync(OPENCLAW, args, {
+    stdio: quiet ? ["pipe", "pipe", "pipe"] : "inherit",
+  });
 }
 
 export function pluginsUpdate(id: string, quiet?: boolean): void {
