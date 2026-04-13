@@ -147,7 +147,7 @@ const plugin: {
     // /dmwork_add_account <account_id> <bot_token> <api_url>
     api.registerCommand({
       name: "dmwork_add_account",
-      description: "Add a DMWork bot account. Args: <account_id> <bot_token> <api_url>",
+      description: "Add or update a DMWork bot account. Args: <account_id> <bot_token> <api_url>",
       acceptsArgs: true,
       async handler(ctx) {
         const parts = ctx.args?.trim().split(/\s+/) ?? [];
@@ -162,6 +162,7 @@ const plugin: {
           return { text: "Bot token must start with 'bf_'.", isError: true };
         }
         try {
+          const existed = Boolean(configGet(`channels.dmwork.accounts.${accountId}.botToken`));
           configSet(`channels.dmwork.accounts.${accountId}.botToken`, botToken);
           configSet(`channels.dmwork.accounts.${accountId}.apiUrl`, apiUrl);
           const dmScope = configGet("session.dmScope");
@@ -169,7 +170,7 @@ const plugin: {
             configSet("session.dmScope", RECOMMENDED_DM_SCOPE);
           }
           gatewayRestart(true);
-          return { text: `Added bot account: ${accountId} (API: ${apiUrl}). Gateway restarted.` };
+          return { text: `${existed ? "Updated" : "Added"} bot account: ${accountId} (API: ${apiUrl}). Gateway restarted.` };
         } catch (e) {
           return { text: `Failed: ${e instanceof Error ? e.message : String(e)}`, isError: true };
         }
@@ -185,6 +186,9 @@ const plugin: {
         const accountId = ctx.args?.trim();
         if (!accountId) {
           return { text: "Usage: /dmwork_remove_account <account_id>", isError: true };
+        }
+        if (!validateAccountId(accountId)) {
+          return { text: `Invalid account ID "${accountId}". Only letters, digits, and underscores allowed.`, isError: true };
         }
         try {
           const token = configGet(`channels.dmwork.accounts.${accountId}.botToken`);
