@@ -15,6 +15,39 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import type { ChannelLogSink } from "openclaw/plugin-sdk";
 
+// --- Channel ID helpers ---
+
+/**
+ * Extract the parent group number from a channelId.
+ * Thread channelId format: "groupNo____shortId"
+ * Group channelId format: "groupNo"
+ */
+export function extractParentGroupNo(channelId: string): string {
+  const sep = channelId.indexOf("____");
+  return sep >= 0 ? channelId.slice(0, sep) : channelId;
+}
+
+/**
+ * Extract the thread shortId from a channelId.
+ * Only thread channelIds contain a shortId; group channelIds return null.
+ *
+ * Edge case: if channelId ends with "____" (no shortId portion), returns "".
+ * Callers that require a non-empty shortId should check for falsy values.
+ */
+export function extractThreadShortId(channelId: string): string | null {
+  const sep = channelId.indexOf("____");
+  if (sep < 0) return null;
+  const id = channelId.slice(sep + 4);
+  return id || null;
+}
+
+/**
+ * Check if a channelId is a thread (community topic) format.
+ */
+export function isThreadChannelId(channelId: string): boolean {
+  return channelId.includes("____");
+}
+
 export interface GroupMdMeta {
   version: number;
   updated_at: string | null;
@@ -304,6 +337,7 @@ export async function handleGroupMdEvent(params: {
  * Get GROUP.md content for prompt injection.
  * Called by the before_prompt_build hook.
  * Only does disk reads — no network calls.
+ * For thread sessions, returns cascaded group + thread content.
  */
 export function getGroupMdForPrompt(ctx: {
   sessionKey?: string;
@@ -314,13 +348,34 @@ export function getGroupMdForPrompt(ctx: {
 
   const match = OCTO_GROUP_RE.exec(sessionKey);
   if (!match) return null;
-  const groupNo = match[1];
+  const rawId = match[1];  // may be "groupNo" or "groupNo____shortId"
 
-  const accountId = resolveAccountId(agentId, groupNo);
+  const parentGroupNo = extractParentGroupNo(rawId);
+  const shortId = extractThreadShortId(rawId);
+
+  const accountId = resolveAccountId(agentId, parentGroupNo);
   if (!accountId) return null;
 
-  const content = readGroupMdFromDisk(accountId, groupNo);
-  return content;
+  // 1. Always read group-level GROUP.md
+  const groupMd = readGroupMdFromDisk(accountId, parentGroupNo);
+
+  // 2. If thread session, also read thread-level THREAD.md
+  let threadMd: string | null = null;
+  if (shortId) {
+    threadMd = readThreadMdFromDisk(accountId, parentGroupNo, shortId);
+  }
+
+  // 3. Combine output
+  if (!groupMd && !threadMd) return null;
+
+  const parts: string[] = [];
+  if (groupMd) {
+    parts.push(groupMd);
+  }
+  if (threadMd) {
+    parts.push(`--- THREAD CONTEXT ---\n${threadMd}`);
+  }
+  return parts.join("\n\n");
 }
 
 /**
@@ -375,6 +430,198 @@ export function getKnownGroupIds(): Set<string> {
   return ids;
 }
 
+// --- Thread (子区) THREAD.md disk cache ---
+
+/** Tracks threads checked this session to avoid redundant API calls */
+const _checkedThreads = new Set<string>(); // "accountId/groupNo/shortId"
+
+function threadDir(accountId: string, groupNo: string, shortId: string): string {
+  return join(workspaceBase(), accountId, "groups", groupNo, "threads", shortId);
+}
+
+function threadMdPath(accountId: string, groupNo: string, shortId: string): string {
+  return join(threadDir(accountId, groupNo, shortId), "THREAD.md");
+}
+
+function threadMetaPath(accountId: string, groupNo: string, shortId: string): string {
+  return join(threadDir(accountId, groupNo, shortId), "THREAD.meta.json");
+}
+
+export function writeThreadMdToDisk(params: {
+  accountId: string;
+  groupNo: string;
+  shortId: string;
+  content: string;
+  meta: GroupMdMeta;
+}): void {
+  const dir = threadDir(params.accountId, params.groupNo, params.shortId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(threadMdPath(params.accountId, params.groupNo, params.shortId), params.content, "utf-8");
+  writeFileSync(threadMetaPath(params.accountId, params.groupNo, params.shortId), JSON.stringify(params.meta, null, 2), "utf-8");
+}
+
+export function readThreadMdFromDisk(accountId: string, groupNo: string, shortId: string): string | null {
+  try {
+    return readFileSync(threadMdPath(accountId, groupNo, shortId), "utf-8");
+  } catch {
+    return null;
+  }
+}
+
+function readThreadMeta(accountId: string, groupNo: string, shortId: string): GroupMdMeta | null {
+  try {
+    return JSON.parse(readFileSync(threadMetaPath(accountId, groupNo, shortId), "utf-8")) as GroupMdMeta;
+  } catch {
+    return null;
+  }
+}
+
+export function deleteThreadMdFromDisk(accountId: string, groupNo: string, shortId: string): void {
+  try { unlinkSync(threadMdPath(accountId, groupNo, shortId)); } catch { /* ok */ }
+  try { unlinkSync(threadMetaPath(accountId, groupNo, shortId)); } catch { /* ok */ }
+}
+
+/**
+ * Fetch thread THREAD.md from the API (internal, used by ensureThreadMd / handleThreadMdEvent).
+ * Returns null on 404 or network error — callers treat missing THREAD.md as normal.
+ *
+ * Contrast with api-fetch.ts `getThreadMd()` which throws on non-2xx responses
+ * and is used by agent-tools where the caller needs explicit error propagation.
+ */
+async function fetchThreadMdFromApi(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  log?: ChannelLogSink;
+}): Promise<GroupMdApiResponse | null> {
+  const { apiUrl, botToken, groupNo, shortId, log } = params;
+  const url = `${apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(groupNo)}/threads/${encodeURIComponent(shortId)}/md`;
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${botToken}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (resp.status === 404) return null;
+    if (!resp.ok) {
+      log?.warn?.(`dmwork: [THREAD.md] fetch failed for ${groupNo}/${shortId}: ${resp.status}`);
+      return null;
+    }
+    const data = (await resp.json()) as GroupMdApiResponse;
+    // API returns version=0 + content="" for nonexistent thread md
+    if (!data.content && data.version === 0) return null;
+    return data;
+  } catch (err) {
+    log?.warn?.(`dmwork: [THREAD.md] fetch error for ${groupNo}/${shortId}: ${String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * Ensure thread THREAD.md is cached on disk.
+ * Only checks once per session per thread.
+ */
+export async function ensureThreadMd(params: {
+  agentId: string;
+  accountId: string;
+  groupNo: string;
+  shortId: string;
+  apiUrl: string;
+  botToken: string;
+  log?: ChannelLogSink;
+}): Promise<void> {
+  const { accountId, groupNo, shortId, apiUrl, botToken, log } = params;
+  const key = `${accountId}/${groupNo}/${shortId}`;
+  if (_checkedThreads.has(key)) return;
+  _checkedThreads.add(key);
+
+  const apiData = await fetchThreadMdFromApi({ apiUrl, botToken, groupNo, shortId, log });
+  if (!apiData) return;
+
+  const existingMeta = readThreadMeta(accountId, groupNo, shortId);
+  if (existingMeta && existingMeta.version === apiData.version) {
+    log?.debug?.(`dmwork: [THREAD.md] cache up-to-date for ${groupNo}/${shortId} (v${apiData.version})`);
+    return;
+  }
+
+  const meta: GroupMdMeta = {
+    version: apiData.version,
+    updated_at: apiData.updated_at,
+    updated_by: apiData.updated_by,
+    fetched_at: new Date().toISOString(),
+    account_id: accountId,
+  };
+
+  writeThreadMdToDisk({ accountId, groupNo, shortId, content: apiData.content, meta });
+  log?.info?.(`dmwork: [THREAD.md] cached v${apiData.version} for thread ${groupNo}/${shortId}`);
+}
+
+/**
+ * Handle thread_md_updated / thread_md_deleted events.
+ */
+export async function handleThreadMdEvent(params: {
+  agentId: string;
+  accountId: string;
+  groupNo: string;
+  shortId: string;
+  eventType: string;
+  apiUrl: string;
+  botToken: string;
+  log?: ChannelLogSink;
+}): Promise<void> {
+  const { accountId, groupNo, shortId, eventType, apiUrl, botToken, log } = params;
+
+  if (eventType === "thread_md_deleted") {
+    deleteThreadMdFromDisk(accountId, groupNo, shortId);
+    _checkedThreads.delete(`${accountId}/${groupNo}/${shortId}`);
+    log?.info?.(`dmwork: [THREAD.md] deleted cache for thread ${groupNo}/${shortId}`);
+    return;
+  }
+
+  if (eventType === "thread_md_updated") {
+    _checkedThreads.delete(`${accountId}/${groupNo}/${shortId}`);
+    const apiData = await fetchThreadMdFromApi({ apiUrl, botToken, groupNo, shortId, log });
+    if (!apiData) {
+      log?.warn?.(`dmwork: [THREAD.md] update event but fetch returned null for ${groupNo}/${shortId}`);
+      return;
+    }
+
+    const meta: GroupMdMeta = {
+      version: apiData.version,
+      updated_at: apiData.updated_at,
+      updated_by: apiData.updated_by,
+      fetched_at: new Date().toISOString(),
+      account_id: accountId,
+    };
+
+    writeThreadMdToDisk({ accountId, groupNo, shortId, content: apiData.content, meta });
+    _checkedThreads.add(`${accountId}/${groupNo}/${shortId}`);
+    log?.info?.(`dmwork: [THREAD.md] updated cache to v${apiData.version} for thread ${groupNo}/${shortId}`);
+  }
+}
+
+/**
+ * Update thread THREAD.md disk cache (called after tool updates).
+ */
+export function broadcastThreadMdUpdate(params: {
+  accountId: string;
+  groupNo: string;
+  shortId: string;
+  content: string;
+  version: number;
+}): void {
+  const { accountId, groupNo, shortId, content, version } = params;
+  const meta: GroupMdMeta = {
+    version,
+    updated_at: new Date().toISOString(),
+    updated_by: "event",
+    fetched_at: new Date().toISOString(),
+    account_id: accountId,
+  };
+  writeThreadMdToDisk({ accountId, groupNo, shortId, content, meta });
+}
+
 // --- Test helpers (exported for unit tests) ---
 
 export function _testGetGroupAccountMap(): Map<string, string> {
@@ -385,9 +632,14 @@ export function _testGetCheckedGroups(): Set<string> {
   return _checkedGroups;
 }
 
+export function _testGetCheckedThreads(): Set<string> {
+  return _checkedThreads;
+}
+
 export function _testReset(): void {
   _groupAccountMap.clear();
   _checkedGroups.clear();
   _groupMdCache.clear();
   _allBotGroupIds.clear();
+  _checkedThreads.clear();
 }

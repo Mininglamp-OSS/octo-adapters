@@ -35,8 +35,10 @@ import {
   getVoiceContext,
   updateVoiceContext,
   deleteVoiceContext,
+  getThreadMd,
+  updateThreadMd,
 } from "./api-fetch.js";
-import { broadcastGroupMdUpdate } from "./group-md.js";
+import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
@@ -82,7 +84,7 @@ export function createDmworkManagementTools(params: {
       label: "DMWork Management",
       description:
         "Manage DMWork groups and personal voice correction context: list groups, get group info/members, " +
-        "read or update GROUP.md, and manage personal voice correction context (read/update/delete). " +
+        "read or update GROUP.md (group-level and thread-level), and manage personal voice correction context. " +
         "Use this tool for any DMWork management operations.",
       parameters: {
         type: "object",
@@ -107,6 +109,8 @@ export function createDmworkManagementTools(params: {
               "list-thread-members",
               "join-thread",
               "leave-thread",
+              "thread-md-read",
+              "thread-md-update",
               "voice-context-read",
               "voice-context-update",
               "voice-context-delete",
@@ -158,7 +162,7 @@ export function createDmworkManagementTools(params: {
           shortId: {
             type: "string",
             description:
-              "Thread short ID. Required for get-thread, delete-thread, list-thread-members, join-thread, leave-thread.",
+              "Thread short ID. Required for get-thread, delete-thread, list-thread-members, join-thread, leave-thread, thread-md-read, thread-md-update.",
           },
           accountId: {
             type: "string",
@@ -385,6 +389,33 @@ export function createDmworkManagementTools(params: {
               return makeSuccess({ left: true, groupId, shortId });
             }
 
+            case "thread-md-read": {
+              if (!groupId)
+                return makeError("groupId is required for thread-md-read");
+              const shortId = args.shortId as string | undefined;
+              if (!shortId)
+                return makeError("shortId is required for thread-md-read");
+              return await handleThreadMdRead({ apiUrl, botToken, groupId, shortId });
+            }
+
+            case "thread-md-update": {
+              if (!groupId)
+                return makeError("groupId is required for thread-md-update");
+              const shortId = args.shortId as string | undefined;
+              if (!shortId)
+                return makeError("shortId is required for thread-md-update");
+              if (!content)
+                return makeError("content is required for thread-md-update");
+              return await handleThreadMdUpdate({
+                apiUrl,
+                botToken,
+                groupId,
+                shortId,
+                content,
+                accountId,
+              });
+            }
+
             case "voice-context-read":
               return await handleVoiceContextRead({ apiUrl, botToken });
 
@@ -493,6 +524,60 @@ async function handleGroupMdUpdate(params: {
   broadcastGroupMdUpdate({
     accountId: params.accountId,
     groupNo: params.groupId,
+    content: params.content,
+    version: result.version,
+  });
+
+  return makeSuccess({ updated: true, version: result.version });
+}
+
+// ---------------------------------------------------------------------------
+// Thread MD Handlers
+// ---------------------------------------------------------------------------
+
+async function handleThreadMdRead(params: {
+  apiUrl: string;
+  botToken: string;
+  groupId: string;
+  shortId: string;
+}): Promise<ToolResult> {
+  try {
+    const md = await getThreadMd({
+      apiUrl: params.apiUrl,
+      botToken: params.botToken,
+      groupNo: params.groupId,
+      shortId: params.shortId,
+    });
+    return makeSuccess(md);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("(404)")) {
+      return makeSuccess({ content: "", version: 0, updated_at: null, updated_by: "" });
+    }
+    return makeError(`Failed to read thread THREAD.md: ${msg}`);
+  }
+}
+
+async function handleThreadMdUpdate(params: {
+  apiUrl: string;
+  botToken: string;
+  groupId: string;
+  shortId: string;
+  content: string;
+  accountId: string;
+}): Promise<ToolResult> {
+  const result = await updateThreadMd({
+    apiUrl: params.apiUrl,
+    botToken: params.botToken,
+    groupNo: params.groupId,
+    shortId: params.shortId,
+    content: params.content,
+  });
+
+  broadcastThreadMdUpdate({
+    accountId: params.accountId,
+    groupNo: params.groupId,
+    shortId: params.shortId,
     content: params.content,
     version: result.version,
   });
