@@ -10,8 +10,6 @@ import {
   gatewayRestart,
   pluginsInspect,
   pluginsInstall,
-  saveChannelConfigFromFile,
-  restoreChannelConfigToFile,
 } from "./openclaw-cli.js";
 import {
   PLUGIN_ID,
@@ -29,6 +27,7 @@ export interface InstallOptions {
   accountId?: string;
   skipConfig?: boolean;
   force?: boolean;
+  dev?: boolean;
 }
 
 export async function runInstall(opts: InstallOptions): Promise<void> {
@@ -42,23 +41,9 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       `DMWork plugin is already installed (v${inspect.plugin.version}). Skipping install.`,
     );
   } else {
-    // --force triggers uninstall+reinstall internally, which deletes channels.dmwork.
-    // Save config by reading file directly (preserves secrets), restore after install.
-    const savedConfig = opts.force
-      ? saveChannelConfigFromFile()
-      : null;
-
-    try {
-      console.log("Installing DMWork plugin...");
-      pluginsInstall(PLUGIN_ID, opts.force);
-    } finally {
-      // Always restore config, even if install fails partway through
-      if (savedConfig) {
-        restoreChannelConfigToFile(savedConfig);
-        console.log("Restored channels.dmwork config.");
-      }
-    }
-
+    const spec = opts.dev ? `${PLUGIN_ID}@dev` : PLUGIN_ID;
+    console.log(`Installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
+    pluginsInstall(spec, opts.force);
     console.log("Plugin installed successfully.");
   }
 

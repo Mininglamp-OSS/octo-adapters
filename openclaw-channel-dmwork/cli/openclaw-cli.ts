@@ -227,3 +227,36 @@ export function restoreChannelConfigToFile(
   cfg.channels.dmwork = dmworkConfig;
   writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
 }
+
+/**
+ * Remove channels.dmwork directly from the JSON file.
+ * Used before uninstall to avoid config validation errors
+ * (openclaw config unset also fails when the channel id is unknown).
+ */
+/**
+ * Get the openclaw config file path without calling the CLI.
+ * Falls back to the standard default when CLI is unavailable
+ * (e.g. during uninstall when config validation fails).
+ */
+function getConfigFilePathSafe(): string {
+  try {
+    return expandHome(getConfigFilePath());
+  } catch {
+    return resolve(homedir(), ".openclaw", "openclaw.json");
+  }
+}
+
+export function removeChannelConfigFromFile(): void {
+  try {
+    const configPath = getConfigFilePathSafe();
+    copyFileSync(configPath, configPath + ".bak");
+    const raw = readFileSync(configPath, "utf-8");
+    const cfg = JSON.parse(raw);
+    if (cfg.channels?.dmwork) {
+      delete cfg.channels.dmwork;
+      writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+    }
+  } catch {
+    // best effort
+  }
+}

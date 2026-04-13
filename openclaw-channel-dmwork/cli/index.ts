@@ -2,7 +2,7 @@
  * CLI entry point: register 5 subcommands with commander.
  */
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { runInstall } from "./install.js";
 import { runUpdate } from "./update.js";
 import {
@@ -60,6 +60,7 @@ program
   .option("--account-id <id>", "Account ID (required in non-interactive mode)")
   .option("--skip-config", "Skip bot configuration", false)
   .option("--force", "Force reinstall", false)
+  .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
     await runInstall({
       botToken: opts.botToken,
@@ -67,6 +68,7 @@ program
       accountId: opts.accountId,
       skipConfig: opts.skipConfig,
       force: opts.force,
+      dev: opts.dev,
     });
   });
 
@@ -75,8 +77,9 @@ program
   .command("update")
   .description("Update the DMWork plugin to the latest version")
   .option("--json", "Output JSON", false)
+  .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
-    await runUpdate({ json: opts.json });
+    await runUpdate({ json: opts.json, dev: opts.dev });
   });
 
 // --- doctor ---
@@ -101,14 +104,10 @@ program
 // --- uninstall ---
 program
   .command("uninstall")
-  .description("Uninstall the DMWork plugin")
-  .option("--remove-config", "Also remove channels.dmwork config", false)
+  .description("Uninstall the DMWork plugin and remove all bot configs")
   .option("--yes", "Skip confirmation", false)
   .action(async (opts) => {
-    await runUninstall({
-      removeConfig: opts.removeConfig,
-      yes: opts.yes,
-    });
+    await runUninstall({ yes: opts.yes });
   });
 
 // --- remove-account ---

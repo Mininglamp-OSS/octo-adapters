@@ -5,12 +5,14 @@
 import {
   gatewayRestart,
   pluginsInspect,
+  pluginsInstall,
   pluginsUpdate,
 } from "./openclaw-cli.js";
 import { PLUGIN_ID, ensureOpenClawCompat } from "./utils.js";
 
 export interface UpdateOptions {
   json?: boolean;
+  dev?: boolean;
 }
 
 export async function runUpdate(opts: UpdateOptions): Promise<void> {
@@ -29,8 +31,11 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
   const previousVersion = inspect.plugin.version;
 
   if (opts.json) {
-    // JSON mode: suppress text output, capture everything
-    pluginsUpdate(PLUGIN_ID, true);
+    if (opts.dev) {
+      pluginsInstall(`${PLUGIN_ID}@dev`, true);
+    } else {
+      pluginsUpdate(PLUGIN_ID, true);
+    }
     gatewayRestart(true);
     const updated = pluginsInspect(PLUGIN_ID);
     console.log(
@@ -41,8 +46,13 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
       }),
     );
   } else {
-    console.log("Updating DMWork plugin...");
-    pluginsUpdate(PLUGIN_ID);
+    if (opts.dev) {
+      console.log("Updating DMWork plugin (dev)...");
+      pluginsInstall(`${PLUGIN_ID}@dev`, true);
+    } else {
+      console.log("Updating DMWork plugin...");
+      pluginsUpdate(PLUGIN_ID);
+    }
 
     console.log("Restarting gateway...");
     if (!gatewayRestart()) {
