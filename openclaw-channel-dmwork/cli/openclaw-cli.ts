@@ -5,8 +5,17 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 const OPENCLAW = "openclaw";
+
+/** Expand ~ to home directory */
+function expandHome(p: string): string {
+  if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
+  return p;
+}
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -59,6 +68,12 @@ export function configSetBatch(
     operations.map((op) => ({ path: op.path, value: op.value })),
   );
   execFileSync(OPENCLAW, ["config", "set", "--batch-json", batchJson], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+export function configSetJson(path: string, value: unknown): void {
+  execFileSync(OPENCLAW, ["config", "set", path, JSON.stringify(value), "--strict-json"], {
     stdio: ["pipe", "pipe", "pipe"],
   });
 }
@@ -167,4 +182,48 @@ export function getOpenClawVersion(): string | null {
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Direct JSON file access (for config backup/restore around uninstall)
+//
+// openclaw plugins uninstall deletes channels.dmwork from the config file.
+// We cannot use `openclaw config get` to back up because it redacts secrets,
+// and we cannot use `openclaw config set` to restore because after uninstall
+// the channel id is unknown and validation rejects it.
+// So we read/write the JSON file directly for this specific operation.
+// ---------------------------------------------------------------------------
+
+/**
+ * Save the channels.dmwork section from openclaw.json by reading the file
+ * directly (preserving secrets that `openclaw config get` would redact).
+ */
+export function saveChannelConfigFromFile(): Record<string, unknown> | null {
+  try {
+    const configPath = expandHome(getConfigFilePath());
+    const raw = readFileSync(configPath, "utf-8");
+    const cfg = JSON.parse(raw);
+    return cfg?.channels?.dmwork ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Restore the channels.dmwork section into openclaw.json by writing the file
+ * directly (bypassing validation that would reject unknown channel ids).
+ * Creates a .bak backup before writing.
+ */
+export function restoreChannelConfigToFile(
+  dmworkConfig: Record<string, unknown>,
+): void {
+  const configPath = expandHome(getConfigFilePath());
+  // Backup
+  copyFileSync(configPath, configPath + ".bak");
+  // Read, merge, write
+  const raw = readFileSync(configPath, "utf-8");
+  const cfg = JSON.parse(raw);
+  if (!cfg.channels) cfg.channels = {};
+  cfg.channels.dmwork = dmworkConfig;
+  writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
 }

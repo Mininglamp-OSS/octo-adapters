@@ -1,11 +1,18 @@
 /**
- * uninstall command: delegate to openclaw plugins uninstall + optional config cleanup.
+ * uninstall command: delegate to openclaw plugins uninstall + config preservation.
+ *
+ * IMPORTANT: openclaw plugins uninstall deletes channels.dmwork along with the
+ * plugin. We save the config by reading the JSON file directly before uninstall,
+ * then write it back afterwards. We cannot use openclaw config get/set because:
+ * - get redacts secrets (botToken becomes __OPENCLAW_REDACTED__)
+ * - set rejects channels.dmwork after uninstall ("unknown channel id")
  */
 
 import {
-  configUnset,
   gatewayRestart,
   pluginsUninstall,
+  saveChannelConfigFromFile,
+  restoreChannelConfigToFile,
 } from "./openclaw-cli.js";
 import { PLUGIN_ID, confirm, ensureOpenClawCompat } from "./utils.js";
 
@@ -27,14 +34,20 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
     }
   }
 
+  // Save channels.dmwork config BEFORE uninstall (reading file directly to preserve secrets)
+  const savedConfig = opts.removeConfig
+    ? null
+    : saveChannelConfigFromFile();
+
   console.log("Uninstalling DMWork plugin...");
   pluginsUninstall(PLUGIN_ID, opts.yes);
 
+  // Restore or confirm removal
   if (opts.removeConfig) {
-    console.log("Removing channels.dmwork config...");
-    configUnset("channels.dmwork");
-  } else {
-    console.log("Keeping channels.dmwork config (use --remove-config to delete).");
+    console.log("Removed channels.dmwork config.");
+  } else if (savedConfig) {
+    restoreChannelConfigToFile(savedConfig);
+    console.log("Restored channels.dmwork config.");
   }
 
   console.log("Restarting gateway...");
