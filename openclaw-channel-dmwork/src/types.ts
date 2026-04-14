@@ -80,9 +80,11 @@ export interface MessagePayload {
   mention?: MentionPayload;
   reply?: ReplyPayload;
   event?: {
-    type: string;       // "group_md_updated" | "group_md_deleted"
+    type: string;       // "group_md_updated" | "group_md_deleted" | "thread_md_updated" | "thread_md_deleted"
     version?: number;
     updated_by?: string;
+    group_no?: string;   // thread_md_* events only
+    short_id?: string;   // thread_md_* events only
   };
   [key: string]: unknown;
 }
