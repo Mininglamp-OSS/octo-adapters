@@ -403,8 +403,12 @@ export function broadcastGroupMdUpdate(params: {
     fetched_at: new Date().toISOString(),
     account_id: accountId,
   };
-  writeGroupMdToDisk({ accountId, groupNo, content, meta });
-  console.error(`[dmwork] broadcastGroupMdUpdate: updated disk cache group=${groupNo} v=${version}`);
+  try {
+    writeGroupMdToDisk({ accountId, groupNo, content, meta });
+    console.error(`[dmwork] broadcastGroupMdUpdate: updated disk cache group=${groupNo} v=${version}`);
+  } catch (err) {
+    console.error(`[dmwork] broadcastGroupMdUpdate failed for group=${groupNo}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /**
@@ -619,7 +623,12 @@ export function broadcastThreadMdUpdate(params: {
     fetched_at: new Date().toISOString(),
     account_id: accountId,
   };
-  writeThreadMdToDisk({ accountId, groupNo, shortId, content, meta });
+  try {
+    writeThreadMdToDisk({ accountId, groupNo, shortId, content, meta });
+    console.error(`[dmwork] broadcastThreadMdUpdate: updated disk cache thread=${groupNo}/${shortId} v=${version}`);
+  } catch (err) {
+    console.error(`[dmwork] broadcastThreadMdUpdate failed for thread=${groupNo}/${shortId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // --- Test helpers (exported for unit tests) ---

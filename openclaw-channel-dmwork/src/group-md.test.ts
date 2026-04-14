@@ -20,6 +20,7 @@ import {
   readThreadMdFromDisk,
   deleteThreadMdFromDisk,
   broadcastThreadMdUpdate,
+  broadcastGroupMdUpdate,
   ensureThreadMd,
   handleThreadMdEvent,
   OCTO_GROUP_RE,
@@ -570,6 +571,56 @@ describe("broadcastThreadMdUpdate", () => {
 
     const content = readThreadMdFromDisk("acct1", "grp1", "thr1");
     expect(content).toBe("# Broadcast test");
+  });
+
+  it("should not throw when writeThreadMdToDisk fails", () => {
+    // Make HOME point to a read-only path that will cause mkdirSync to fail
+    process.env.HOME = "/dev/null/impossible";
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(() =>
+      broadcastThreadMdUpdate({
+        accountId: "acct1",
+        groupNo: "grp1",
+        shortId: "thr1",
+        content: "# fail",
+        version: 1,
+      }),
+    ).not.toThrow();
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining("broadcastThreadMdUpdate failed"),
+    );
+    spy.mockRestore();
+  });
+});
+
+describe("broadcastGroupMdUpdate", () => {
+  it("should write group md to disk", () => {
+    broadcastGroupMdUpdate({
+      accountId: "acct1",
+      groupNo: "grp1",
+      content: "# Group test",
+      version: 3,
+    });
+
+    const content = readGroupMdFromDisk("acct1", "grp1");
+    expect(content).toBe("# Group test");
+  });
+
+  it("should not throw when writeGroupMdToDisk fails", () => {
+    process.env.HOME = "/dev/null/impossible";
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(() =>
+      broadcastGroupMdUpdate({
+        accountId: "acct1",
+        groupNo: "grp1",
+        content: "# fail",
+        version: 1,
+      }),
+    ).not.toThrow();
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining("broadcastGroupMdUpdate failed"),
+    );
+    spy.mockRestore();
   });
 });
 
