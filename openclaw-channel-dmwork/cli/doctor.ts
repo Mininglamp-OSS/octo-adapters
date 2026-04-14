@@ -8,6 +8,7 @@
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
+  cleanupLegacyPlugin,
   configGet,
   configGetJson,
   configSet,
@@ -97,6 +98,16 @@ export async function runDoctorChecks(params: {
   // Phase 1: Fatal config issues (OpenClaw CLI may not work)
   // =========================================================================
   if (!params.inProcess && fix) {
+    // Phase 0: Clean up legacy "dmwork" plugin
+    const legacyActions = cleanupLegacyPlugin();
+    for (const action of legacyActions) {
+      checks.push({
+        name: "Legacy plugin cleanup",
+        status: "FIXED",
+        detail: action,
+      });
+    }
+
     const cfg = readConfigFromFile();
     if (cfg) {
       const hasDmworkChannel = Boolean(cfg.channels?.dmwork);

@@ -348,3 +348,74 @@ export function removeOrphanedBindingsFromFile(
     // best effort
   }
 }
+
+// ---------------------------------------------------------------------------
+// Legacy plugin cleanup
+// ---------------------------------------------------------------------------
+
+const LEGACY_PLUGIN_ID = "dmwork";
+
+/**
+ * Detect and clean up legacy DMWork plugin installations that conflict
+ * with the current openclaw-channel-dmwork plugin.
+ *
+ * Known legacy artifacts:
+ * - ~/.openclaw/extensions/dmwork/ (old plugin directory, id="dmwork")
+ * - plugins.entries.dmwork in openclaw.json
+ *
+ * Returns a list of actions taken (for logging).
+ */
+export function cleanupLegacyPlugin(): string[] {
+  const actions: string[] = [];
+
+  // 1. Check if legacy plugin directory exists
+  const legacyDir = resolve(
+    getConfigFilePathSafe().replace(/openclaw\.json$/, ""),
+    "extensions",
+    LEGACY_PLUGIN_ID,
+  );
+
+  if (existsSync(legacyDir)) {
+    // Try to uninstall via openclaw CLI first (removes entries/installs/allow)
+    try {
+      execFileSync(OPENCLAW, ["plugins", "uninstall", LEGACY_PLUGIN_ID, "--force", "--keep-files"], {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      actions.push(`Unregistered legacy plugin "${LEGACY_PLUGIN_ID}"`);
+    } catch {
+      // May fail if plugin not in registry, clean up config manually
+    }
+
+    // Remove legacy directory
+    try {
+      const { rmSync } = require("node:fs") as typeof import("node:fs");
+      rmSync(legacyDir, { recursive: true, force: true });
+      actions.push(`Removed legacy directory: ${legacyDir}`);
+    } catch {
+      actions.push(`Warning: could not remove ${legacyDir}`);
+    }
+  }
+
+  // 2. Check for stale config entries (in case uninstall didn't clean them)
+  try {
+    const cfg = readConfigFromFile();
+    if (cfg?.plugins?.entries?.[LEGACY_PLUGIN_ID]) {
+      const configPath = getConfigFilePathSafe();
+      copyFileSync(configPath, configPath + ".bak");
+      delete cfg.plugins.entries[LEGACY_PLUGIN_ID];
+      // Also clean installs and allow
+      if (cfg.plugins?.installs?.[LEGACY_PLUGIN_ID]) {
+        delete cfg.plugins.installs[LEGACY_PLUGIN_ID];
+      }
+      if (Array.isArray(cfg.plugins?.allow)) {
+        cfg.plugins.allow = cfg.plugins.allow.filter((id: string) => id !== LEGACY_PLUGIN_ID);
+      }
+      writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+      actions.push(`Cleaned legacy entries from openclaw.json`);
+    }
+  } catch {
+    // best effort
+  }
+
+  return actions;
+}
