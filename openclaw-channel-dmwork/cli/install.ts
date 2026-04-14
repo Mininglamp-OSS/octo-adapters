@@ -50,11 +50,9 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
     console.log("Plugin installed successfully.");
   }
 
-  // 3. Legacy config migration
-  await migrateLegacyConfig();
-
-  // 4. DMWork config (unless --skip-config)
+  // 3. Legacy config migration + 4. DMWork config (unless --skip-config)
   if (!opts.skipConfig) {
+    await migrateLegacyConfig();
     await configureDmworkAccount(opts);
   }
 

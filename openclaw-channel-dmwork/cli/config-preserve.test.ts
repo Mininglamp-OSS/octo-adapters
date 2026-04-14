@@ -4,11 +4,13 @@ import { execFileSync } from "node:child_process";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
+  execSync: vi.fn(() => ""),
 }));
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
   copyFileSync: vi.fn(),
+  existsSync: vi.fn(() => false),
 }));
 
 const mockExecFileSync = vi.mocked(execFileSync);
