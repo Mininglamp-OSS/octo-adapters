@@ -4,7 +4,12 @@ import { execFileSync } from "node:child_process";
 // Mock child_process at module level
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
+  execSync: vi.fn(() => ""),
 }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, existsSync: vi.fn(() => false) };
+});
 
 const mockExecFileSync = vi.mocked(execFileSync);
 
@@ -118,5 +123,69 @@ describe("configGet / configSet", () => {
     mockExecFileSync.mockReturnValue("\n");
 
     expect(configGet("nonexistent.path")).toBeNull();
+  });
+});
+
+describe("findGlobalOpenclaw (via module load)", () => {
+  it("should skip _npx paths and pick global path", async () => {
+    const { execSync } = await import("node:child_process");
+    vi.mocked(execSync).mockReturnValue(
+      "/Users/test/.npm/_npx/abc123/node_modules/.bin/openclaw\n/usr/local/bin/openclaw\n",
+    );
+    const mod = await loadModule();
+    mockExecFileSync.mockReturnValue("test\n");
+    mod.configGet("test.path");
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      "/usr/local/bin/openclaw",
+      expect.any(Array),
+      expect.any(Object),
+    );
+  });
+
+  it("should handle CRLF output from Windows", async () => {
+    const { execSync } = await import("node:child_process");
+    vi.mocked(execSync).mockReturnValue(
+      "C:\\npm\\_npx\\openclaw.cmd\r\nC:\\Program Files\\openclaw\\openclaw.exe\r\n",
+    );
+    const mod = await loadModule();
+    mockExecFileSync.mockReturnValue("test\n");
+    mod.configGet("test.path");
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      "C:\\Program Files\\openclaw\\openclaw.exe",
+      expect.any(Array),
+      expect.any(Object),
+    );
+  });
+
+  it("should fallback to candidate paths when which/where fails", async () => {
+    const { execSync } = await import("node:child_process");
+    const { existsSync } = await import("node:fs");
+    vi.mocked(execSync).mockImplementation(() => { throw new Error("not found"); });
+    vi.mocked(existsSync).mockImplementation((p) =>
+      String(p) === "/usr/local/bin/openclaw",
+    );
+    const mod = await loadModule();
+    mockExecFileSync.mockReturnValue("test\n");
+    mod.configGet("test.path");
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      "/usr/local/bin/openclaw",
+      expect.any(Array),
+      expect.any(Object),
+    );
+  });
+
+  it("should fallback to 'openclaw' when nothing found", async () => {
+    const { execSync } = await import("node:child_process");
+    const { existsSync } = await import("node:fs");
+    vi.mocked(execSync).mockImplementation(() => { throw new Error("not found"); });
+    vi.mocked(existsSync).mockReturnValue(false);
+    const mod = await loadModule();
+    mockExecFileSync.mockReturnValue("test\n");
+    mod.configGet("test.path");
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      "openclaw",
+      expect.any(Array),
+      expect.any(Object),
+    );
   });
 });

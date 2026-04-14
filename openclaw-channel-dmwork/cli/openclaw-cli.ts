@@ -4,12 +4,52 @@
  * argument arrays to avoid shell-quoting issues.
  */
 
-import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, copyFileSync } from "node:fs";
+import { execFileSync, execSync } from "node:child_process";
+import { readFileSync, writeFileSync, copyFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-const OPENCLAW = "openclaw";
+/**
+ * Find the user's globally installed openclaw, skipping the npx environment.
+ *
+ * npx installs openclaw as a peerDependency, which may be a newer version
+ * than the user's server. Using the npx version to write openclaw.json
+ * causes version incompatibility crashes on older OpenClaw servers.
+ */
+function findGlobalOpenclaw(): string {
+  // Strategy 1: use "which -a" (Unix) or "where" (Windows) to find all openclaw paths
+  for (const cmd of ["which -a openclaw", "where openclaw"]) {
+    try {
+      const output = execSync(cmd, {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const paths = output
+        .split(/\r?\n/)
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0 && !p.includes("_npx") && !p.includes("npx-cache"));
+      if (paths.length > 0) return paths[0];
+    } catch {
+      // command not available on this platform
+    }
+  }
+
+  // Strategy 2: check common global install paths
+  const candidates = [
+    "/opt/homebrew/bin/openclaw",
+    "/usr/local/bin/openclaw",
+    "/usr/bin/openclaw",
+    resolve(homedir(), ".npm-global", "bin", "openclaw"),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) return p;
+  }
+
+  // Last resort: use PATH (may still be npx version)
+  return "openclaw";
+}
+
+const OPENCLAW = findGlobalOpenclaw();
 
 /** Expand ~ to home directory */
 function expandHome(p: string): string {

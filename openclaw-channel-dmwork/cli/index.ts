@@ -18,18 +18,19 @@ import { createRequire } from "node:module";
 
 const program = new Command();
 
+const _require = createRequire(import.meta.url);
+const _pkg = _require("../package.json");
+
 program
   .name("openclaw-channel-dmwork")
   .description("DMWork channel plugin CLI for OpenClaw")
-  .version("0.5.19");
+  .version(_pkg.version);
 
 // --- info ---
 program
   .command("info")
   .description("Show CLI and plugin version info")
   .action(() => {
-    const require = createRequire(import.meta.url);
-    const cliPkg = require("../package.json");
     const openclawVersion = getOpenClawVersion() ?? "not found";
     const inspect = pluginsInspect(PLUGIN_ID);
     const installedVersion = inspect?.plugin?.version ?? "not installed";
@@ -40,7 +41,7 @@ program
     const u = "\x1b[4m";   // underline
     const r = "\x1b[0m";   // reset
 
-    console.log(`${b}openclaw-channel-dmwork-cli:${r} ${g}${cliPkg.version}${r}`);
+    console.log(`${b}openclaw-channel-dmwork-cli:${r} ${g}${_pkg.version}${r}`);
     console.log(`${b}openclaw:${r} ${g}${openclawVersion}${r}`);
     console.log(`${b}openclaw-channel-dmwork:${r} ${g}${installedVersion}${r}`);
     console.log(`${b}plugin package:${r} ${g}${PLUGIN_ID}${r}`);
