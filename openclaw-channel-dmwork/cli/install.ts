@@ -6,6 +6,7 @@
  */
 
 import {
+  cleanupLegacyPlugin,
   configGet,
   configGetJson,
   configSet,
@@ -36,6 +37,13 @@ export interface InstallOptions {
 export async function runInstall(opts: InstallOptions): Promise<void> {
   // 1. Pre-check
   ensureOpenClawCompat();
+
+  // 1.5. Clean up legacy "dmwork" plugin if present
+  const legacyActions = cleanupLegacyPlugin();
+  if (legacyActions.length > 0) {
+    console.log("Cleaned up legacy DMWork plugin:");
+    legacyActions.forEach((a) => console.log(`  ${a}`));
+  }
 
   // 2. Plugin install (delegate to official CLI)
   const inspect = pluginsInspect(PLUGIN_ID);

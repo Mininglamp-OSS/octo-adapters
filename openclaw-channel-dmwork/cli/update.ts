@@ -6,6 +6,7 @@
  */
 
 import {
+  cleanupLegacyPlugin,
   gatewayRestart,
   pluginsInspect,
   pluginsInstall,
@@ -43,6 +44,15 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
       console.error("DMWork plugin is not installed. Use 'install' first.");
     }
     process.exit(1);
+  }
+
+  // Clean up legacy "dmwork" plugin AFTER confirming new version exists
+  const legacyActions = cleanupLegacyPlugin();
+  if (legacyActions.length > 0) {
+    if (!opts.json) {
+      console.log("Cleaned up legacy DMWork plugin:");
+      legacyActions.forEach((a) => console.log(`  ${a}`));
+    }
   }
 
   const currentVersion = inspect.plugin.version;
