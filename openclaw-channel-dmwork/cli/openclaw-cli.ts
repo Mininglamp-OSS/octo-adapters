@@ -89,7 +89,7 @@ export function configUnset(path: string): void {
 // ---------------------------------------------------------------------------
 
 export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): void {
-  const args = ["plugins", "install", spec];
+  const args = ["plugins", "install", spec, "--dangerously-force-unsafe-install"];
   if (force) args.push("--force");
   execFileSync(OPENCLAW, args, {
     stdio: quiet ? ["pipe", "pipe", "pipe"] : "inherit",
