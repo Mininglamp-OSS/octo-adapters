@@ -16,7 +16,7 @@ import {
   buildEntitiesFromFallback,
 } from "./mention-utils.js";
 import type { MentionPayload, MentionEntity } from "./types.js";
-import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate } from "./group-md.js";
+import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
 import { createWriteStream } from "node:fs";
 import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
@@ -948,7 +948,8 @@ export async function handleInboundMessage(params: {
   // Detect GROUP.md update/delete notification — refresh both memory + disk cache, do NOT pass to LLM
   const earlyEventType = (message.payload as any)?.event?.type;
   if ((earlyEventType === "group_md_updated" || earlyEventType === "group_md_deleted") && message.channel_id) {
-    log?.info?.(`dmwork: GROUP.md ${earlyEventType} notification for group ${message.channel_id}`);
+    const groupNo = extractParentGroupNo(message.channel_id);
+    log?.info?.(`dmwork: GROUP.md ${earlyEventType} notification for group ${groupNo}`);
 
     // Update memory cache
     if (earlyEventType === "group_md_updated" && groupMdCache) {
@@ -956,27 +957,27 @@ export async function handleInboundMessage(params: {
         const md = await getGroupMd({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken ?? "",
-          groupNo: message.channel_id,
+          groupNo,
           log,
         });
         if (md.content) {
-          groupMdCache.set(message.channel_id, { content: md.content, version: md.version });
-          log?.info?.(`dmwork: GROUP.md memory cache updated for ${message.channel_id} (v${md.version})`);
+          groupMdCache.set(groupNo, { content: md.content, version: md.version });
+          log?.info?.(`dmwork: GROUP.md memory cache updated for ${groupNo} (v${md.version})`);
         }
       } catch (err) {
         log?.error?.(`dmwork: failed to refresh GROUP.md memory cache: ${String(err)}`);
       }
     } else if (earlyEventType === "group_md_deleted" && groupMdCache) {
-      groupMdCache.delete(message.channel_id);
+      groupMdCache.delete(groupNo);
     }
 
     // Update disk cache (for before_prompt_build hook)
     if (earlyEventType === "group_md_updated" && groupMdCache) {
-      const cached = groupMdCache.get(message.channel_id);
+      const cached = groupMdCache.get(groupNo);
       if (cached) {
         broadcastGroupMdUpdate({
           accountId: account.accountId,
-          groupNo: message.channel_id,
+          groupNo,
           content: cached.content,
           version: cached.version,
         });
@@ -985,11 +986,52 @@ export async function handleInboundMessage(params: {
       // Delete disk cache
       broadcastGroupMdUpdate({
         accountId: account.accountId,
-        groupNo: message.channel_id,
+        groupNo,
         content: "",
         version: 0,
       });
     }
+
+    return;
+  }
+
+  // Detect thread THREAD.md update/delete notification — refresh disk cache, do NOT pass to LLM
+  if ((earlyEventType === "thread_md_updated" || earlyEventType === "thread_md_deleted") && message.channel_id) {
+    const event = (message.payload as any)?.event;
+    const groupNo = event?.group_no ?? extractParentGroupNo(message.channel_id);
+    const shortId = event?.short_id ?? extractThreadShortId(message.channel_id);
+
+    if (!groupNo || !shortId) {
+      log?.warn?.(`dmwork: thread_md event missing group_no/short_id`);
+      return;
+    }
+
+    log?.info?.(`dmwork: THREAD.md ${earlyEventType} notification for ${groupNo}/${shortId}`);
+
+    // Resolve agentId from route/account (same pattern as group events below)
+    let threadAgentId = "";
+    try {
+      const _core = getDmworkRuntime();
+      const _cfg = _core.config.loadConfig() as OpenClawConfig;
+      const _route = _core.channel.routing.resolveAgentRoute({
+        cfg: _cfg, channel: "dmwork", accountId: account.accountId,
+        peer: { kind: "group", id: message.channel_id },
+      });
+      threadAgentId = _route?.agentId ?? "";
+    } catch {
+      // fallback to empty — handleThreadMdEvent only uses agentId for logging
+    }
+
+    handleThreadMdEvent({
+      agentId: threadAgentId,
+      accountId: account.accountId,
+      groupNo,
+      shortId,
+      eventType: earlyEventType,
+      apiUrl: account.config.apiUrl,
+      botToken: account.config.botToken ?? "",
+      log,
+    }).catch((err) => log?.error?.(`dmwork: handleThreadMdEvent failed: ${String(err)}`));
 
     return;
   }
@@ -1001,6 +1043,7 @@ export async function handleInboundMessage(params: {
 
   // --- GROUP.md: register group→account mapping and handle structured events ---
   if (isGroup && message.channel_id) {
+    const parentGroupNo = extractParentGroupNo(message.channel_id);
     // Resolve agentId for the group→account mapping
     try {
       const _core = getDmworkRuntime();
@@ -1009,9 +1052,9 @@ export async function handleInboundMessage(params: {
         cfg: _cfg, channel: "dmwork", accountId: account.accountId,
         peer: { kind: "group", id: message.channel_id },
       });
-      registerGroupAccount(message.channel_id, account.accountId, _route?.agentId);
+      registerGroupAccount(parentGroupNo, account.accountId, _route?.agentId);
     } catch {
-      registerGroupAccount(message.channel_id, account.accountId);
+      registerGroupAccount(parentGroupNo, account.accountId);
     }
 
     // Note: group_md_updated/deleted events are handled by the early handler above (line ~530)
@@ -1128,8 +1171,12 @@ export async function handleInboundMessage(params: {
   const originalMentionUids: string[] = (message.payload?.mention?.uids ?? []).filter((uid: string) => uid !== botUid);
 
     // Refresh group member cache if needed (on first message or after expiry)
+  // Use parent groupNo for member cache API calls (thread channelIds are compound)
+  const memberCacheGroupNo = isGroup
+    ? extractParentGroupNo(message.channel_id!)
+    : sessionId;
   if (isGroup) {
-    await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
+    await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
 
   // Compute isMentioned at top level so it's available for WasMentioned in finalizeInboundContext
@@ -1289,14 +1336,31 @@ export async function handleInboundMessage(params: {
 
   // Fire-and-forget: ensure GROUP.md is cached for this group
   if (isGroup && message.channel_id) {
+    const _parentGroupNo = extractParentGroupNo(message.channel_id);
+    const _threadShortId = extractThreadShortId(message.channel_id);
+
+    // Always ensure group-level GROUP.md is cached
     ensureGroupMd({
       agentId: route.agentId,
       accountId: account.accountId,
-      groupNo: message.channel_id,
+      groupNo: _parentGroupNo,
       apiUrl: account.config.apiUrl,
       botToken: account.config.botToken ?? "",
       log,
     }).catch((err) => log?.warn?.(`dmwork: [GROUP.md] ensureGroupMd failed: ${String(err)}`));
+
+    // For thread messages, also ensure thread-level THREAD.md is cached
+    if (_threadShortId) {
+      ensureThreadMd({
+        agentId: route.agentId,
+        accountId: account.accountId,
+        groupNo: _parentGroupNo,
+        shortId: _threadShortId,
+        apiUrl: account.config.apiUrl,
+        botToken: account.config.botToken ?? "",
+        log,
+      }).catch((err) => log?.warn?.(`dmwork: [THREAD.md] ensureThreadMd failed: ${String(err)}`));
+    }
   }
 
   const fromLabel = isGroup
@@ -1330,7 +1394,9 @@ export async function handleInboundMessage(params: {
   });
 
   // Inject GROUP.md as GroupSystemPrompt for group messages
-  const groupSystemPrompt = isGroup && groupMdCache ? groupMdCache.get(message.channel_id!)?.content : undefined;
+  const groupSystemPrompt = isGroup && groupMdCache && message.channel_id
+    ? groupMdCache.get(extractParentGroupNo(message.channel_id))?.content
+    : undefined;
 
   // Resolve sender display name — async fallback for DM users not in cache
   let senderName = resolveSenderName(message.from_uid, uidToNameMap);
@@ -1579,7 +1645,7 @@ export async function handleInboundMessage(params: {
 
             if (unresolvedNames.length > 0) {
               log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
-              const refreshed = await refreshGroupMemberCache({ sessionId, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
+              const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
               if (refreshed) {
                 for (const { name, index } of unresolvedNames) {
                   const uid = findUidByName(name, memberMap);

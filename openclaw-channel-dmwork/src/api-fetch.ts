@@ -412,6 +412,69 @@ export async function getGroupMd(params: {
   return await resp.json();
 }
 
+/**
+ * Get thread THREAD.md content (throws on non-2xx — used by agent-tools).
+ * GET /v1/bot/groups/{groupNo}/threads/{shortId}/md
+ *
+ * See also: group-md.ts `fetchThreadMdFromApi()` which returns null on error
+ * and is used for background cache refresh where failures are non-fatal.
+ */
+export async function getThreadMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ content: string; version: number; updated_at: string | null; updated_by: string }> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/md`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`getThreadMd failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return await resp.json();
+}
+
+/**
+ * Update thread THREAD.md content (requires bot_admin permission).
+ * PUT /v1/bot/groups/{groupNo}/threads/{shortId}/md
+ *
+ * Content size limit: 10,240 bytes (server-side GetGroupMdMaxSize()).
+ */
+export async function updateThreadMd(params: {
+  apiUrl: string;
+  botToken: string;
+  groupNo: string;
+  shortId: string;
+  content: string;
+  log?: { info?: (msg: string) => void; error?: (msg: string) => void };
+}): Promise<{ version: number }> {
+  const contentSize = new TextEncoder().encode(params.content).byteLength;
+  if (contentSize > 10240) {
+    throw new Error(`updateThreadMd: content size (${contentSize} bytes) exceeds maximum 10,240 bytes`);
+  }
+
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/groups/${encodeURIComponent(params.groupNo)}/threads/${encodeURIComponent(params.shortId)}/md`;
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {
+      ...DEFAULT_HEADERS,
+      Authorization: `Bearer ${params.botToken}`,
+    },
+    body: JSON.stringify({ content: params.content }),
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`updateThreadMd failed (${resp.status}): ${text || resp.statusText}`);
+  }
+  return await resp.json();
+}
+
 // Update GROUP.md content for a group (requires bot_admin permission)
 export async function updateGroupMd(params: {
   apiUrl: string;

@@ -15,10 +15,13 @@ vi.mock("./api-fetch.js", () => ({
   getVoiceContext: vi.fn(),
   updateVoiceContext: vi.fn(),
   deleteVoiceContext: vi.fn(),
+  getThreadMd: vi.fn(),
+  updateThreadMd: vi.fn(),
 }));
 
 vi.mock("./group-md.js", () => ({
   broadcastGroupMdUpdate: vi.fn(),
+  broadcastThreadMdUpdate: vi.fn(),
 }));
 
 import { createDmworkManagementTools } from "./agent-tools.js";
@@ -36,8 +39,10 @@ import {
   getVoiceContext,
   updateVoiceContext,
   deleteVoiceContext,
+  getThreadMd,
+  updateThreadMd,
 } from "./api-fetch.js";
-import { broadcastGroupMdUpdate } from "./group-md.js";
+import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 
 // Minimal config stub — mocked account functions don't inspect it
 const mockCfg = { channels: { dmwork: { botToken: "tok-secret" } } } as any;
@@ -833,6 +838,136 @@ describe("createDmworkManagementTools", () => {
       const result = await getExecute()("tc", { action: "voice-read" });
       const parsed = JSON.parse(result.content[0].text);
       expect(parsed.error).toContain("Unknown action");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // thread-md-read
+  // -----------------------------------------------------------------------
+  describe("execute — thread-md-read", () => {
+    it("returns THREAD.md content on success", async () => {
+      vi.mocked(getThreadMd).mockResolvedValue({
+        content: "# Sprint 42",
+        version: 2,
+        updated_at: "2026-04-13",
+        updated_by: "user1",
+      });
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.content).toBe("# Sprint 42");
+      expect(data.version).toBe(2);
+    });
+
+    it("returns error when groupId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("groupId");
+    });
+
+    it("returns error when shortId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("shortId");
+    });
+
+    it("returns empty content on 404 instead of throwing", async () => {
+      vi.mocked(getThreadMd).mockRejectedValue(new Error("getThreadMd failed (404): not found"));
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.content).toBe("");
+      expect(data.version).toBe(0);
+    });
+
+    it("returns error on non-404 API failure", async () => {
+      vi.mocked(getThreadMd).mockRejectedValue(new Error("getThreadMd failed (500): internal"));
+      const result = await getExecute()("tc", {
+        action: "thread-md-read",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("Failed to read thread THREAD.md");
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // thread-md-update
+  // -----------------------------------------------------------------------
+  describe("execute — thread-md-update", () => {
+    it("updates and calls broadcastThreadMdUpdate", async () => {
+      vi.mocked(updateThreadMd).mockResolvedValue({ version: 3 });
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        shortId: "thr1",
+        content: "# Updated thread",
+      });
+      const data = parseText(result);
+      expect(data.updated).toBe(true);
+      expect(data.version).toBe(3);
+      expect(broadcastThreadMdUpdate).toHaveBeenCalledWith({
+        accountId: "default",
+        groupNo: "g1",
+        shortId: "thr1",
+        content: "# Updated thread",
+        version: 3,
+      });
+    });
+
+    it("returns error when groupId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        shortId: "thr1",
+        content: "# New",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("groupId");
+    });
+
+    it("returns error when shortId is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        content: "# New",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("shortId");
+    });
+
+    it("returns error when content is missing", async () => {
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        shortId: "thr1",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("content");
+    });
+
+    it("returns error on API failure", async () => {
+      vi.mocked(updateThreadMd).mockRejectedValue(new Error("updateThreadMd failed (403): forbidden"));
+      const result = await getExecute()("tc", {
+        action: "thread-md-update",
+        groupId: "g1",
+        shortId: "thr1",
+        content: "# Fail",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("thread-md-update failed");
     });
   });
 });
