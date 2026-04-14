@@ -18,6 +18,7 @@ import { resolve } from "node:path";
  */
 function findGlobalOpenclaw(): string {
   // Strategy 1: use "which -a" (Unix) or "where" (Windows) to find all openclaw paths
+  // Skip: _npx (npx cache), npx-cache, node_modules (project-local devDependency)
   for (const cmd of ["which -a openclaw", "where openclaw"]) {
     try {
       const output = execSync(cmd, {
@@ -27,7 +28,12 @@ function findGlobalOpenclaw(): string {
       const paths = output
         .split(/\r?\n/)
         .map((p) => p.trim())
-        .filter((p) => p.length > 0 && !p.includes("_npx") && !p.includes("npx-cache"));
+        .filter((p) =>
+          p.length > 0 &&
+          !p.includes("_npx") &&
+          !p.includes("npx-cache") &&
+          !p.includes("node_modules"),
+        );
       if (paths.length > 0) return paths[0];
     } catch {
       // command not available on this platform
