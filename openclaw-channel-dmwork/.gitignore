@@ -4,5 +4,6 @@ dist/
 *.js.map
 *.d.ts
 !vitest.config.ts
+!bin/**
 .claude/
 CLAUDE.md
