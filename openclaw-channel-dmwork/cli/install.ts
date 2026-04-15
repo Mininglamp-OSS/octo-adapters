@@ -5,8 +5,11 @@
  * workspace, agent.md) is left to the user via `openclaw agents add`.
  */
 
+import { copyFileSync, existsSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   cleanupLegacyPlugin,
+  cleanupStalePluginDir,
   configGet,
   configGetJson,
   configSet,
@@ -14,6 +17,11 @@ import {
   gatewayRestart,
   pluginsInspect,
   pluginsInstall,
+  readConfigFromFile,
+  removeChannelConfigFromFile,
+  restoreChannelConfigToFile,
+  saveChannelConfigFromFile,
+  getConfigFilePathSafe,
 } from "./openclaw-cli.js";
 import {
   PLUGIN_ID,
@@ -38,14 +46,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   // 1. Pre-check
   ensureOpenClawCompat();
 
-  // 1.5. Clean up legacy "dmwork" plugin if present
-  const legacyActions = cleanupLegacyPlugin();
-  if (legacyActions.length > 0) {
-    console.log("Cleaned up legacy DMWork plugin:");
-    legacyActions.forEach((a) => console.log(`  ${a}`));
-  }
-
-  // 2. Plugin install (delegate to official CLI)
+  // 2. Safe install (handles legacy cleanup, deadlock, stale dirs)
   const inspect = pluginsInspect(PLUGIN_ID);
   if (inspect?.plugin && !opts.force) {
     console.log(
@@ -53,9 +54,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
     );
   } else {
     const spec = opts.dev ? `${PLUGIN_ID}@dev` : PLUGIN_ID;
-    console.log(`Installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
-    pluginsInstall(spec, false, opts.force);
-    console.log("Plugin installed successfully.");
+    runSafeInstall(spec, opts.force);
   }
 
   // 3. Legacy config migration + 4. DMWork config (unless --skip-config)
@@ -77,6 +76,121 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Safe install: handles legacy cleanup, config deadlock, stale dirs
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared install logic used by both install and update commands.
+ * Handles: legacy plugin cleanup, stale directory cleanup,
+ * config deadlock (chicken-egg problem), and --force retry.
+ */
+export function runSafeInstall(spec: string, force?: boolean, quiet?: boolean): void {
+  const log = quiet ? (() => {}) : console.log.bind(console);
+  // 1. Clean up legacy "dmwork" plugin
+  const legacyActions = cleanupLegacyPlugin();
+  if (legacyActions.length > 0) {
+    log("Cleaned up legacy DMWork plugin:");
+    legacyActions.forEach((a) => log(`  ${a}`));
+  }
+
+  // 2. Clean up stale openclaw-channel-dmwork directory
+  const staleActions = cleanupStalePluginDir();
+  if (staleActions.length > 0) {
+    log("Cleaned up stale plugin directory:");
+    staleActions.forEach((a) => log(`  ${a}`));
+  }
+
+  // 3. Handle config deadlock (chicken-egg problem):
+  //    channels.dmwork exists but plugin not installed → config validation blocks install
+  const cfg = readConfigFromFile();
+  const hasDmworkChannel = Boolean(cfg?.channels?.dmwork);
+  const hasStaleEntries = Boolean(cfg?.plugins?.entries?.["openclaw-channel-dmwork"]);
+  const hasStaleInstalls = Boolean(cfg?.plugins?.installs?.["openclaw-channel-dmwork"]);
+
+  // Only enter deadlock fix if plugin is genuinely not present:
+  // - inspect returns null AND plugin directory doesn't exist on disk
+  // This prevents treating "inspect anomaly + plugin still running" as deadlock
+  const inspectResult = pluginsInspect(PLUGIN_ID);
+  const extensionsDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const pluginDirExists = existsSync(resolve(extensionsDir, "openclaw-channel-dmwork"));
+  const pluginGenuinelyMissing = !inspectResult?.plugin && !pluginDirExists;
+  const needsDeadlockFix = hasDmworkChannel && pluginGenuinelyMissing;
+
+  if (needsDeadlockFix) {
+    log("Detected config deadlock (channels.dmwork exists but plugin not installed).");
+    log("Temporarily removing stale config to allow installation...");
+
+    // Backup full config file for disaster recovery
+    const configPath = getConfigFilePathSafe();
+    const backupPath = configPath + ".dmwork-upgrade-backup";
+    copyFileSync(configPath, backupPath);
+
+    // Save channels.dmwork for restore after install
+    const savedDmwork = saveChannelConfigFromFile();
+
+    // Temporarily remove stale config entries
+    removeChannelConfigFromFile();
+    if (hasStaleEntries) {
+      try {
+        const c = readConfigFromFile();
+        if (c?.plugins?.entries?.["openclaw-channel-dmwork"]) {
+          delete c.plugins.entries["openclaw-channel-dmwork"];
+          copyFileSync(configPath, configPath + ".bak");
+          writeFileSync(configPath, JSON.stringify(c, null, 2), "utf-8");
+        }
+      } catch { /* best effort */ }
+    }
+    if (hasStaleInstalls) {
+      try {
+        const c = readConfigFromFile();
+        if (c?.plugins?.installs?.["openclaw-channel-dmwork"]) {
+          delete c.plugins.installs["openclaw-channel-dmwork"];
+          writeFileSync(configPath, JSON.stringify(c, null, 2), "utf-8");
+        }
+      } catch { /* best effort */ }
+    }
+
+    try {
+      log(`Installing DMWork plugin...`);
+      pluginsInstall(spec, quiet, force);
+      log("Plugin installed successfully.");
+      // Success: patch channels.dmwork back (preserves new entries/installs from plugins install)
+      if (savedDmwork) {
+        restoreChannelConfigToFile(savedDmwork);
+        log("Restored channels.dmwork config.");
+      }
+    } catch (installErr) {
+      // Install failed: restore full config from backup to avoid leaving user worse off
+      console.error("Plugin install failed. Restoring original config...");
+      try {
+        copyFileSync(backupPath, configPath);
+        log("Original config restored from backup.");
+      } catch {
+        console.error(`Warning: Could not restore backup. Manual restore: cp ${backupPath} ${configPath}`);
+      }
+      throw installErr;
+    }
+  } else {
+    // Normal install path (no deadlock)
+    try {
+      log(`Installing DMWork plugin...`);
+      pluginsInstall(spec, quiet, force);
+      log("Plugin installed successfully.");
+    } catch (err) {
+      // If "already exists" → retry with --force
+      const msg = String(err);
+      if (msg.includes("already exists") && !force) {
+        log("Plugin directory exists, retrying with --force...");
+        pluginsInstall(spec, quiet, true);
+        log("Plugin installed successfully (forced).");
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Legacy config migration
 // ---------------------------------------------------------------------------
 
@@ -84,22 +198,14 @@ async function migrateLegacyConfig(): Promise<void> {
   const legacyToken = configGet("channels.dmwork.botToken");
   const accounts = configGetJson("channels.dmwork.accounts");
 
-  // Has top-level botToken but no accounts map → legacy flat config
   if (legacyToken && (!accounts || Object.keys(accounts).length === 0)) {
     console.log("Detected legacy flat config. Migrating to accounts model...");
-
-    // Copy token to accounts.default
     configSet("channels.dmwork.accounts.default.botToken", legacyToken);
-
-    // Copy apiUrl if present
     const legacyApiUrl = configGet("channels.dmwork.apiUrl");
     if (legacyApiUrl) {
       configSet("channels.dmwork.accounts.default.apiUrl", legacyApiUrl);
     }
-
-    // Remove top-level botToken (keep apiUrl as shared default)
     configUnset("channels.dmwork.botToken");
-
     console.log("Migrated legacy config to accounts.default.");
   }
 }
@@ -109,7 +215,6 @@ async function migrateLegacyConfig(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
-  // Collect accountId
   let accountId = opts.accountId;
   if (!accountId) {
     accountId = await prompt("Enter bot account ID (e.g. my_bot):");
@@ -126,7 +231,6 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Check if account already exists
   const existingToken = configGet(
     `channels.dmwork.accounts.${accountId}.botToken`,
   );
@@ -159,7 +263,6 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
     }
   }
 
-  // Collect botToken
   let botToken = opts.botToken;
   if (!botToken) {
     botToken = await prompt("Enter bot token (bf_...):");
@@ -169,7 +272,6 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Collect apiUrl
   let apiUrl = opts.apiUrl;
   if (!apiUrl) {
     apiUrl = await prompt("Enter API server URL:");
@@ -179,7 +281,6 @@ async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Write account config
   configSet(`channels.dmwork.accounts.${accountId}.botToken`, botToken);
   configSet(`channels.dmwork.accounts.${accountId}.apiUrl`, apiUrl);
   console.log(`Configured bot account: ${accountId}`);

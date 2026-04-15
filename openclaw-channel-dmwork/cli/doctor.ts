@@ -7,13 +7,17 @@
 
 import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   cleanupLegacyPlugin,
+  cleanupStaleStageDirectories,
   configGet,
   configGetJson,
   configSet,
   gatewayRestart,
   gatewayStatus,
+  getConfigFilePathSafe,
   pluginsInspect,
   pluginsInstall,
   removeChannelConfigFromFile,
@@ -98,11 +102,21 @@ export async function runDoctorChecks(params: {
   // Phase 1: Fatal config issues (OpenClaw CLI may not work)
   // =========================================================================
   if (!params.inProcess && fix) {
-    // Phase 0: Clean up legacy "dmwork" plugin
+    // Phase 0a: Clean up legacy "dmwork" plugin
     const legacyActions = cleanupLegacyPlugin();
     for (const action of legacyActions) {
       checks.push({
         name: "Legacy plugin cleanup",
+        status: "FIXED",
+        detail: action,
+      });
+    }
+
+    // Phase 0b: Clean up stale install stage directories (DMWork only, >10min old)
+    const stageActions = cleanupStaleStageDirectories();
+    for (const action of stageActions) {
+      checks.push({
+        name: "Stage directory cleanup",
         status: "FIXED",
         detail: action,
       });
@@ -164,7 +178,7 @@ export async function runDoctorChecks(params: {
   // =========================================================================
   const reader = params.reader ?? cliConfigReader;
 
-  // 1. Plugin installed
+  // 1. Plugin installed (with fallback for inspect failures)
   if (!params.inProcess) {
     const inspect = pluginsInspect(PLUGIN_ID);
     if (inspect?.plugin) {
@@ -173,30 +187,51 @@ export async function runDoctorChecks(params: {
         status: "PASS",
         detail: `v${inspect.plugin.version}`,
       });
-    } else if (fix) {
-      try {
-        pluginsInstall(PLUGIN_ID, true);
-        const after = pluginsInspect(PLUGIN_ID);
+    } else {
+      // Fallback: inspect failed, check if plugin directory exists on disk
+      const extensionsDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+      const pluginDir = resolve(extensionsDir, "openclaw-channel-dmwork");
+      let fallbackVersion: string | null = null;
+      if (existsSync(pluginDir)) {
+        try {
+          const pkg = JSON.parse(readFileSync(resolve(pluginDir, "package.json"), "utf-8"));
+          fallbackVersion = pkg.version ?? null;
+        } catch { /* no package.json */ }
+      }
+
+      if (fallbackVersion) {
+        // Plugin exists on disk but inspect can't see it
         checks.push({
           name: "Plugin installed",
-          status: "FIXED",
-          detail: `Installed v${after?.plugin?.version ?? "unknown"}`,
+          status: "WARN",
+          detail: `v${fallbackVersion} (directory exists but openclaw inspect failed — try: openclaw gateway restart)`,
         });
-      } catch {
+      } else if (fix) {
+        try {
+          const { runSafeInstall } = await import("./install.js");
+          runSafeInstall(PLUGIN_ID, true);
+          const after = pluginsInspect(PLUGIN_ID);
+          checks.push({
+            name: "Plugin installed",
+            status: "FIXED",
+            detail: `Installed v${after?.plugin?.version ?? "unknown"}`,
+          });
+        } catch {
+          checks.push({
+            name: "Plugin installed",
+            status: "FAIL",
+            detail: "Not installed (auto-install failed)",
+          });
+          return summarize(checks);
+        }
+      } else {
         checks.push({
           name: "Plugin installed",
           status: "FAIL",
-          detail: "Not installed (auto-install failed)",
+          detail: "Not installed",
         });
         return summarize(checks);
       }
-    } else {
-      checks.push({
-        name: "Plugin installed",
-        status: "FAIL",
-        detail: "Not installed",
-      });
-      return summarize(checks);
     }
   }
 

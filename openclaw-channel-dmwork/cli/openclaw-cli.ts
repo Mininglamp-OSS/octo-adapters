@@ -5,7 +5,7 @@
  */
 
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync, writeFileSync, copyFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -68,7 +68,12 @@ function expandHome(p: string): string {
 // ---------------------------------------------------------------------------
 
 export function getConfigFilePath(): string {
-  return execFileSync(OPENCLAW, ["config", "file"], { encoding: "utf-8" }).trim();
+  const out = execFileSync(OPENCLAW, ["config", "file"], { encoding: "utf-8" });
+  // openclaw may prepend warnings/box-drawing to stdout; extract the actual path
+  // The path is typically the last non-empty line containing openclaw.json
+  const lines = out.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  const pathLine = lines.find((l) => l.endsWith("openclaw.json")) ?? lines[lines.length - 1];
+  return pathLine ?? out.trim();
 }
 
 export function configGet(path: string): string | null {
@@ -134,12 +139,39 @@ export function configUnset(path: string): void {
 // Plugin helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Check if an error indicates an unsupported CLI option.
+ * Checks stderr/stdout/message across different Node versions and shells.
+ */
+function isUnsupportedOptionError(err: unknown): boolean {
+  const sources = [
+    (err as any)?.stderr?.toString?.(),
+    (err as any)?.stdout?.toString?.(),
+    (err as any)?.message,
+    String(err),
+  ];
+  return sources.some(
+    (s) => s && (/unknown option|unrecognized option/i.test(s)),
+  );
+}
+
 export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): void {
-  const args = ["plugins", "install", spec, "--dangerously-force-unsafe-install"];
+  const args = ["plugins", "install", spec];
   if (force) args.push("--force");
-  execFileSync(OPENCLAW, args, {
-    stdio: quiet ? ["pipe", "pipe", "pipe"] : "inherit",
-  });
+  const stdioOpt: import("node:child_process").StdioOptions = quiet
+    ? ["pipe", "pipe", "pipe"]
+    : "inherit";
+
+  // Try with --dangerously-force-unsafe-install first; fall back if unsupported
+  try {
+    execFileSync(OPENCLAW, [...args, "--dangerously-force-unsafe-install"], { stdio: stdioOpt });
+  } catch (err) {
+    if (isUnsupportedOptionError(err)) {
+      execFileSync(OPENCLAW, args, { stdio: stdioOpt });
+    } else {
+      throw err;
+    }
+  }
 }
 
 export function pluginsUpdate(id: string, quiet?: boolean): void {
@@ -248,7 +280,7 @@ export function getOpenClawVersion(): string | null {
  */
 export function saveChannelConfigFromFile(): Record<string, unknown> | null {
   try {
-    const configPath = expandHome(getConfigFilePath());
+    const configPath = getConfigFilePathSafe();
     const raw = readFileSync(configPath, "utf-8");
     const cfg = JSON.parse(raw);
     return cfg?.channels?.dmwork ?? null;
@@ -265,7 +297,7 @@ export function saveChannelConfigFromFile(): Record<string, unknown> | null {
 export function restoreChannelConfigToFile(
   dmworkConfig: Record<string, unknown>,
 ): void {
-  const configPath = expandHome(getConfigFilePath());
+  const configPath = getConfigFilePathSafe();
   // Backup
   copyFileSync(configPath, configPath + ".bak");
   // Read, merge, write
@@ -286,7 +318,7 @@ export function restoreChannelConfigToFile(
  * Falls back to the standard default when CLI is unavailable
  * (e.g. during uninstall when config validation fails).
  */
-function getConfigFilePathSafe(): string {
+export function getConfigFilePathSafe(): string {
   try {
     return expandHome(getConfigFilePath());
   } catch {
@@ -388,7 +420,6 @@ export function cleanupLegacyPlugin(): string[] {
 
     // Remove legacy directory
     try {
-      const { rmSync } = require("node:fs") as typeof import("node:fs");
       rmSync(legacyDir, { recursive: true, force: true });
       actions.push(`Removed legacy directory: ${legacyDir}`);
     } catch {
@@ -416,6 +447,94 @@ export function cleanupLegacyPlugin(): string[] {
   } catch {
     // best effort
   }
+
+  return actions;
+}
+
+/**
+ * Clean up stale openclaw-channel-dmwork directory that is not registered
+ * in plugins.installs (orphaned from a failed previous install).
+ *
+ * Only removes the directory if ALL of these are true:
+ * 1. The directory exists
+ * 2. pluginsInspect returns null (openclaw doesn't recognize it)
+ * 3. plugins.installs has no record for openclaw-channel-dmwork
+ */
+export function cleanupStalePluginDir(): string[] {
+  const actions: string[] = [];
+  const extensionsDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const pluginDir = resolve(extensionsDir, "openclaw-channel-dmwork");
+
+  if (!existsSync(pluginDir)) return actions;
+
+  // Check if openclaw recognizes it
+  const inspect = pluginsInspect("openclaw-channel-dmwork");
+  if (inspect?.plugin) return actions; // recognized, don't touch
+
+  // Check if it's in installs registry
+  try {
+    const cfg = readConfigFromFile();
+    if (cfg?.plugins?.installs?.["openclaw-channel-dmwork"]) {
+      return actions; // has install record, might just be inspect anomaly
+    }
+  } catch { /* proceed with cleanup */ }
+
+  // All three conditions met: exists + not recognized + not in registry → stale
+  try {
+    rmSync(pluginDir, { recursive: true, force: true });
+    actions.push(`Removed stale plugin directory: ${pluginDir}`);
+  } catch {
+    actions.push(`Warning: could not remove stale directory: ${pluginDir}`);
+  }
+
+  return actions;
+}
+
+/**
+ * Clean up stale openclaw-install-stage directories that belong to DMWork.
+ * Only removes directories that:
+ * 1. Match .openclaw-install-stage-* pattern
+ * 2. Are older than 10 minutes (not a current installation)
+ * 3. Contain a package.json with name "openclaw-channel-dmwork"
+ */
+export function cleanupStaleStageDirectories(): string[] {
+  const actions: string[] = [];
+  const extensionsDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+
+  try {
+    const entries = readdirSync(extensionsDir);
+    const now = Date.now();
+    const TEN_MINUTES = 10 * 60 * 1000;
+
+    for (const entry of entries) {
+      if (!entry.startsWith(".openclaw-install-stage-")) continue;
+      const stagePath = resolve(extensionsDir, entry);
+      try {
+        const stat = statSync(stagePath);
+        if (!stat.isDirectory()) continue;
+        if (now - stat.mtimeMs < TEN_MINUTES) continue; // too recent, skip
+
+        // Check if it's DMWork's stage directory
+        const pkgPath = resolve(stagePath, "package", "package.json");
+        const altPkgPath = resolve(stagePath, "package.json");
+        let isDmwork = false;
+        for (const p of [pkgPath, altPkgPath]) {
+          try {
+            const pkg = JSON.parse(readFileSync(p, "utf-8"));
+            if (pkg.name === "openclaw-channel-dmwork") {
+              isDmwork = true;
+              break;
+            }
+          } catch { /* try next */ }
+        }
+
+        if (!isDmwork) continue; // not ours, don't touch
+
+        rmSync(stagePath, { recursive: true, force: true });
+        actions.push(`Removed stale stage directory: ${entry}`);
+      } catch { /* skip this entry */ }
+    }
+  } catch { /* best effort */ }
 
   return actions;
 }
