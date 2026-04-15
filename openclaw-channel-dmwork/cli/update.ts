@@ -6,11 +6,11 @@
  */
 
 import {
-  cleanupLegacyPlugin,
   gatewayRestart,
   pluginsInspect,
   pluginsInstall,
 } from "./openclaw-cli.js";
+import { runSafeInstall } from "./install.js";
 import { PLUGIN_ID, ensureOpenClawCompat } from "./utils.js";
 import { execFileSync } from "node:child_process";
 
@@ -38,21 +38,29 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
 
   const inspect = pluginsInspect(PLUGIN_ID);
   if (!inspect?.plugin) {
-    if (opts.json) {
-      console.log(JSON.stringify({ success: false, error: "not_installed" }));
-    } else {
-      console.error("DMWork plugin is not installed. Use 'install' first.");
-    }
-    process.exit(1);
-  }
-
-  // Clean up legacy "dmwork" plugin AFTER confirming new version exists
-  const legacyActions = cleanupLegacyPlugin();
-  if (legacyActions.length > 0) {
+    // Plugin not found — use full safe install path (handles deadlock, stale dirs, legacy cleanup)
     if (!opts.json) {
-      console.log("Cleaned up legacy DMWork plugin:");
-      legacyActions.forEach((a) => console.log(`  ${a}`));
+      console.log("DMWork plugin not found. Attempting install...");
     }
+    const tag = opts.dev ? "dev" : "latest";
+    runSafeInstall(`${PLUGIN_ID}@${tag}`, true, opts.json);
+
+    if (!opts.json) {
+      console.log("Restarting gateway...");
+    }
+    if (!gatewayRestart(opts.json)) {
+      if (!opts.json) {
+        console.log("Warning: Gateway restart failed. Run 'openclaw gateway restart' manually.");
+      }
+    }
+
+    const after = pluginsInspect(PLUGIN_ID);
+    if (opts.json) {
+      console.log(JSON.stringify({ success: true, previousVersion: null, currentVersion: after?.plugin?.version ?? "unknown" }));
+    } else {
+      console.log(`Installed: v${after?.plugin?.version ?? "unknown"}`);
+    }
+    return;
   }
 
   const currentVersion = inspect.plugin.version;
