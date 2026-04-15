@@ -156,19 +156,34 @@ function isUnsupportedOptionError(err: unknown): boolean {
 }
 
 export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): void {
-  const args = ["plugins", "install", spec];
-  if (force) args.push("--force");
+  const baseArgs = ["plugins", "install", spec];
   const stdioOpt: import("node:child_process").StdioOptions = quiet
     ? ["pipe", "pipe", "pipe"]
     : "inherit";
 
-  // Try with --dangerously-force-unsafe-install first; fall back if unsupported
-  try {
-    execFileSync(OPENCLAW, [...args, "--dangerously-force-unsafe-install"], { stdio: stdioOpt });
-  } catch (err) {
-    if (isUnsupportedOptionError(err)) {
-      execFileSync(OPENCLAW, args, { stdio: stdioOpt });
-    } else {
+  // 3-layer degradation for old openclaw versions:
+  //   1. --force --dangerously-force-unsafe-install  (newest openclaw)
+  //   2. --force                                     (mid-age openclaw)
+  //   3. bare install                                (oldest openclaw)
+  const attempts: string[][] = force
+    ? [
+        [...baseArgs, "--force", "--dangerously-force-unsafe-install"],
+        [...baseArgs, "--force"],
+        baseArgs,
+      ]
+    : [
+        [...baseArgs, "--dangerously-force-unsafe-install"],
+        baseArgs,
+      ];
+
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      execFileSync(OPENCLAW, attempts[i], { stdio: stdioOpt });
+      return;
+    } catch (err) {
+      if (isUnsupportedOptionError(err) && i < attempts.length - 1) {
+        continue; // try next degradation level
+      }
       throw err;
     }
   }
