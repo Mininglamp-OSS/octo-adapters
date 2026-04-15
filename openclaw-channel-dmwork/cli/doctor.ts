@@ -10,11 +10,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  cleanupBrokenInstall,
   cleanupLegacyPlugin,
   cleanupStaleStageDirectories,
   configGet,
   configGetJson,
   configSet,
+  detectScenario,
   gatewayRestart,
   gatewayStatus,
   getConfigFilePathSafe,
@@ -208,8 +210,20 @@ export async function runDoctorChecks(params: {
         });
       } else if (fix) {
         try {
-          const { runSafeInstall } = await import("./install.js");
-          runSafeInstall(PLUGIN_ID, true);
+          // Use scenario-aware install (handles legacy, deadlock, broken)
+          const scenario = detectScenario();
+          if (scenario === "legacy") {
+            const { runLegacyMigrationForUpdate } = await import("./install.js");
+            runLegacyMigrationForUpdate(PLUGIN_ID, true);
+          } else if (scenario === "deadlock") {
+            const { runDeadlockRepairForUpdate } = await import("./install.js");
+            runDeadlockRepairForUpdate(PLUGIN_ID, true);
+          } else if (scenario === "broken") {
+            cleanupBrokenInstall();
+            pluginsInstall(PLUGIN_ID, true);
+          } else {
+            pluginsInstall(PLUGIN_ID, true);
+          }
           const after = pluginsInspect(PLUGIN_ID);
           checks.push({
             name: "Plugin installed",
