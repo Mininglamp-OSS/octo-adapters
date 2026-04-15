@@ -305,7 +305,7 @@ export function restoreChannelConfigToFile(
   const cfg = JSON.parse(raw);
   if (!cfg.channels) cfg.channels = {};
   cfg.channels.dmwork = dmworkConfig;
-  writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+  writeConfigAtomic(cfg);
 }
 
 /**
@@ -330,11 +330,10 @@ export function removeChannelConfigFromFile(): void {
   try {
     const configPath = getConfigFilePathSafe();
     copyFileSync(configPath, configPath + ".bak");
-    const raw = readFileSync(configPath, "utf-8");
-    const cfg = JSON.parse(raw);
-    if (cfg.channels?.dmwork) {
+    const cfg = readConfigFromFile();
+    if (cfg?.channels?.dmwork) {
       delete cfg.channels.dmwork;
-      writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+      writeConfigAtomic(cfg);
     }
   } catch {
     // best effort
@@ -375,7 +374,7 @@ export function removeOrphanedBindingsFromFile(
       // Keep only if accountId is in valid list (or no accountId specified)
       return !b.match.accountId || validAccountIds.includes(b.match.accountId);
     });
-    writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+    writeConfigAtomic(cfg);
   } catch {
     // best effort
   }
@@ -441,7 +440,7 @@ export function cleanupLegacyPlugin(): string[] {
       if (Array.isArray(cfg.plugins?.allow)) {
         cfg.plugins.allow = cfg.plugins.allow.filter((id: string) => id !== LEGACY_PLUGIN_ID);
       }
-      writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+      writeConfigAtomic(cfg);
       actions.push(`Cleaned legacy entries from openclaw.json`);
     }
   } catch {

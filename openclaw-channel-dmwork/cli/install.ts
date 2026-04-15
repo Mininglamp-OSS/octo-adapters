@@ -232,10 +232,11 @@ function runDeadlockRepair(spec: string, quiet: boolean, skipConfig?: boolean): 
   const restoredCfg = readConfigFromFile();
   if (restoredCfg?.channels?.dmwork) {
     try { rmSync(backupPath, { force: true }); } catch { /* best effort */ }
+    console.log("  Deadlock repaired!");
   } else {
-    console.log("  Warning: channels.dmwork restore may not have succeeded. Keeping backup for safety.");
+    // Config restore failed — plugin is installed but bot config is missing
+    throw new Error("Deadlock repair incomplete: plugin installed but channels.dmwork could not be restored. Backup kept at " + backupPath);
   }
-  console.log("  Deadlock repaired!");
 }
 
 // ---------------------------------------------------------------------------
