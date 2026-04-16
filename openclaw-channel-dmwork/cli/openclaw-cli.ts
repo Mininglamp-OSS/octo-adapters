@@ -76,12 +76,35 @@ export function getConfigFilePath(): string {
   return pathLine ?? out.trim();
 }
 
+/**
+ * Strip OpenClaw stdout noise (banner, plugin log lines, timestamps).
+ * Old OpenClaw versions mix these into stdout alongside the actual value.
+ */
+function stripStdoutNoise(raw: string): string {
+  return raw
+    .split("\n")
+    .filter((line) => {
+      const t = line.trim();
+      if (!t) return false;
+      // Banner: 🦞 OpenClaw ...
+      if (/^[\u{1F980}\u{1F600}-\u{1FAFF}]/u.test(t)) return false;
+      // Plugin log: [plugins] ..., [dmwork] ...
+      if (/^\[[\w-]+\]/.test(t)) return false;
+      // Timestamped log: 17:37:26 [plugins] ...
+      if (/^\d{1,2}:\d{2}(:\d{2})?\s*\[/.test(t)) return false;
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
 export function configGet(path: string): string | null {
   try {
-    const val = execFileSync(OPENCLAW, ["config", "get", path], {
+    const raw = execFileSync(OPENCLAW, ["config", "get", path], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    });
+    const val = stripStdoutNoise(raw);
     return val === "" ? null : val;
   } catch {
     return null;
@@ -100,7 +123,17 @@ export function configGetJson(path: string): any {
       ? Math.min(jsonStart, arrStart)
       : Math.max(jsonStart, arrStart);
     if (start < 0) return null;
-    return JSON.parse(out.slice(start));
+    // Find matching end bracket to avoid trailing log noise breaking JSON.parse
+    const openChar = out[start];
+    const closeChar = openChar === "{" ? "}" : "]";
+    let depth = 0;
+    let end = -1;
+    for (let i = start; i < out.length; i++) {
+      if (out[i] === openChar) depth++;
+      else if (out[i] === closeChar) { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end < 0) return null;
+    return JSON.parse(out.slice(start, end + 1));
   } catch {
     return null;
   }
@@ -374,11 +407,20 @@ export function gatewayStatus(): { running: boolean } {
     });
     const jsonStart = out.indexOf("{");
     if (jsonStart < 0) return { running: false };
-    const data = JSON.parse(out.slice(jsonStart));
-    // Real structure: { service.runtime.status: "running", health.healthy: true }
+    // Find matching } to avoid trailing log noise
+    let depth = 0;
+    let end = -1;
+    for (let i = jsonStart; i < out.length; i++) {
+      if (out[i] === "{") depth++;
+      else if (out[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end < 0) return { running: false };
+    const data = JSON.parse(out.slice(jsonStart, end + 1));
     const runtimeRunning = data.service?.runtime?.status === "running";
     const healthy = data.health?.healthy === true;
-    return { running: runtimeRunning || healthy };
+    // Fallback: port is busy with an openclaw-gateway process = gateway is running
+    const portBusy = data.port?.status === "busy";
+    return { running: runtimeRunning || healthy || portBusy };
   } catch {
     return { running: false };
   }
