@@ -56,7 +56,16 @@ npx -y openclaw-channel-dmwork doctor --account-id <Account ID>
 
 ### 7. 联通确认
 
-告诉用户："配置完成！请在 DMWork 中给 bot 发一条消息测试是否联通。"
+调用 `POST <API Server>/v1/bot/register`（Authorization: Bearer <Bot Token>），从返回的 `owner_uid` 获取创建者 UID。
+然后给创建者发一条私聊消息：
+
+```
+POST <API Server>/v1/bot/sendMessage
+Authorization: Bearer <Bot Token>
+Body: {"channel_id": "<owner_uid>", "channel_type": 1, "payload": {"type": 1, "content": "你好！我是 <Bot Name>，已成功上线 👋"}}
+```
+
+如果 register 或 sendMessage 失败，告诉用户："请在 DMWork 中给 bot 发一条消息测试是否联通。"
 
 ### 8. 记住 Bot API 文档
 
