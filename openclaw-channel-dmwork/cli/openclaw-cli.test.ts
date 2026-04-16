@@ -8,7 +8,14 @@ vi.mock("node:child_process", () => ({
 }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, existsSync: vi.fn(() => false) };
+  return {
+    ...actual,
+    existsSync: vi.fn(() => false),
+    readFileSync: vi.fn(() => "{}"),
+    writeFileSync: vi.fn(),
+    copyFileSync: vi.fn(),
+    renameSync: vi.fn(),
+  };
 });
 
 const mockExecFileSync = vi.mocked(execFileSync);
@@ -337,5 +344,113 @@ describe("pluginsUpdateCompat", () => {
     });
     expect(() => pluginsUpdateCompat("test-plugin", "latest", true)).toThrow("EACCES");
     expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolvePluginState (inspect + fallback)
+// ---------------------------------------------------------------------------
+
+describe("resolvePluginState", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should return inspect data when plugins inspect succeeds", async () => {
+    const { resolvePluginState } = await loadModule();
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        return JSON.stringify({
+          plugin: { id: "openclaw-channel-dmwork", version: "0.5.21", enabled: true },
+          install: { source: "npm", version: "0.5.21", installPath: "~/.openclaw/extensions/openclaw-channel-dmwork" },
+        });
+      }
+      return "";
+    });
+    const state = resolvePluginState("openclaw-channel-dmwork");
+    expect(state.installed).toBe(true);
+    expect(state.version).toBe("0.5.21");
+    expect(state.source).toBe("inspect");
+    expect(state.enabled).toBe(true);
+  });
+
+  it("should fallback to config+dir when inspect fails (old OpenClaw)", async () => {
+    const { resolvePluginState } = await loadModule();
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    // readConfigFromFile reads the config file
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { "openclaw-channel-dmwork": { enabled: true } },
+        installs: { "openclaw-channel-dmwork": { version: "0.5.21", installPath: "~/.openclaw/extensions/openclaw-channel-dmwork" } },
+      },
+    }));
+    vi.mocked(existsSync).mockReturnValue(true);
+
+    const state = resolvePluginState("openclaw-channel-dmwork");
+    expect(state.installed).toBe(true);
+    expect(state.version).toBe("0.5.21");
+    expect(state.source).toBe("fallback");
+    expect(state.enabled).toBe(true);
+    expect(state.installPath).toBe("~/.openclaw/extensions/openclaw-channel-dmwork");
+  });
+
+  it("should read version from package.json when installs record has no version", async () => {
+    const { resolvePluginState } = await loadModule();
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (argsArr[0] === "plugins") throw new Error("unknown command");
+      return "";
+    });
+    vi.mocked(readFileSync).mockImplementation((p) => {
+      const path = String(p);
+      if (path.endsWith("openclaw.json")) {
+        return JSON.stringify({
+          plugins: {
+            entries: { "openclaw-channel-dmwork": { enabled: true } },
+            installs: { "openclaw-channel-dmwork": { installPath: "~/.openclaw/extensions/openclaw-channel-dmwork" } },
+          },
+        });
+      }
+      if (path.endsWith("package.json")) {
+        return JSON.stringify({ version: "0.5.20" });
+      }
+      return "{}";
+    });
+    vi.mocked(existsSync).mockReturnValue(true);
+
+    const state = resolvePluginState("openclaw-channel-dmwork");
+    expect(state.installed).toBe(true);
+    expect(state.version).toBe("0.5.20");
+    expect(state.source).toBe("fallback");
+  });
+
+  it("should return not installed when nothing exists", async () => {
+    const { resolvePluginState } = await loadModule();
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (argsArr[0] === "plugins") throw new Error("unknown command");
+      return "";
+    });
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({}));
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    const state = resolvePluginState("openclaw-channel-dmwork");
+    expect(state.installed).toBe(false);
+    expect(state.version).toBeNull();
+    expect(state.source).toBe("fallback");
   });
 });

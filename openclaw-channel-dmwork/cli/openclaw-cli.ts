@@ -255,6 +255,67 @@ export function pluginsInspect(id: string): PluginInspectResult | null {
 }
 
 // ---------------------------------------------------------------------------
+// Unified plugin state detection (inspect + fallback)
+// ---------------------------------------------------------------------------
+
+export interface PluginResolvedState {
+  installed: boolean;
+  enabled: boolean | null;
+  version: string | null;
+  installPath: string | null;
+  source: "inspect" | "fallback";
+}
+
+/**
+ * Resolve plugin install state. Uses `plugins inspect` when available,
+ * falls back to config entries + directory + package.json for old OpenClaw
+ * versions that don't support `plugins inspect`.
+ */
+export function resolvePluginState(id: string): PluginResolvedState {
+  // Try inspect first
+  const inspect = pluginsInspect(id);
+  if (inspect?.plugin) {
+    return {
+      installed: true,
+      enabled: inspect.plugin.enabled,
+      version: inspect.plugin.version,
+      installPath: inspect.install?.installPath ?? null,
+      source: "inspect",
+    };
+  }
+
+  // Fallback: check config + filesystem
+  const cfg = readConfigFromFile();
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const pluginDir = resolve(extDir, id);
+
+  const hasDir = existsSync(pluginDir);
+  const entries = cfg?.plugins?.entries?.[id];
+  const installs = cfg?.plugins?.installs?.[id];
+  const hasEntry = Boolean(entries);
+  const hasInstall = Boolean(installs);
+  const installed = hasEntry || hasInstall || hasDir;
+
+  if (!installed) {
+    return { installed: false, enabled: null, version: null, installPath: null, source: "fallback" };
+  }
+
+  // Resolve version: installs record > package.json on disk
+  let version: string | null = installs?.version ?? null;
+  if (!version && hasDir) {
+    try {
+      const pkg = JSON.parse(readFileSync(resolve(pluginDir, "package.json"), "utf-8"));
+      version = pkg.version ?? null;
+    } catch { /* no package.json */ }
+  }
+
+  const enabled = entries?.enabled ?? null;
+  const installPath = installs?.installPath ?? (hasDir ? `~/.openclaw/extensions/${id}` : null);
+
+  return { installed, enabled, version, installPath, source: "fallback" };
+}
+
+// ---------------------------------------------------------------------------
 // Gateway helpers
 // ---------------------------------------------------------------------------
 

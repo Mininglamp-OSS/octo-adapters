@@ -25,6 +25,7 @@ import {
   removeChannelConfigFromFile,
   removeOrphanedBindingsFromFile,
   readConfigFromFile,
+  resolvePluginState,
 } from "./openclaw-cli.js";
 import { PLUGIN_ID, RECOMMENDED_DM_SCOPE } from "./utils.js";
 
@@ -159,72 +160,56 @@ export async function runDoctorChecks(params: {
   // =========================================================================
   const reader = params.reader ?? cliConfigReader;
 
-  // 1. Plugin installed (with fallback for inspect failures)
+  // 1. Plugin installed (using unified resolvePluginState for inspect + fallback)
+  let pluginState: import("./openclaw-cli.js").PluginResolvedState | null = null;
   if (!params.inProcess) {
-    const inspect = pluginsInspect(PLUGIN_ID);
-    if (inspect?.plugin) {
+    pluginState = resolvePluginState(PLUGIN_ID);
+    if (pluginState.installed) {
+      const versionLabel = pluginState.version ? `v${pluginState.version}` : "version unknown";
+      const sourceNote = pluginState.source === "fallback"
+        ? " (fallback; plugins inspect unsupported on this OpenClaw version)"
+        : "";
       checks.push({
         name: "Plugin installed",
         status: "PASS",
-        detail: `v${inspect.plugin.version}`,
+        detail: `${versionLabel}${sourceNote}`,
       });
-    } else {
-      // Fallback: inspect failed, check if plugin directory exists on disk
-      const extensionsDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
-      const pluginDir = resolve(extensionsDir, "openclaw-channel-dmwork");
-      let fallbackVersion: string | null = null;
-      if (existsSync(pluginDir)) {
-        try {
-          const pkg = JSON.parse(readFileSync(resolve(pluginDir, "package.json"), "utf-8"));
-          fallbackVersion = pkg.version ?? null;
-        } catch { /* no package.json */ }
-      }
-
-      if (fallbackVersion) {
-        // Plugin exists on disk but inspect can't see it
+    } else if (fix) {
+      try {
+        const scenario = detectScenario();
+        if (scenario === "legacy") {
+          const { runLegacyMigrationForUpdate } = await import("./install.js");
+          runLegacyMigrationForUpdate(PLUGIN_ID, true);
+        } else if (scenario === "deadlock") {
+          const { runDeadlockRepairForUpdate } = await import("./install.js");
+          runDeadlockRepairForUpdate(PLUGIN_ID, true);
+        } else if (scenario === "broken") {
+          cleanupBrokenInstall();
+          pluginsInstall(PLUGIN_ID, true);
+        } else {
+          pluginsInstall(PLUGIN_ID, true);
+        }
+        pluginState = resolvePluginState(PLUGIN_ID);
         checks.push({
           name: "Plugin installed",
-          status: "WARN",
-          detail: `v${fallbackVersion} (directory exists but openclaw inspect failed — try: openclaw gateway restart)`,
+          status: "FIXED",
+          detail: `Installed v${pluginState.version ?? "unknown"}`,
         });
-      } else if (fix) {
-        try {
-          // Use scenario-aware install (handles legacy, deadlock, broken)
-          const scenario = detectScenario();
-          if (scenario === "legacy") {
-            const { runLegacyMigrationForUpdate } = await import("./install.js");
-            runLegacyMigrationForUpdate(PLUGIN_ID, true);
-          } else if (scenario === "deadlock") {
-            const { runDeadlockRepairForUpdate } = await import("./install.js");
-            runDeadlockRepairForUpdate(PLUGIN_ID, true);
-          } else if (scenario === "broken") {
-            cleanupBrokenInstall();
-            pluginsInstall(PLUGIN_ID, true);
-          } else {
-            pluginsInstall(PLUGIN_ID, true);
-          }
-          const after = pluginsInspect(PLUGIN_ID);
-          checks.push({
-            name: "Plugin installed",
-            status: "FIXED",
-            detail: `Installed v${after?.plugin?.version ?? "unknown"}`,
-          });
-        } catch {
-          checks.push({
-            name: "Plugin installed",
-            status: "FAIL",
-            detail: "Not installed (auto-install failed)",
-          });
-          return summarize(checks);
-        }
-      } else {
+      } catch {
         checks.push({
           name: "Plugin installed",
           status: "FAIL",
-          detail: "Not installed",
+          detail: "Not installed (auto-install failed)",
         });
         return summarize(checks);
       }
+    } else {
+      checks.push({
+        name: "Plugin installed",
+        status: "FAIL",
+        detail: "Not installed",
+      });
+      return summarize(checks);
     }
   }
 
@@ -247,18 +232,18 @@ export async function runDoctorChecks(params: {
     }
   }
 
-  // 3. node_modules check
+  // 3. node_modules check (uses installPath from resolvePluginState)
   if (!params.inProcess) {
-    const inspect = pluginsInspect(PLUGIN_ID);
-    const installPath = inspect?.install?.installPath;
+    const installPath = pluginState?.installPath;
     if (installPath) {
-      const nmPath = installPath.replace(/^~/, process.env.HOME ?? "") + "/node_modules";
+      const resolvedPath = installPath.replace(/^~/, process.env.HOME ?? "");
+      const nmPath = resolvedPath + "/node_modules";
       if (existsSync(nmPath)) {
         checks.push({ name: "Dependencies", status: "PASS", detail: "node_modules exists" });
       } else if (fix) {
         try {
           execFileSync("npm", ["install", "--production", "--ignore-scripts"], {
-            cwd: installPath.replace(/^~/, process.env.HOME ?? ""),
+            cwd: resolvedPath,
             stdio: ["pipe", "pipe", "pipe"],
           });
           checks.push({ name: "Dependencies", status: "FIXED", detail: "npm install completed" });
