@@ -731,9 +731,10 @@ export function cleanupBrokenInstall(): string[] {
   const hasEntries = Boolean(cfg?.plugins?.entries?.["openclaw-channel-dmwork"]);
   const hasInstalls = Boolean(cfg?.plugins?.installs?.["openclaw-channel-dmwork"]);
 
-  // "Healthy" requires all three (or inspect OK). Anything less is broken.
+  // Use same healthy definition as detectScenario(): inspect OK OR all 3 artifacts present
   const inspectOk = Boolean(pluginsInspect("openclaw-channel-dmwork")?.plugin);
-  if (inspectOk) return actions; // Actually healthy, nothing to clean
+  const isHealthy = inspectOk || (hasDir && hasEntries && hasInstalls);
+  if (isHealthy) return actions; // Actually healthy, nothing to clean
 
   // Remove directory if it exists (orphan or partial)
   if (hasDir) {
