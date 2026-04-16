@@ -189,3 +189,153 @@ describe("findGlobalOpenclaw (via module load)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// pluginsInstall degradation
+// ---------------------------------------------------------------------------
+
+describe("pluginsInstall 3-layer degradation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should succeed on first attempt (newest openclaw)", async () => {
+    const { pluginsInstall } = await loadModule();
+    mockExecFileSync.mockReturnValue("");
+    pluginsInstall("test-plugin", true, true);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileSync.mock.calls[0][1]).toContain("--dangerously-force-unsafe-install");
+    expect(mockExecFileSync.mock.calls[0][1]).toContain("--force");
+  });
+
+  it("should degrade from --dangerously-force-unsafe-install to --force", async () => {
+    const { pluginsInstall } = await loadModule();
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        const err = new Error("error: unknown option '--dangerously-force-unsafe-install'");
+        (err as any).stderr = Buffer.from("error: unknown option '--dangerously-force-unsafe-install'");
+        throw err;
+      })
+      .mockReturnValue("");
+    pluginsInstall("test-plugin", true, true);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    expect(mockExecFileSync.mock.calls[1][1]).toContain("--force");
+    expect(mockExecFileSync.mock.calls[1][1]).not.toContain("--dangerously-force-unsafe-install");
+  });
+
+  it("should degrade to bare install when --force also unsupported", async () => {
+    const { pluginsInstall } = await loadModule();
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        const err = new Error("unknown option");
+        (err as any).stderr = Buffer.from("error: unknown option '--dangerously-force-unsafe-install'");
+        throw err;
+      })
+      .mockImplementationOnce(() => {
+        const err = new Error("unknown option");
+        (err as any).stderr = Buffer.from("error: unknown option '--force'");
+        throw err;
+      })
+      .mockReturnValue("");
+    pluginsInstall("test-plugin", true, true);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(3);
+    const lastArgs = mockExecFileSync.mock.calls[2][1] as string[];
+    expect(lastArgs).not.toContain("--force");
+    expect(lastArgs).not.toContain("--dangerously-force-unsafe-install");
+    expect(lastArgs).toContain("test-plugin");
+  });
+
+  it("should throw non-option errors without degrading", async () => {
+    const { pluginsInstall } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("network error");
+      (err as any).stderr = Buffer.from("ECONNREFUSED");
+      throw err;
+    });
+    expect(() => pluginsInstall("test-plugin", true)).toThrow("network error");
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("should work without force (2-layer degradation)", async () => {
+    const { pluginsInstall } = await loadModule();
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        const err = new Error("unknown option");
+        (err as any).stderr = Buffer.from("error: unknown option '--dangerously-force-unsafe-install'");
+        throw err;
+      })
+      .mockReturnValue("");
+    pluginsInstall("test-plugin", true);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    const lastArgs = mockExecFileSync.mock.calls[1][1] as string[];
+    expect(lastArgs).not.toContain("--force");
+    expect(lastArgs).not.toContain("--dangerously-force-unsafe-install");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pluginsUpdateCompat precise fallback
+// ---------------------------------------------------------------------------
+
+describe("pluginsUpdateCompat", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should succeed when plugins update works", async () => {
+    const { pluginsUpdateCompat } = await loadModule();
+    mockExecFileSync.mockReturnValue("");
+    pluginsUpdateCompat("test-plugin", "latest", true);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileSync.mock.calls[0][1]).toContain("update");
+  });
+
+  it("should fallback to install when update reports not installed", async () => {
+    const { pluginsUpdateCompat } = await loadModule();
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        const err = new Error("plugin not found");
+        (err as any).stderr = Buffer.from("plugin not found");
+        throw err;
+      })
+      .mockReturnValue(""); // install succeeds
+    pluginsUpdateCompat("test-plugin", "latest", true);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    expect(mockExecFileSync.mock.calls[1][1]).toContain("install");
+  });
+
+  it("should fallback to install when update command is unsupported", async () => {
+    const { pluginsUpdateCompat } = await loadModule();
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        const err = new Error("unknown option");
+        (err as any).stderr = Buffer.from("error: unknown option 'update'");
+        throw err;
+      })
+      .mockReturnValue("");
+    pluginsUpdateCompat("test-plugin", "latest", true);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+  });
+
+  it("should throw network errors without fallback", async () => {
+    const { pluginsUpdateCompat } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("ECONNREFUSED");
+      (err as any).stderr = Buffer.from("connect ECONNREFUSED 127.0.0.1:443");
+      throw err;
+    });
+    expect(() => pluginsUpdateCompat("test-plugin", "latest", true)).toThrow("ECONNREFUSED");
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("should throw permission errors without fallback", async () => {
+    const { pluginsUpdateCompat } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("EACCES");
+      (err as any).stderr = Buffer.from("EACCES: permission denied");
+      throw err;
+    });
+    expect(() => pluginsUpdateCompat("test-plugin", "latest", true)).toThrow("EACCES");
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+});

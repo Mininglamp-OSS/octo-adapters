@@ -155,11 +155,20 @@ function isUnsupportedOptionError(err: unknown): boolean {
   );
 }
 
+function isPluginNotInstalledError(err: unknown): boolean {
+  const sources = [
+    (err as any)?.stderr?.toString?.(),
+    (err as any)?.stdout?.toString?.(),
+    (err as any)?.message,
+    String(err),
+  ];
+  return sources.some(
+    (s) => s && (/not installed|no such plugin|plugin not found/i.test(s)),
+  );
+}
+
 export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): void {
   const baseArgs = ["plugins", "install", spec];
-  const stdioOpt: import("node:child_process").StdioOptions = quiet
-    ? ["pipe", "pipe", "pipe"]
-    : "inherit";
 
   // 3-layer degradation for old openclaw versions:
   //   1. --force --dangerously-force-unsafe-install  (newest openclaw)
@@ -176,13 +185,27 @@ export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): 
         baseArgs,
       ];
 
+  // Always pipe to capture stderr for degradation detection.
+  // stdio: "inherit" causes Node to omit stderr from the error object,
+  // making isUnsupportedOptionError() unable to detect "unknown option".
   for (let i = 0; i < attempts.length; i++) {
     try {
-      execFileSync(OPENCLAW, attempts[i], { stdio: stdioOpt });
+      const result = execFileSync(OPENCLAW, attempts[i], {
+        stdio: ["pipe", "pipe", "pipe"],
+        encoding: "utf-8",
+      });
+      if (!quiet && result) process.stdout.write(result);
       return;
     } catch (err) {
       if (isUnsupportedOptionError(err) && i < attempts.length - 1) {
         continue; // try next degradation level
+      }
+      // Final attempt failed: replay captured output, then throw
+      if (!quiet) {
+        const stdout = (err as any)?.stdout?.toString?.();
+        const stderr = (err as any)?.stderr?.toString?.();
+        if (stdout) process.stdout.write(stdout);
+        if (stderr) process.stderr.write(stderr);
       }
       throw err;
     }
@@ -190,9 +213,11 @@ export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): 
 }
 
 export function pluginsUpdate(id: string, quiet?: boolean): void {
-  execFileSync(OPENCLAW, ["plugins", "update", id], {
-    stdio: quiet ? ["pipe", "pipe", "pipe"] : "inherit",
+  const result = execFileSync(OPENCLAW, ["plugins", "update", id], {
+    stdio: ["pipe", "pipe", "pipe"],
+    encoding: "utf-8",
   });
+  if (!quiet && result) process.stdout.write(result);
 }
 
 export function pluginsUninstall(id: string, yes?: boolean): void {
@@ -624,13 +649,26 @@ export function ensurePluginsAllow(): void {
 // ---------------------------------------------------------------------------
 
 export function pluginsUpdateCompat(id: string, tag: string, quiet?: boolean): void {
-  const stdioOpt: import("node:child_process").StdioOptions = quiet
-    ? ["pipe", "pipe", "pipe"]
-    : "inherit";
   try {
-    execFileSync(OPENCLAW, ["plugins", "update", id], { stdio: stdioOpt });
-  } catch {
-    pluginsInstall(`${id}@${tag}`, quiet, true);
+    const result = execFileSync(OPENCLAW, ["plugins", "update", id], {
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+    if (!quiet && result) process.stdout.write(result);
+  } catch (err) {
+    // Only fallback to install when update is unsupported or plugin not installed.
+    // Other errors (network, permissions, etc.) should propagate.
+    if (isUnsupportedOptionError(err) || isPluginNotInstalledError(err)) {
+      pluginsInstall(`${id}@${tag}`, quiet, true);
+      return;
+    }
+    if (!quiet) {
+      const stdout = (err as any)?.stdout?.toString?.();
+      const stderr = (err as any)?.stderr?.toString?.();
+      if (stdout) process.stdout.write(stdout);
+      if (stderr) process.stderr.write(stderr);
+    }
+    throw err;
   }
 }
 
