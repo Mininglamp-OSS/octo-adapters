@@ -215,28 +215,8 @@ async function checkForUpdates(
     log?.error?.(`dmwork: version check failed: ${String(err)}`);
   }
 
-  // Fetch skill documents from server and write to ~/.openclaw/skills/
-  const skillDocs: Array<{ endpoint: string; skillName: string }> = [
-    { endpoint: "/v1/bot/skill.md", skillName: "dmwork" },
-    { endpoint: "/v1/bot/cli-guide.md", skillName: "dmwork-cli-guide" },
-    { endpoint: "/v1/bot/setup-newbot.md", skillName: "dmwork-setup-newbot" },
-    { endpoint: "/v1/bot/setup-quickstart.md", skillName: "dmwork-setup-quickstart" },
-  ];
-  const baseUrl = apiUrl.replace(/\/+$/, "");
-  for (const { endpoint, skillName } of skillDocs) {
-    try {
-      const resp = await fetch(`${baseUrl}${endpoint}`);
-      if (resp.ok) {
-        const content = await resp.text();
-        const skillDir = path.join(os.homedir(), ".openclaw", "skills", skillName);
-        await mkdir(skillDir, { recursive: true });
-        await writeFile(path.join(skillDir, "SKILL.md"), content, "utf-8");
-        log?.info?.(`dmwork: updated ${skillName}/SKILL.md`);
-      }
-    } catch (err) {
-      log?.error?.(`dmwork: ${skillName} fetch failed: ${String(err)}`);
-    }
-  }
+  // Skills are distributed via the plugin's skills/ directory (openclaw.plugin.json "skills" field).
+  // No runtime fetch needed — openclaw loads skills from ~/.openclaw/extensions/openclaw-channel-dmwork/skills/ automatically.
 }
 
 /** Resolve correct accountId for outbound context using group→account mapping */
