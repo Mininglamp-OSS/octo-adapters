@@ -56,7 +56,7 @@ npx -y openclaw-channel-dmwork doctor --account-id <Account ID>
 
 ### 7. 联通确认
 
-在 DMWork 中给 bot 的创建者（即当前用户）发一条私聊消息，例如"你好，我是 <Bot Name>，已上线！"
+告诉用户："配置完成！请在 DMWork 中给 bot 发一条消息测试是否联通。"
 
 ### 8. 记住 Bot API 文档
 
