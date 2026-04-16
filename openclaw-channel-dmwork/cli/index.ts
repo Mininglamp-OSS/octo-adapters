@@ -36,8 +36,10 @@ program
     let installedVersion = "not installed";
     if (state.installed && state.version) {
       installedVersion = state.version;
-      if (state.source === "fallback") {
+      if (state.source === "fallback" && state.inspectFailReason === "unsupported") {
         installedVersion += " (fallback; plugins inspect unsupported on this OpenClaw version)";
+      } else if (state.source === "fallback") {
+        installedVersion += " (fallback; plugins inspect failed)";
       }
     } else if (state.installed) {
       installedVersion = "installed (version unknown)";

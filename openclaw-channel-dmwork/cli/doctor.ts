@@ -160,21 +160,30 @@ export async function runDoctorChecks(params: {
   // =========================================================================
   const reader = params.reader ?? cliConfigReader;
 
-  // 1. Plugin installed (using unified resolvePluginState for inspect + fallback)
+  // 1. Plugin installed
+  //    Uses resolvePluginState (inspect + fallback) but cross-checks with
+  //    detectScenario() when fallback says not-installed, to avoid hiding
+  //    broken/partial states behind "not installed".
   let pluginState: import("./openclaw-cli.js").PluginResolvedState | null = null;
   if (!params.inProcess) {
     pluginState = resolvePluginState(PLUGIN_ID);
+
     if (pluginState.installed) {
+      // Healthy via inspect or fallback (all 3 artifacts present)
       const versionLabel = pluginState.version ? `v${pluginState.version}` : "version unknown";
-      const sourceNote = pluginState.source === "fallback"
-        ? " (fallback; plugins inspect unsupported on this OpenClaw version)"
-        : "";
+      let sourceNote = "";
+      if (pluginState.source === "fallback" && pluginState.inspectFailReason === "unsupported") {
+        sourceNote = " (fallback; plugins inspect unsupported on this OpenClaw version)";
+      } else if (pluginState.source === "fallback") {
+        sourceNote = " (fallback; plugins inspect failed)";
+      }
       checks.push({
         name: "Plugin installed",
         status: "PASS",
         detail: `${versionLabel}${sourceNote}`,
       });
     } else if (fix) {
+      // Not installed (or broken/partial). Use detectScenario() for precise fix.
       try {
         const scenario = detectScenario();
         if (scenario === "legacy") {

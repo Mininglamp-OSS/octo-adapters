@@ -239,19 +239,53 @@ export interface PluginInspectResult {
   };
 }
 
-export function pluginsInspect(id: string): PluginInspectResult | null {
+export type InspectFailReason = "unsupported" | "not_found" | "error";
+
+export interface PluginsInspectOutcome {
+  ok: boolean;
+  data: PluginInspectResult | null;
+  failReason: InspectFailReason | null;
+}
+
+/**
+ * Inspect a plugin. Returns structured outcome distinguishing:
+ * - ok + data: inspect succeeded
+ * - unsupported: old OpenClaw without `plugins inspect`
+ * - not_found: plugin genuinely not found
+ * - error: other failure (config corruption, plugin load crash, etc.)
+ */
+export function pluginsInspectDetailed(id: string): PluginsInspectOutcome {
   try {
     const out = execFileSync(OPENCLAW, ["plugins", "inspect", id, "--json"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
-    // stdout may contain plugin log noise before JSON — find the JSON object
     const jsonStart = out.indexOf("{");
-    if (jsonStart < 0) return null;
-    return JSON.parse(out.slice(jsonStart));
-  } catch {
-    return null;
+    if (jsonStart < 0) return { ok: false, data: null, failReason: "error" };
+    const data = JSON.parse(out.slice(jsonStart));
+    return { ok: true, data, failReason: null };
+  } catch (err) {
+    const sources = [
+      (err as any)?.stderr?.toString?.(),
+      (err as any)?.stdout?.toString?.(),
+      (err as any)?.message,
+      String(err),
+    ];
+    const text = sources.filter(Boolean).join(" ");
+    if (/unknown command|unrecognized command/i.test(text)) {
+      return { ok: false, data: null, failReason: "unsupported" };
+    }
+    if (/not found|not installed|no such plugin/i.test(text)) {
+      return { ok: false, data: null, failReason: "not_found" };
+    }
+    return { ok: false, data: null, failReason: "error" };
   }
+}
+
+/** Backward-compatible wrapper: returns data or null. */
+export function pluginsInspect(id: string): PluginInspectResult | null {
+  const outcome = pluginsInspectDetailed(id);
+  return outcome.ok ? outcome.data : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -264,23 +298,30 @@ export interface PluginResolvedState {
   version: string | null;
   installPath: string | null;
   source: "inspect" | "fallback";
+  /** Why inspect failed. null when source === "inspect". */
+  inspectFailReason: InspectFailReason | null;
 }
 
 /**
  * Resolve plugin install state. Uses `plugins inspect` when available,
  * falls back to config entries + directory + package.json for old OpenClaw
  * versions that don't support `plugins inspect`.
+ *
+ * Fallback installed = all 3 artifacts present (entries + installs + dir),
+ * matching detectScenario()'s healthy definition. Partial presence is NOT
+ * considered installed — that's a broken state for doctor --fix to handle.
  */
 export function resolvePluginState(id: string): PluginResolvedState {
   // Try inspect first
-  const inspect = pluginsInspect(id);
-  if (inspect?.plugin) {
+  const outcome = pluginsInspectDetailed(id);
+  if (outcome.ok && outcome.data?.plugin) {
     return {
       installed: true,
-      enabled: inspect.plugin.enabled,
-      version: inspect.plugin.version,
-      installPath: inspect.install?.installPath ?? null,
+      enabled: outcome.data.plugin.enabled,
+      version: outcome.data.plugin.version,
+      installPath: outcome.data.install?.installPath ?? null,
       source: "inspect",
+      inspectFailReason: null,
     };
   }
 
@@ -294,10 +335,16 @@ export function resolvePluginState(id: string): PluginResolvedState {
   const installs = cfg?.plugins?.installs?.[id];
   const hasEntry = Boolean(entries);
   const hasInstall = Boolean(installs);
-  const installed = hasEntry || hasInstall || hasDir;
+
+  // Healthy install requires all 3 artifacts, same as detectScenario().
+  // Partial presence (e.g. dir exists but no entries/installs) is broken, not installed.
+  const installed = hasDir && hasEntry && hasInstall;
 
   if (!installed) {
-    return { installed: false, enabled: null, version: null, installPath: null, source: "fallback" };
+    return {
+      installed: false, enabled: null, version: null, installPath: null,
+      source: "fallback", inspectFailReason: outcome.failReason,
+    };
   }
 
   // Resolve version: installs record > package.json on disk
@@ -312,7 +359,7 @@ export function resolvePluginState(id: string): PluginResolvedState {
   const enabled = entries?.enabled ?? null;
   const installPath = installs?.installPath ?? (hasDir ? `~/.openclaw/extensions/${id}` : null);
 
-  return { installed, enabled, version, installPath, source: "fallback" };
+  return { installed, enabled, version, installPath, source: "fallback", inspectFailReason: outcome.failReason };
 }
 
 // ---------------------------------------------------------------------------
