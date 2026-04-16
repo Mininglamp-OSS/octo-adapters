@@ -196,7 +196,6 @@ export async function sendMessage(params: {
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
-  streamNo?: string;
   replyMsgId?: string;
   signal?: AbortSignal;
 }): Promise<void> {
@@ -229,7 +228,6 @@ export async function sendMessage(params: {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
-    ...(params.streamNo ? { stream_no: params.streamNo } : {}),
     payload,
   }, params.signal);
 }

@@ -1485,56 +1485,11 @@ export async function handleInboundMessage(params: {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
   }, 5000);
 
-  // Streaming state
-  let streamNo: string | undefined;
-  let streamFailed = false;
-
   try {
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg: config,
-    replyOptions: {
-      onPartialReply: async (partial: { text?: string; mediaUrls?: string[] }) => {
-        if (streamFailed) return;
-        let text = partial.text?.trim();
-        if (!text) return;
-        // Convert @[uid:name] → @name for display (no entities — streaming should not trigger notifications)
-        if (isGroup) {
-          const structuredMentions = parseStructuredMentions(text);
-          if (structuredMentions.length > 0) {
-            const validUids = new Set(uidToNameMap.keys());
-            const converted = convertStructuredMentions(text, structuredMentions, validUids);
-            text = converted.content;
-          }
-        }
-        try {
-          if (!streamNo) {
-            // Start stream
-            const payloadB64 = Buffer.from(JSON.stringify({ type: 1, content: text })).toString("base64");
-            const result = await postJson<{ stream_no: string }>(apiUrl, botToken, "/v1/bot/stream/start", {
-              channel_id: replyChannelId,
-              channel_type: replyChannelType,
-              payload: payloadB64,
-            });
-            streamNo = result?.stream_no;
-            log?.info?.(`dmwork: stream started: ${streamNo}`);
-          } else {
-            // Continue stream
-            await sendMessage({
-              apiUrl,
-              botToken,
-              channelId: replyChannelId,
-              channelType: replyChannelType,
-              content: text,
-              streamNo,
-            });
-          }
-        } catch (err) {
-          log?.error?.(`dmwork: stream partial failed, falling back to deliver: ${String(err)}`);
-          streamFailed = true;
-        }
-      },
-    },
+    replyOptions: {},
     dispatcherOptions: {
       deliver: async (payload: {
         text?: string;
@@ -1704,18 +1659,5 @@ export async function handleInboundMessage(params: {
   });
   } finally {
     clearInterval(typingInterval);
-    // End stream if one was started (skip if stream failed — deliver handles final message)
-    if (streamNo && !streamFailed) {
-      try {
-        await postJson(apiUrl, botToken, "/v1/bot/stream/end", {
-          stream_no: streamNo,
-          channel_id: replyChannelId,
-          channel_type: replyChannelType,
-        });
-        log?.info?.(`dmwork: stream ended: ${streamNo}`);
-      } catch (err) {
-        log?.error?.(`dmwork: stream end failed: ${String(err)}`);
-      }
-    }
   }
 }
