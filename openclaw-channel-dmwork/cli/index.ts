@@ -13,7 +13,7 @@ import {
 import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
 import { ensureOpenClawCompat, PLUGIN_ID } from "./utils.js";
-import { getOpenClawVersion, pluginsInspect } from "./openclaw-cli.js";
+import { getOpenClawVersion, resolvePluginState } from "./openclaw-cli.js";
 import { createRequire } from "node:module";
 
 const program = new Command();
@@ -32,14 +32,22 @@ program
   .description("Show CLI and plugin version info")
   .action(() => {
     const openclawVersion = getOpenClawVersion() ?? "not found";
-    const inspect = pluginsInspect(PLUGIN_ID);
-    const installedVersion = inspect?.plugin?.version ?? "not installed";
+    const state = resolvePluginState(PLUGIN_ID);
+    let installedVersion = "not installed";
+    if (state.installed && state.version) {
+      installedVersion = state.version;
+      if (state.source === "fallback" && state.inspectFailReason === "unsupported") {
+        installedVersion += " (fallback; plugins inspect unsupported on this OpenClaw version)";
+      } else if (state.source === "fallback") {
+        installedVersion += " (fallback; plugins inspect failed)";
+      }
+    } else if (state.installed) {
+      installedVersion = "installed (version unknown)";
+    }
 
-    // ANSI: \x1b[1m = bold, \x1b[32m = green, \x1b[4m = underline, \x1b[0m = reset
-    const b = "\x1b[1m";   // bold
-    const g = "\x1b[32m";  // green
-    const u = "\x1b[4m";   // underline
-    const r = "\x1b[0m";   // reset
+    const b = "\x1b[1m";
+    const g = "\x1b[32m";
+    const r = "\x1b[0m";
 
     console.log(`${b}openclaw-channel-dmwork-cli:${r} ${g}${_pkg.version}${r}`);
     console.log(`${b}openclaw:${r} ${g}${openclawVersion}${r}`);
