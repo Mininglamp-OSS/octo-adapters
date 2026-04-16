@@ -10,11 +10,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  cleanupBrokenInstall,
   cleanupLegacyPlugin,
   cleanupStaleStageDirectories,
   configGet,
   configGetJson,
   configSet,
+  detectScenario,
   gatewayRestart,
   gatewayStatus,
   getConfigFilePathSafe,
@@ -102,15 +104,9 @@ export async function runDoctorChecks(params: {
   // Phase 1: Fatal config issues (OpenClaw CLI may not work)
   // =========================================================================
   if (!params.inProcess && fix) {
-    // Phase 0a: Clean up legacy "dmwork" plugin
-    const legacyActions = cleanupLegacyPlugin();
-    for (const action of legacyActions) {
-      checks.push({
-        name: "Legacy plugin cleanup",
-        status: "FIXED",
-        detail: action,
-      });
-    }
+    // Phase 0a: Use scenario detection — don't use old destructive cleanupLegacyPlugin()
+    // Legacy and deadlock scenarios are handled in Phase 2 plugin install section
+    // Here we only do non-destructive cleanup: stage directories and orphaned bindings
 
     // Phase 0b: Clean up stale install stage directories (DMWork only, >10min old)
     const stageActions = cleanupStaleStageDirectories();
@@ -125,21 +121,6 @@ export async function runDoctorChecks(params: {
     const cfg = readConfigFromFile();
     if (cfg) {
       const hasDmworkChannel = Boolean(cfg.channels?.dmwork);
-      // Check if plugin actually exists on disk, not just config records
-      const installPath = cfg.plugins?.installs?.["openclaw-channel-dmwork"]?.installPath;
-      const pluginOnDisk = installPath
-        ? existsSync(installPath.replace(/^~/, process.env.HOME ?? ""))
-        : false;
-
-      // channels.dmwork exists but plugin not on disk → residual config
-      if (hasDmworkChannel && !pluginOnDisk) {
-        removeChannelConfigFromFile();
-        checks.push({
-          name: "Residual channels.dmwork",
-          status: "FIXED",
-          detail: "Removed orphaned channel config (plugin not installed)",
-        });
-      }
 
       // Orphaned dmwork bindings
       const bindings = cfg.bindings as Array<{ agentId: string; match?: { channel?: string; accountId?: string } }> | undefined;
@@ -208,8 +189,20 @@ export async function runDoctorChecks(params: {
         });
       } else if (fix) {
         try {
-          const { runSafeInstall } = await import("./install.js");
-          runSafeInstall(PLUGIN_ID, true);
+          // Use scenario-aware install (handles legacy, deadlock, broken)
+          const scenario = detectScenario();
+          if (scenario === "legacy") {
+            const { runLegacyMigrationForUpdate } = await import("./install.js");
+            runLegacyMigrationForUpdate(PLUGIN_ID, true);
+          } else if (scenario === "deadlock") {
+            const { runDeadlockRepairForUpdate } = await import("./install.js");
+            runDeadlockRepairForUpdate(PLUGIN_ID, true);
+          } else if (scenario === "broken") {
+            cleanupBrokenInstall();
+            pluginsInstall(PLUGIN_ID, true);
+          } else {
+            pluginsInstall(PLUGIN_ID, true);
+          }
           const after = pluginsInspect(PLUGIN_ID);
           checks.push({
             name: "Plugin installed",

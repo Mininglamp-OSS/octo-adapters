@@ -1,16 +1,21 @@
 /**
  * update command:
- * - Without --dev: always target latest (stable) version
- * - With --dev: always target @dev tag version
- * - Skip if the target version is already installed
+ * - Detects scenario and routes accordingly
+ * - For healthy installs: compare versions, update if different
+ * - For legacy/broken/deadlock: delegate to install's safe paths
  */
 
 import {
+  cleanupBrokenInstall,
+  detectScenario,
   gatewayRestart,
   pluginsInspect,
-  pluginsInstall,
+  pluginsUpdateCompat,
 } from "./openclaw-cli.js";
-import { runSafeInstall } from "./install.js";
+import {
+  runLegacyMigrationForUpdate,
+  runDeadlockRepairForUpdate,
+} from "./install.js";
 import { PLUGIN_ID, ensureOpenClawCompat } from "./utils.js";
 import { execFileSync } from "node:child_process";
 
@@ -19,9 +24,6 @@ export interface UpdateOptions {
   dev?: boolean;
 }
 
-/**
- * Query npm registry for the latest version under a given tag.
- */
 function getLatestNpmVersion(tag: string): string | null {
   try {
     return execFileSync("npm", ["view", `${PLUGIN_ID}@${tag}`, "version"], {
@@ -36,35 +38,67 @@ function getLatestNpmVersion(tag: string): string | null {
 export async function runUpdate(opts: UpdateOptions): Promise<void> {
   ensureOpenClawCompat();
 
-  const inspect = pluginsInspect(PLUGIN_ID);
-  if (!inspect?.plugin) {
-    // Plugin not found — use full safe install path (handles deadlock, stale dirs, legacy cleanup)
-    if (!opts.json) {
-      console.log("DMWork plugin not found. Attempting install...");
-    }
-    const tag = opts.dev ? "dev" : "latest";
-    runSafeInstall(`${PLUGIN_ID}@${tag}`, true, opts.json);
+  const scenario = detectScenario();
+  const tag = opts.dev ? "dev" : "latest";
+  const spec = `${PLUGIN_ID}@${tag}`;
+  const quiet = Boolean(opts.json);
 
-    if (!opts.json) {
-      console.log("Restarting gateway...");
-    }
-    if (!gatewayRestart(opts.json)) {
-      if (!opts.json) {
-        console.log("Warning: Gateway restart failed. Run 'openclaw gateway restart' manually.");
-      }
-    }
-
-    const after = pluginsInspect(PLUGIN_ID);
+  // Non-healthy scenarios: delegate to install's safe paths
+  if (scenario === "legacy") {
+    if (!quiet) console.log("Detected legacy DMWork plugin. Running migration...");
+    runLegacyMigrationForUpdate(spec, quiet);
+    if (!quiet) console.log("Restarting gateway...");
+    gatewayRestart(quiet);
     if (opts.json) {
+      const after = pluginsInspect(PLUGIN_ID);
       console.log(JSON.stringify({ success: true, previousVersion: null, currentVersion: after?.plugin?.version ?? "unknown" }));
-    } else {
-      console.log(`Installed: v${after?.plugin?.version ?? "unknown"}`);
     }
     return;
   }
 
-  const currentVersion = inspect.plugin.version;
-  const tag = opts.dev ? "dev" : "latest";
+  if (scenario === "broken") {
+    if (!quiet) console.log("Detected broken plugin install. Cleaning up and reinstalling...");
+    cleanupBrokenInstall();
+    // After cleanup, fall through to fresh install via pluginsInstall
+    const { pluginsInstall } = await import("./openclaw-cli.js");
+    pluginsInstall(spec, quiet);
+    if (!quiet) console.log("Restarting gateway...");
+    gatewayRestart(quiet);
+    if (opts.json) {
+      const after = pluginsInspect(PLUGIN_ID);
+      console.log(JSON.stringify({ success: true, previousVersion: null, currentVersion: after?.plugin?.version ?? "unknown" }));
+    }
+    return;
+  }
+
+  if (scenario === "deadlock") {
+    if (!quiet) console.log("Detected config deadlock. Repairing...");
+    runDeadlockRepairForUpdate(spec, quiet);
+    if (!quiet) console.log("Restarting gateway...");
+    gatewayRestart(quiet);
+    if (opts.json) {
+      const after = pluginsInspect(PLUGIN_ID);
+      console.log(JSON.stringify({ success: true, previousVersion: null, currentVersion: after?.plugin?.version ?? "unknown" }));
+    }
+    return;
+  }
+
+  if (scenario === "fresh") {
+    if (!quiet) console.log("DMWork plugin not found. Installing...");
+    const { pluginsInstall } = await import("./openclaw-cli.js");
+    pluginsInstall(spec, quiet);
+    if (!quiet) console.log("Restarting gateway...");
+    gatewayRestart(quiet);
+    if (opts.json) {
+      const after = pluginsInspect(PLUGIN_ID);
+      console.log(JSON.stringify({ success: true, previousVersion: null, currentVersion: after?.plugin?.version ?? "unknown" }));
+    }
+    return;
+  }
+
+  // Scenario: update (healthy install)
+  const inspect = pluginsInspect(PLUGIN_ID);
+  const currentVersion = inspect?.plugin?.version ?? "unknown";
   const targetVersion = getLatestNpmVersion(tag);
 
   if (!targetVersion) {
@@ -76,7 +110,6 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Skip if already on the target version
   if (currentVersion === targetVersion) {
     if (opts.json) {
       console.log(JSON.stringify({ success: true, previousVersion: currentVersion, currentVersion: targetVersion }));
@@ -86,22 +119,15 @@ export async function runUpdate(opts: UpdateOptions): Promise<void> {
     return;
   }
 
-  const quiet = Boolean(opts.json);
-
   if (!quiet) {
     console.log(`Updating DMWork plugin: v${currentVersion} -> v${targetVersion}${opts.dev ? " (dev)" : ""}...`);
   }
 
-  // Use --force to replace existing installation when switching versions
-  pluginsInstall(`${PLUGIN_ID}@${tag}`, quiet, true);
+  pluginsUpdateCompat(PLUGIN_ID, tag, quiet);
 
-  if (!quiet) {
-    console.log("Restarting gateway...");
-  }
+  if (!quiet) console.log("Restarting gateway...");
   if (!gatewayRestart(quiet)) {
-    if (!quiet) {
-      console.log("Warning: Gateway restart failed. Run 'openclaw gateway restart' manually.");
-    }
+    if (!quiet) console.log("Warning: Gateway restart failed. Run 'openclaw gateway restart' manually.");
   }
 
   if (opts.json) {

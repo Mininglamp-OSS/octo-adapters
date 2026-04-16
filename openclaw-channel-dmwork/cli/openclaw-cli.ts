@@ -5,7 +5,7 @@
  */
 
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -156,19 +156,34 @@ function isUnsupportedOptionError(err: unknown): boolean {
 }
 
 export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): void {
-  const args = ["plugins", "install", spec];
-  if (force) args.push("--force");
+  const baseArgs = ["plugins", "install", spec];
   const stdioOpt: import("node:child_process").StdioOptions = quiet
     ? ["pipe", "pipe", "pipe"]
     : "inherit";
 
-  // Try with --dangerously-force-unsafe-install first; fall back if unsupported
-  try {
-    execFileSync(OPENCLAW, [...args, "--dangerously-force-unsafe-install"], { stdio: stdioOpt });
-  } catch (err) {
-    if (isUnsupportedOptionError(err)) {
-      execFileSync(OPENCLAW, args, { stdio: stdioOpt });
-    } else {
+  // 3-layer degradation for old openclaw versions:
+  //   1. --force --dangerously-force-unsafe-install  (newest openclaw)
+  //   2. --force                                     (mid-age openclaw)
+  //   3. bare install                                (oldest openclaw)
+  const attempts: string[][] = force
+    ? [
+        [...baseArgs, "--force", "--dangerously-force-unsafe-install"],
+        [...baseArgs, "--force"],
+        baseArgs,
+      ]
+    : [
+        [...baseArgs, "--dangerously-force-unsafe-install"],
+        baseArgs,
+      ];
+
+  for (let i = 0; i < attempts.length; i++) {
+    try {
+      execFileSync(OPENCLAW, attempts[i], { stdio: stdioOpt });
+      return;
+    } catch (err) {
+      if (isUnsupportedOptionError(err) && i < attempts.length - 1) {
+        continue; // try next degradation level
+      }
       throw err;
     }
   }
@@ -305,7 +320,7 @@ export function restoreChannelConfigToFile(
   const cfg = JSON.parse(raw);
   if (!cfg.channels) cfg.channels = {};
   cfg.channels.dmwork = dmworkConfig;
-  writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+  writeConfigAtomic(cfg);
 }
 
 /**
@@ -330,11 +345,10 @@ export function removeChannelConfigFromFile(): void {
   try {
     const configPath = getConfigFilePathSafe();
     copyFileSync(configPath, configPath + ".bak");
-    const raw = readFileSync(configPath, "utf-8");
-    const cfg = JSON.parse(raw);
-    if (cfg.channels?.dmwork) {
+    const cfg = readConfigFromFile();
+    if (cfg?.channels?.dmwork) {
       delete cfg.channels.dmwork;
-      writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+      writeConfigAtomic(cfg);
     }
   } catch {
     // best effort
@@ -375,7 +389,7 @@ export function removeOrphanedBindingsFromFile(
       // Keep only if accountId is in valid list (or no accountId specified)
       return !b.match.accountId || validAccountIds.includes(b.match.accountId);
     });
-    writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+    writeConfigAtomic(cfg);
   } catch {
     // best effort
   }
@@ -441,7 +455,7 @@ export function cleanupLegacyPlugin(): string[] {
       if (Array.isArray(cfg.plugins?.allow)) {
         cfg.plugins.allow = cfg.plugins.allow.filter((id: string) => id !== LEGACY_PLUGIN_ID);
       }
-      writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf-8");
+      writeConfigAtomic(cfg);
       actions.push(`Cleaned legacy entries from openclaw.json`);
     }
   } catch {
@@ -535,6 +549,217 @@ export function cleanupStaleStageDirectories(): string[] {
       } catch { /* skip this entry */ }
     }
   } catch { /* best effort */ }
+
+  return actions;
+}
+
+// ---------------------------------------------------------------------------
+// Atomic config write
+// ---------------------------------------------------------------------------
+
+/**
+ * Write openclaw.json atomically: write to .tmp then rename.
+ * Prevents gateway watcher from reading half-written/truncated JSON.
+ */
+export function writeConfigAtomic(cfg: Record<string, any>): void {
+  const configPath = getConfigFilePathSafe();
+  const tmpPath = configPath + ".tmp";
+  writeFileSync(tmpPath, JSON.stringify(cfg, null, 2), "utf-8");
+  renameSync(tmpPath, configPath);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario detection
+// ---------------------------------------------------------------------------
+
+export type UpgradeScenario = "legacy" | "update" | "fresh" | "deadlock" | "broken";
+
+export function detectScenario(): UpgradeScenario {
+  const cfg = readConfigFromFile();
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+
+  const hasLegacyDir = existsSync(resolve(extDir, "dmwork"));
+  const hasLegacyEntries = Boolean(cfg?.plugins?.entries?.["dmwork"]);
+  const hasLegacyInstalls = Boolean(cfg?.plugins?.installs?.["dmwork"]);
+  const hasLegacy = hasLegacyDir || hasLegacyEntries || hasLegacyInstalls;
+
+  const hasNewDir = existsSync(resolve(extDir, "openclaw-channel-dmwork"));
+  const hasNewEntries = Boolean(cfg?.plugins?.entries?.["openclaw-channel-dmwork"]);
+  const hasNewInstalls = Boolean(cfg?.plugins?.installs?.["openclaw-channel-dmwork"]);
+  const inspectOk = Boolean(pluginsInspect("openclaw-channel-dmwork")?.plugin);
+  const isHealthy = inspectOk || (hasNewDir && hasNewEntries && hasNewInstalls);
+  const hasNewPartial = (hasNewDir || hasNewEntries || hasNewInstalls) && !isHealthy;
+
+  const hasDmworkChannel = Boolean(cfg?.channels?.dmwork);
+
+  if (hasLegacy) return "legacy";
+  if (isHealthy) return "update";
+  if (hasNewPartial) return "broken";
+  if (hasDmworkChannel) return "deadlock";
+  return "fresh";
+}
+
+export function isHealthyInstall(): boolean {
+  const cfg = readConfigFromFile();
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const hasNewDir = existsSync(resolve(extDir, "openclaw-channel-dmwork"));
+  const hasNewEntries = Boolean(cfg?.plugins?.entries?.["openclaw-channel-dmwork"]);
+  const hasNewInstalls = Boolean(cfg?.plugins?.installs?.["openclaw-channel-dmwork"]);
+  const inspectOk = Boolean(pluginsInspect("openclaw-channel-dmwork")?.plugin);
+  return inspectOk || (hasNewDir && hasNewEntries && hasNewInstalls);
+}
+
+export function ensurePluginsAllow(): void {
+  try {
+    const cfg = readConfigFromFile();
+    if (!cfg?.plugins?.allow || !Array.isArray(cfg.plugins.allow)) return;
+    if (cfg.plugins.allow.includes("openclaw-channel-dmwork")) return;
+    cfg.plugins.allow.push("openclaw-channel-dmwork");
+    writeConfigAtomic(cfg);
+  } catch { /* best effort */ }
+}
+
+// ---------------------------------------------------------------------------
+// pluginsUpdateCompat
+// ---------------------------------------------------------------------------
+
+export function pluginsUpdateCompat(id: string, tag: string, quiet?: boolean): void {
+  const stdioOpt: import("node:child_process").StdioOptions = quiet
+    ? ["pipe", "pipe", "pipe"]
+    : "inherit";
+  try {
+    execFileSync(OPENCLAW, ["plugins", "update", id], { stdio: stdioOpt });
+  } catch {
+    pluginsInstall(`${id}@${tag}`, quiet, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy migration helpers
+// ---------------------------------------------------------------------------
+
+export function renameLegacyDir(): boolean {
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const legacyDir = resolve(extDir, "dmwork");
+  const backupDir = resolve(extDir, ".dmwork-backup");
+  if (!existsSync(legacyDir)) return false;
+  try {
+    if (existsSync(backupDir)) rmSync(backupDir, { recursive: true, force: true });
+    renameSync(legacyDir, backupDir);
+    return true;
+  } catch { return false; }
+}
+
+export function restoreLegacyDir(): void {
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const legacyDir = resolve(extDir, "dmwork");
+  const backupDir = resolve(extDir, ".dmwork-backup");
+  if (!existsSync(backupDir)) return;
+  try {
+    if (existsSync(legacyDir)) rmSync(legacyDir, { recursive: true, force: true });
+    renameSync(backupDir, legacyDir);
+  } catch { /* best effort */ }
+}
+
+export function deleteLegacyBackup(): void {
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const backupDir = resolve(extDir, ".dmwork-backup");
+  if (existsSync(backupDir)) {
+    try { rmSync(backupDir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+export function removeLegacyFromConfig(): void {
+  try {
+    const cfg = readConfigFromFile();
+    if (!cfg) return;
+    if (cfg.plugins?.entries?.["dmwork"]) delete cfg.plugins.entries["dmwork"];
+    if (cfg.plugins?.installs?.["dmwork"]) delete cfg.plugins.installs["dmwork"];
+    if (Array.isArray(cfg.plugins?.allow)) {
+      cfg.plugins.allow = cfg.plugins.allow.filter((id: string) => id !== "dmwork");
+    }
+    if (cfg.channels?.dmwork) delete cfg.channels.dmwork;
+    writeConfigAtomic(cfg);
+  } catch { /* best effort */ }
+}
+
+export function saveChannelConfigToDisk(): void {
+  try {
+    const backupPath = getConfigFilePathSafe().replace(/openclaw\.json$/, "channels-dmwork-backup.json");
+    const cfg = readConfigFromFile();
+    const dmwork = cfg?.channels?.dmwork;
+    if (dmwork) {
+      writeFileSync(backupPath, JSON.stringify(dmwork, null, 2), "utf-8");
+    } else {
+      // No channels.dmwork — remove stale backup to prevent wrong restore
+      if (existsSync(backupPath)) rmSync(backupPath, { force: true });
+    }
+  } catch { /* best effort */ }
+}
+
+export function restoreChannelConfigFromDisk(): void {
+  try {
+    const backupPath = getConfigFilePathSafe().replace(/openclaw\.json$/, "channels-dmwork-backup.json");
+    if (!existsSync(backupPath)) return;
+    let dmwork = JSON.parse(readFileSync(backupPath, "utf-8"));
+
+    // Migrate flat config → accounts.default
+    if (dmwork.botToken && !dmwork.accounts) {
+      dmwork = {
+        ...dmwork,
+        accounts: { default: { botToken: dmwork.botToken, apiUrl: dmwork.apiUrl } },
+      };
+      delete dmwork.botToken;
+    }
+
+    const cfg = readConfigFromFile();
+    if (!cfg) return;
+    if (!cfg.channels) cfg.channels = {};
+    cfg.channels.dmwork = dmwork;
+    writeConfigAtomic(cfg);
+    rmSync(backupPath, { force: true });
+  } catch { /* best effort */ }
+}
+
+export function cleanupBrokenInstall(): string[] {
+  const actions: string[] = [];
+  const cfg = readConfigFromFile();
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const pluginDir = resolve(extDir, "openclaw-channel-dmwork");
+
+  const hasDir = existsSync(pluginDir);
+  const hasEntries = Boolean(cfg?.plugins?.entries?.["openclaw-channel-dmwork"]);
+  const hasInstalls = Boolean(cfg?.plugins?.installs?.["openclaw-channel-dmwork"]);
+
+  // Use same healthy definition as detectScenario(): inspect OK OR all 3 artifacts present
+  const inspectOk = Boolean(pluginsInspect("openclaw-channel-dmwork")?.plugin);
+  const isHealthy = inspectOk || (hasDir && hasEntries && hasInstalls);
+  if (isHealthy) return actions; // Actually healthy, nothing to clean
+
+  // Remove directory if it exists (orphan or partial)
+  if (hasDir) {
+    try {
+      rmSync(pluginDir, { recursive: true, force: true });
+      actions.push("Removed broken/orphan plugin directory");
+    } catch { /* best effort */ }
+  }
+
+  // Remove stale config entries
+  if (cfg && (hasEntries || hasInstalls)) {
+    let changed = false;
+    if (hasEntries) {
+      delete cfg.plugins!.entries!["openclaw-channel-dmwork"];
+      changed = true;
+    }
+    if (hasInstalls) {
+      delete cfg.plugins!.installs!["openclaw-channel-dmwork"];
+      changed = true;
+    }
+    if (changed) {
+      writeConfigAtomic(cfg);
+      actions.push("Cleaned stale config entries");
+    }
+  }
 
   return actions;
 }
