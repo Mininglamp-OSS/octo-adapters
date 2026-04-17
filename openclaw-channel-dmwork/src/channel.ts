@@ -13,13 +13,12 @@ import {
 } from "./accounts.js";
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
-import { createRequire } from "node:module";
+import { getDmworkRuntime } from "./runtime.js";
 
-/** Best-effort: try to read openclaw version from its package.json at runtime. */
+/** Get OpenClaw host version from PluginRuntime.version (provided by SDK). */
 function getAgentVersion(): string {
   try {
-    const req = createRequire(import.meta.url);
-    return req("openclaw/package.json")?.version ?? "";
+    return getDmworkRuntime().version ?? "";
   } catch {
     return "";
   }
