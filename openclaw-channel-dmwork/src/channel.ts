@@ -13,6 +13,17 @@ import {
 } from "./accounts.js";
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
 import { PLUGIN_VERSION } from "./version.js";
+import { createRequire } from "node:module";
+
+/** Best-effort: try to read openclaw version from its package.json at runtime. */
+function getAgentVersion(): string {
+  try {
+    const req = createRequire(import.meta.url);
+    return req("openclaw/package.json")?.version ?? "";
+  } catch {
+    return "";
+  }
+}
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -659,6 +670,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
           agentPlatform: "OpenClaw",
+          agentVersion: getAgentVersion(),
           pluginVersion: PLUGIN_VERSION,
         });
       } catch (err) {
@@ -906,6 +918,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
                 botToken: account.config.botToken!,
                 forceRefresh: true,
                 agentPlatform: "OpenClaw",
+                agentVersion: getAgentVersion(),
                 pluginVersion: PLUGIN_VERSION,
               });
               credentials = fresh;
