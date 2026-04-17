@@ -12,6 +12,7 @@ import {
   type ResolvedDmworkAccount,
 } from "./accounts.js";
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { PLUGIN_VERSION } from "./version.js";
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -657,6 +658,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         credentials = await registerBot({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
+          agentPlatform: "OpenClaw",
+          pluginVersion: PLUGIN_VERSION,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -902,6 +905,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
                 apiUrl: account.config.apiUrl,
                 botToken: account.config.botToken!,
                 forceRefresh: true,
+                agentPlatform: "OpenClaw",
+                pluginVersion: PLUGIN_VERSION,
               });
               credentials = fresh;
               log?.info?.(`dmwork: [${account.accountId}] got fresh IM token, reconnecting WS...`);
