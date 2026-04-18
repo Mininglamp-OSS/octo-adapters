@@ -10,7 +10,7 @@ import { getOpenClawVersion } from "./openclaw-cli.js";
 // ---------------------------------------------------------------------------
 
 export const PLUGIN_ID = "openclaw-channel-dmwork";
-export const MIN_OPENCLAW_VERSION = "2026.2.0";
+export const MIN_OPENCLAW_VERSION = "2026.4.15";
 export const RECOMMENDED_DM_SCOPE = "per-account-channel-peer";
 
 // ---------------------------------------------------------------------------
