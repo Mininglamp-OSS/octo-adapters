@@ -117,8 +117,10 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
           signal: AbortSignal.timeout(15000),
         });
 
+        const text = await resp.text().catch(() => "");
+
         if (resp.ok) {
-          const data = await resp.json() as { robot_id: string; bot_token: string; name: string };
+          const data = JSON.parse(text) as { robot_id: string; bot_token: string; name: string };
           results.push({
             agentId: agent.id,
             robotId: data.robot_id,
@@ -129,22 +131,27 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
           console.log(`  Created bot: ${data.robot_id} → agent ${agent.id}`);
           created = true;
           break;
-        } else if (resp.status === 409) {
-          // Username conflict, try next candidate
-          continue;
-        } else {
-          const text = await resp.text().catch(() => "");
-          results.push({
-            agentId: agent.id,
-            robotId: username,
-            botToken: "",
-            name: agent.name || agent.id,
-            status: "failed",
-            error: `HTTP ${resp.status}: ${text}`,
-          });
-          created = true; // don't retry on non-409 errors
-          break;
         }
+
+        // Username conflict: 409 (new server) or 400 with "已被占用"/"occupied" (old server)
+        const isUsernameConflict =
+          resp.status === 409 ||
+          (resp.status === 400 && /已被占用|occupied/i.test(text));
+
+        if (isUsernameConflict) {
+          continue;
+        }
+
+        results.push({
+          agentId: agent.id,
+          robotId: username,
+          botToken: "",
+          name: agent.name || agent.id,
+          status: "failed",
+          error: `HTTP ${resp.status}: ${text}`,
+        });
+        created = true;
+        break;
       } catch (err) {
         results.push({
           agentId: agent.id,
