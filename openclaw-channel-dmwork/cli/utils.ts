@@ -43,10 +43,9 @@ export function ensureOpenClawCompat(): void {
     process.exit(1);
   }
   if (compareVersions(version, MIN_OPENCLAW_VERSION) < 0) {
-    console.error(
-      `Error: OpenClaw ${version} is too old. Minimum required: ${MIN_OPENCLAW_VERSION}`,
+    console.warn(
+      `Warning: OpenClaw ${version} is older than recommended ${MIN_OPENCLAW_VERSION}. Some features may not work correctly. Consider upgrading.`,
     );
-    process.exit(1);
   }
 }
 
