@@ -12,6 +12,17 @@ import {
   type ResolvedDmworkAccount,
 } from "./accounts.js";
 import { registerBot, sendMessage, sendHeartbeat, sendMediaMessage, inferContentType, ensureTextCharset, fetchBotGroups, getGroupMd, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS } from "./api-fetch.js";
+import { PLUGIN_VERSION } from "./version.js";
+import { getDmworkRuntime } from "./runtime.js";
+
+/** Get OpenClaw host version from PluginRuntime.version (provided by SDK). */
+function getAgentVersion(): string {
+  try {
+    return getDmworkRuntime().version ?? "";
+  } catch {
+    return "";
+  }
+}
 import { WKSocket } from "./socket.js";
 import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
@@ -215,19 +226,8 @@ async function checkForUpdates(
     log?.error?.(`dmwork: version check failed: ${String(err)}`);
   }
 
-  try {
-    // Fetch skill.md
-    const skillResp = await fetch(`${apiUrl.replace(/\/+$/, "")}/v1/bot/skill.md`);
-    if (skillResp.ok) {
-      const skillContent = await skillResp.text();
-      const skillDir = path.join(os.homedir(), ".openclaw", "skills", "dmwork");
-      await mkdir(skillDir, { recursive: true });
-      await writeFile(path.join(skillDir, "SKILL.md"), skillContent, "utf-8");
-      log?.info?.("dmwork: updated SKILL.md");
-    }
-  } catch (err) {
-    log?.error?.(`dmwork: skill.md fetch failed: ${String(err)}`);
-  }
+  // Skills are distributed via the plugin's skills/ directory (openclaw.plugin.json "skills" field).
+  // No runtime fetch needed — openclaw loads skills from ~/.openclaw/extensions/openclaw-channel-dmwork/skills/ automatically.
 }
 
 /** Resolve correct accountId for outbound context using group→account mapping */
@@ -668,6 +668,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         credentials = await registerBot({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken,
+          agentPlatform: "OpenClaw",
+          agentVersion: getAgentVersion(),
+          pluginVersion: PLUGIN_VERSION,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -913,6 +916,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
                 apiUrl: account.config.apiUrl,
                 botToken: account.config.botToken!,
                 forceRefresh: true,
+                agentPlatform: "OpenClaw",
+                agentVersion: getAgentVersion(),
+                pluginVersion: PLUGIN_VERSION,
               });
               credentials = fresh;
               log?.info?.(`dmwork: [${account.accountId}] got fresh IM token, reconnecting WS...`);

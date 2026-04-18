@@ -1,22 +1,20 @@
 /**
- * install command: install plugin via official CLI + interactive config setup.
+ * install command: install or update the DMWork plugin.
+ * Pure plugin management — does NOT configure bots or bindings.
  *
- * Handles 4 upgrade scenarios:
+ * Handles 5 scenarios:
  * 1. Legacy migration (dmwork → openclaw-channel-dmwork)
- * 2. Normal update (openclaw-channel-dmwork → openclaw-channel-dmwork)
+ * 2. Normal update (check version, update if needed)
  * 3. Fresh install (nothing installed)
  * 4. Deadlock repair (channels.dmwork exists but no plugin)
- * + broken install cleanup
+ * 5. Broken install cleanup
  */
 
-import { copyFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   cleanupBrokenInstall,
-  configGet,
-  configGetJson,
-  configSet,
-  configUnset,
   deleteLegacyBackup,
   detectScenario,
   ensurePluginsAllow,
@@ -33,47 +31,63 @@ import {
   restoreLegacyDir,
   saveChannelConfigToDisk,
   removeChannelConfigFromFile,
-  saveChannelConfigFromFile,
-  restoreChannelConfigToFile,
 } from "./openclaw-cli.js";
 import {
   PLUGIN_ID,
-  RECOMMENDED_DM_SCOPE,
-  confirm,
   ensureOpenClawCompat,
-  isInteractive,
-  prompt,
-  validateAccountId,
 } from "./utils.js";
 
+function getLatestNpmVersion(tag: string): string | null {
+  try {
+    return execFileSync("npm", ["view", `${PLUGIN_ID}@${tag}`, "version"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 export interface InstallOptions {
-  botToken?: string;
-  apiUrl?: string;
-  accountId?: string;
-  skipConfig?: boolean;
   force?: boolean;
   dev?: boolean;
 }
 
+/**
+ * install command: install or update the DMWork plugin.
+ * Pure plugin management — does NOT configure bots or bindings.
+ * Use `bind` or `quickstart` for bot configuration after install.
+ */
 export async function runInstall(opts: InstallOptions): Promise<void> {
   ensureOpenClawCompat();
 
   const scenario = detectScenario();
+  const tag = opts.dev ? "dev" : "latest";
   const spec = opts.dev ? `${PLUGIN_ID}@dev` : PLUGIN_ID;
   const quiet = false;
 
   switch (scenario) {
     case "legacy":
-      runLegacyMigration(spec, quiet, opts.force, opts.skipConfig);
+      runLegacyMigration(spec, quiet, opts.force);
       break;
     case "update": {
+      // Already installed — check for updates
       const inspect = pluginsInspect(PLUGIN_ID);
-      if (inspect?.plugin && !opts.force) {
-        console.log(`DMWork plugin is already installed (v${inspect.plugin.version}). Skipping install.`);
+      const currentVersion = inspect?.plugin?.version ?? "unknown";
+      const latestVersion = getLatestNpmVersion(tag);
+
+      if (!latestVersion) {
+        console.log(`Cannot reach npm registry to check ${tag} version.`);
+        console.log(`Current version: v${currentVersion}`);
+        break;
+      }
+
+      if (currentVersion === latestVersion && !opts.force) {
+        console.log(`DMWork plugin is already up to date (v${currentVersion}).`);
       } else {
-        console.log(`Installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
-        pluginsInstall(spec, quiet, opts.force);
-        console.log("Plugin installed successfully.");
+        console.log(`Updating DMWork plugin: v${currentVersion} → v${latestVersion}${opts.dev ? " (dev)" : ""}...`);
+        pluginsUpdateCompat(PLUGIN_ID, tag, quiet);
+        console.log("Plugin updated successfully.");
       }
       break;
     }
@@ -87,7 +101,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       break;
     }
     case "deadlock":
-      runDeadlockRepair(spec, quiet, opts.skipConfig);
+      runDeadlockRepair(spec, quiet);
       break;
     case "fresh":
       console.log(`Installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
@@ -96,18 +110,13 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       break;
   }
 
-  // Post-install: config + gateway
-  if (!opts.skipConfig) {
-    await migrateLegacyConfig();
-    await configureDmworkAccount(opts);
-  }
-
+  // Gateway restart (plugin lifecycle requires restart)
   console.log("Restarting gateway...");
   if (!gatewayRestart()) {
     console.log("Warning: Gateway restart failed. Run 'openclaw gateway restart' manually.");
   }
 
-  console.log("\nDMWork plugin setup complete!");
+  console.log("\nDMWork plugin ready! Use BotFather /newbot or /quickstart to configure bots.");
 }
 
 // ---------------------------------------------------------------------------
@@ -240,109 +249,8 @@ function runDeadlockRepair(spec: string, quiet: boolean, skipConfig?: boolean): 
 }
 
 // ---------------------------------------------------------------------------
-// Exported for update.ts to reuse
+// Exported for update.ts and doctor.ts to reuse
 // ---------------------------------------------------------------------------
 
 export { runLegacyMigration as runLegacyMigrationForUpdate };
 export { runDeadlockRepair as runDeadlockRepairForUpdate };
-
-// ---------------------------------------------------------------------------
-// Legacy config migration (flat → accounts)
-// ---------------------------------------------------------------------------
-
-async function migrateLegacyConfig(): Promise<void> {
-  const legacyToken = configGet("channels.dmwork.botToken");
-  const accounts = configGetJson("channels.dmwork.accounts");
-
-  if (legacyToken && (!accounts || Object.keys(accounts).length === 0)) {
-    console.log("Detected legacy flat config. Migrating to accounts model...");
-    configSet("channels.dmwork.accounts.default.botToken", legacyToken);
-    const legacyApiUrl = configGet("channels.dmwork.apiUrl");
-    if (legacyApiUrl) {
-      configSet("channels.dmwork.accounts.default.apiUrl", legacyApiUrl);
-    }
-    configUnset("channels.dmwork.botToken");
-    console.log("Migrated legacy config to accounts.default.");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Account configuration
-// ---------------------------------------------------------------------------
-
-async function configureDmworkAccount(opts: InstallOptions): Promise<void> {
-  let accountId = opts.accountId;
-  if (!accountId) {
-    accountId = await prompt("Enter bot account ID (e.g. my_bot):");
-    if (!accountId) {
-      console.log("No account ID provided. Skipping config.");
-      return;
-    }
-  }
-
-  if (!validateAccountId(accountId)) {
-    console.error(`Error: Invalid account ID "${accountId}". Only letters, digits, and underscores are allowed.`);
-    process.exit(1);
-  }
-
-  const existingToken = configGet(`channels.dmwork.accounts.${accountId}.botToken`);
-  if (existingToken) {
-    if (!isInteractive()) {
-      if (opts.botToken && opts.apiUrl) {
-        console.log(`Overwriting existing account "${accountId}".`);
-      } else if (opts.botToken || opts.apiUrl) {
-        console.error(`Error: Account "${accountId}" already exists. Provide both --bot-token and --api-url to overwrite.`);
-        process.exit(1);
-      } else {
-        console.log(`Account "${accountId}" already configured. Keeping existing config.`);
-        ensureDmScope();
-        printAgentHint(accountId);
-        return;
-      }
-    } else {
-      const keep = await confirm(`Bot account "${accountId}" is already configured. Keep current config?`, true);
-      if (keep) {
-        console.log("Keeping existing config.");
-        ensureDmScope();
-        printAgentHint(accountId);
-        return;
-      }
-    }
-  }
-
-  let botToken = opts.botToken;
-  if (!botToken) botToken = await prompt("Enter bot token (bf_...):");
-  if (!botToken?.startsWith("bf_")) {
-    console.error("Error: Bot token must start with 'bf_'.");
-    process.exit(1);
-  }
-
-  let apiUrl = opts.apiUrl;
-  if (!apiUrl) apiUrl = await prompt("Enter API server URL:");
-  if (!apiUrl) {
-    console.error("Error: API URL is required.");
-    process.exit(1);
-  }
-
-  configSet(`channels.dmwork.accounts.${accountId}.botToken`, botToken);
-  configSet(`channels.dmwork.accounts.${accountId}.apiUrl`, apiUrl);
-  console.log(`Configured bot account: ${accountId}`);
-  console.log(`  API: ${apiUrl}`);
-
-  ensureDmScope();
-  printAgentHint(accountId);
-}
-
-function ensureDmScope(): void {
-  const current = configGet("session.dmScope");
-  if (!current) {
-    configSet("session.dmScope", RECOMMENDED_DM_SCOPE);
-  } else if (current !== RECOMMENDED_DM_SCOPE) {
-    console.log(`Warning: session.dmScope is "${current}" (recommended: ${RECOMMENDED_DM_SCOPE})`);
-  }
-}
-
-function printAgentHint(accountId: string): void {
-  const agentName = accountId.replace(/_bot$/, "");
-  console.log(`\nTo create an independent agent for this bot (optional):\n  openclaw agents add ${agentName}\n  openclaw agents bind ${agentName} dmwork ${accountId}`);
-}

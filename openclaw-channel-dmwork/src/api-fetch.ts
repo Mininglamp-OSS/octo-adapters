@@ -196,7 +196,6 @@ export async function sendMessage(params: {
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
-  streamNo?: string;
   replyMsgId?: string;
   signal?: AbortSignal;
 }): Promise<void> {
@@ -229,7 +228,6 @@ export async function sendMessage(params: {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
-    ...(params.streamNo ? { stream_no: params.streamNo } : {}),
     payload,
   }, params.signal);
 }
@@ -276,6 +274,9 @@ export async function registerBot(params: {
   apiUrl: string;
   botToken: string;
   forceRefresh?: boolean;
+  agentPlatform?: string;
+  agentVersion?: string;
+  pluginVersion?: string;
   signal?: AbortSignal;
 }): Promise<{
   robot_id: string;
@@ -288,6 +289,10 @@ export async function registerBot(params: {
   const path = params.forceRefresh
     ? "/v1/bot/register?force_refresh=true"
     : "/v1/bot/register";
+  const body: Record<string, string> = {};
+  if (params.agentPlatform) body.agent_platform = params.agentPlatform;
+  if (params.agentVersion) body.agent_version = params.agentVersion;
+  if (params.pluginVersion) body.plugin_version = params.pluginVersion;
   const result = await postJson<{
     robot_id: string;
     im_token: string;
@@ -295,7 +300,7 @@ export async function registerBot(params: {
     api_url: string;
     owner_uid: string;
     owner_channel_id: string;
-  }>(params.apiUrl, params.botToken, path, {}, params.signal);
+  }>(params.apiUrl, params.botToken, path, body, params.signal);
   if (!result) throw new Error("DMWork bot registration returned empty response");
   return result;
 }

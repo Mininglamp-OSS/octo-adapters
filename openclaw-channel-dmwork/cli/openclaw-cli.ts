@@ -57,6 +57,11 @@ function findGlobalOpenclaw(): string {
 
 const OPENCLAW = findGlobalOpenclaw();
 
+/** Get the resolved openclaw binary path */
+export function getOpenClawBin(): string {
+  return OPENCLAW;
+}
+
 /** Expand ~ to home directory */
 function expandHome(p: string): string {
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));

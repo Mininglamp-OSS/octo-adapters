@@ -1,10 +1,12 @@
 /**
- * CLI entry point: register 5 subcommands with commander.
+ * CLI entry point: register subcommands with commander.
  */
 
 import { Command, Option } from "commander";
 import { runInstall } from "./install.js";
 import { runUpdate } from "./update.js";
+import { runBind } from "./bind.js";
+import { runQuickstart } from "./quickstart.js";
 import {
   cliConfigReader,
   formatDoctorResult,
@@ -63,32 +65,53 @@ program
 // --- install ---
 program
   .command("install")
-  .description("Install the DMWork plugin and configure a bot account")
-  .option("--bot-token <token>", "Bot token (starts with bf_)")
-  .option("--api-url <url>", "API server URL")
-  .option("--account-id <id>", "Account ID (required in non-interactive mode)")
-  .option("--skip-config", "Skip bot configuration", false)
+  .description("Install or update the DMWork plugin")
   .option("--force", "Force reinstall", false)
   .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
     await runInstall({
-      botToken: opts.botToken,
-      apiUrl: opts.apiUrl,
-      accountId: opts.accountId,
-      skipConfig: opts.skipConfig,
       force: opts.force,
       dev: opts.dev,
     });
   });
 
-// --- update ---
+// --- update (alias for install) ---
 program
   .command("update")
-  .description("Update the DMWork plugin to the latest version")
-  .option("--json", "Output JSON", false)
+  .description("Update the DMWork plugin (alias for install)")
   .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
-    await runUpdate({ json: opts.json, dev: opts.dev });
+    await runUpdate({ dev: opts.dev });
+  });
+
+// --- bind ---
+program
+  .command("bind")
+  .description("Configure a bot account and bind it to an agent")
+  .requiredOption("--bot-token <token>", "Bot token (starts with bf_)")
+  .requiredOption("--api-url <url>", "API server URL")
+  .requiredOption("--account-id <id>", "Bot account ID")
+  .requiredOption("--agent <agent>", "Agent identifier to bind to")
+  .action(async (opts) => {
+    await runBind({
+      botToken: opts.botToken,
+      apiUrl: opts.apiUrl,
+      accountId: opts.accountId,
+      agent: opts.agent,
+    });
+  });
+
+// --- quickstart ---
+program
+  .command("quickstart")
+  .description("Create bots for all agents and bind them (one-time setup)")
+  .requiredOption("--api-key <key>", "User API key (starts with uk_)")
+  .requiredOption("--api-url <url>", "API server URL")
+  .action(async (opts) => {
+    await runQuickstart({
+      apiKey: opts.apiKey,
+      apiUrl: opts.apiUrl,
+    });
   });
 
 // --- doctor ---

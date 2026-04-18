@@ -10,7 +10,7 @@ import { getOpenClawVersion } from "./openclaw-cli.js";
 // ---------------------------------------------------------------------------
 
 export const PLUGIN_ID = "openclaw-channel-dmwork";
-export const MIN_OPENCLAW_VERSION = "2026.2.0";
+export const MIN_OPENCLAW_VERSION = "2026.4.15";
 export const RECOMMENDED_DM_SCOPE = "per-account-channel-peer";
 
 // ---------------------------------------------------------------------------
@@ -31,8 +31,8 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
- * Check that openclaw is available and meets the minimum version.
- * Exits the process on failure.
+ * Check that openclaw is available. Exits if not found.
+ * Warns (but continues) if version is below recommended minimum.
  */
 export function ensureOpenClawCompat(): void {
   const version = getOpenClawVersion();
@@ -43,10 +43,9 @@ export function ensureOpenClawCompat(): void {
     process.exit(1);
   }
   if (compareVersions(version, MIN_OPENCLAW_VERSION) < 0) {
-    console.error(
-      `Error: OpenClaw ${version} is too old. Minimum required: ${MIN_OPENCLAW_VERSION}`,
+    console.warn(
+      `Warning: OpenClaw ${version} is older than recommended ${MIN_OPENCLAW_VERSION}. Some features may not work correctly. Consider upgrading.`,
     );
-    process.exit(1);
   }
 }
 
