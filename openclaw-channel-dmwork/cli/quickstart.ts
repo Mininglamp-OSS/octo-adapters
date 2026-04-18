@@ -67,9 +67,16 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const jsonStart = raw.indexOf("[");
-    if (jsonStart < 0) throw new Error("No JSON array in output");
-    agents = JSON.parse(raw.slice(jsonStart));
+    // OpenClaw stdout may contain plugin log noise before JSON (e.g. [dmwork], [plugins]).
+    // Use lastIndexOf to skip all log lines and find the actual JSON array.
+    const jsonStart = raw.lastIndexOf("\n[");
+    if (jsonStart >= 0) {
+      agents = JSON.parse(raw.slice(jsonStart + 1));
+    } else if (raw.trimStart().startsWith("[")) {
+      agents = JSON.parse(raw);
+    } else {
+      throw new Error("No JSON array in output");
+    }
   } catch (err) {
     console.error("Failed to get agent list. Make sure OpenClaw is running.");
     console.error(err instanceof Error ? err.message : String(err));
