@@ -65,31 +65,35 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   const tag = opts.dev ? "dev" : "latest";
   const spec = opts.dev ? `${PLUGIN_ID}@dev` : PLUGIN_ID;
   const quiet = false;
+  let didChange = false;
 
   switch (scenario) {
     case "legacy":
       runLegacyMigration(spec, quiet, opts.force);
+      didChange = true;
       break;
     case "update": {
-      // Already installed — check for updates
+      // Already installed — compare against target version
       const inspect = pluginsInspect(PLUGIN_ID);
       const currentVersion = inspect?.plugin?.version ?? "unknown";
-      const latestVersion = getLatestNpmVersion(tag);
+      const targetVersion = getLatestNpmVersion(tag);
 
-      if (!latestVersion) {
+      if (!targetVersion) {
+        // Cannot determine target — skip install and restart
         console.log(`Cannot reach npm registry to check ${tag} version.`);
         console.log(`Current version: v${currentVersion}`);
-        break;
+        return;
       }
 
-      if (currentVersion === latestVersion && !opts.force) {
-        console.log(`DMWork plugin v${currentVersion} is already the latest version. No update needed.`);
-        return; // Skip gateway restart — nothing changed
-      } else {
-        console.log(`Updating DMWork plugin: v${currentVersion} → v${latestVersion}${opts.dev ? " (dev)" : ""}...`);
-        pluginsUpdateCompat(PLUGIN_ID, tag, quiet);
-        console.log(`DMWork plugin updated from v${currentVersion} to v${latestVersion}.`);
+      if (currentVersion === targetVersion && !opts.force) {
+        console.log(`DMWork plugin v${currentVersion} is already the target version${opts.dev ? " (dev)" : ""}. No update needed.`);
+        return; // Nothing changed — skip gateway restart
       }
+
+      console.log(`Updating DMWork plugin: v${currentVersion} → v${targetVersion}${opts.dev ? " (dev)" : ""}...`);
+      pluginsInstall(spec, quiet, true); // Always use spec with tag so @dev is respected
+      console.log(`DMWork plugin updated from v${currentVersion} to v${targetVersion}${opts.dev ? " (dev)" : ""}.`);
+      didChange = true;
       break;
     }
     case "broken": {
@@ -99,17 +103,22 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       console.log(`Installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
       pluginsInstall(spec, quiet, opts.force);
       console.log("Plugin installed successfully.");
+      didChange = true;
       break;
     }
     case "deadlock":
       runDeadlockRepair(spec, quiet);
+      didChange = true;
       break;
     case "fresh":
       console.log(`Installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
       pluginsInstall(spec, quiet, opts.force);
       console.log("Plugin installed successfully.");
+      didChange = true;
       break;
   }
+
+  if (!didChange) return;
 
   // Gateway restart (plugin lifecycle requires restart)
   console.log("Restarting gateway...");
