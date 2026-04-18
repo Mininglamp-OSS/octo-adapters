@@ -1227,6 +1227,7 @@ class DMWorkAdapter(BasePlatformAdapter):
             uploaded_url = await api.upload_and_get_url(
                 self._http_session, self._api_url, self._bot_token,
                 filename, file_data, content_type,
+                is_file_type=True,
             )
 
             await api.send_media_message(

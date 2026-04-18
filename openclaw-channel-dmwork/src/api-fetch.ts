@@ -752,6 +752,8 @@ export async function uploadFileToCOS(params: {
   fileSize?: number;
   contentType: string;
   cdnBaseUrl?: string;
+  filename?: string;
+  isFileType?: boolean;
 }): Promise<{ url: string }> {
   const cos = new COS({
     SecretId: params.credentials.tmpSecretId,
@@ -761,12 +763,35 @@ export async function uploadFileToCOS(params: {
     ExpiredTime: params.expiredTime,
   } as any);
 
+  /** Characters unsafe in a Content-Disposition filename="..." value. */
+  const CD_UNSAFE_RE = /["\\\x00-\x1F\x7F;]/;
+
+  function rfc5987Encode(s: string): string {
+    return encodeURIComponent(s).replace(/['()*]/g, c =>
+      '%' + c.charCodeAt(0).toString(16).toUpperCase()
+    );
+  }
+
+  function buildContentDisposition(filename: string): string {
+    const isAsciiSafe = /^[\x20-\x7E]+$/.test(filename) && !CD_UNSAFE_RE.test(filename);
+    if (isAsciiSafe) {
+      return `attachment; filename="${filename}"`;
+    }
+    const ext = filename.includes('.') ? '.' + filename.split('.').pop() : '';
+    return `attachment; filename="download${ext}"; filename*=UTF-8''${rfc5987Encode(filename)}`;
+  }
+
+  const contentDisposition = params.isFileType && params.filename
+    ? buildContentDisposition(params.filename)
+    : undefined;
+
   const putParams: Record<string, unknown> = {
     Bucket: params.bucket,
     Region: params.region,
     Key: params.key,
     Body: params.fileBody,
     ContentType: params.contentType,
+    ...(contentDisposition && { ContentDisposition: contentDisposition }),
   };
   if (params.fileSize != null) {
     putParams.ContentLength = params.fileSize;

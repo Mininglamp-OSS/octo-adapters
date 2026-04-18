@@ -15,6 +15,7 @@ import os
 import struct
 import time
 from typing import Any, Optional
+import re as _re
 from urllib.parse import quote
 
 import aiohttp
@@ -467,6 +468,21 @@ async def get_upload_credentials(
     return data
 
 
+_CD_UNSAFE_RE = _re.compile(r'["\\\x00-\x1f\x7f;]')
+
+
+def _build_content_disposition(filename: str) -> str:
+    """Build RFC 5987 Content-Disposition header value with safe ASCII fallback."""
+    is_ascii_safe = bool(_re.match(r'^[\x20-\x7e]+$', filename)) and not _CD_UNSAFE_RE.search(filename)
+    encoded = quote(filename, safe='')
+
+    if is_ascii_safe:
+        return f'attachment; filename="{filename}"'
+
+    ext = '.' + filename.rsplit('.', 1)[1] if '.' in filename else ''
+    return f"attachment; filename=\"download{ext}\"; filename*=UTF-8''{encoded}"
+
+
 async def upload_file_to_cos(
     session: aiohttp.ClientSession,
     credentials: dict[str, str],
@@ -476,6 +492,8 @@ async def upload_file_to_cos(
     file_data: bytes,
     content_type: str,
     cdn_base_url: Optional[str] = None,
+    filename: Optional[str] = None,
+    is_file_type: bool = False,
 ) -> str:
     """
     Upload a file to COS using STS temporary credentials via HTTP PUT.
@@ -543,6 +561,8 @@ async def upload_file_to_cos(
         "Authorization": authorization,
         "x-cos-security-token": session_token,
     }
+    if is_file_type and filename:
+        headers["Content-Disposition"] = _build_content_disposition(filename)
 
     upload_timeout = aiohttp.ClientTimeout(total=300)  # 5 min for large files
     async with session.put(url, data=file_data, headers=headers, timeout=upload_timeout) as resp:
@@ -567,6 +587,7 @@ async def upload_and_get_url(
     filename: str,
     file_data: bytes,
     content_type: str,
+    is_file_type: bool = False,
 ) -> str:
     """
     High-level: get credentials, upload to COS, return URL.
@@ -590,6 +611,8 @@ async def upload_and_get_url(
         file_data=file_data,
         content_type=content_type,
         cdn_base_url=creds_data.get("cdnBaseUrl"),
+        filename=filename,
+        is_file_type=is_file_type,
     )
 
 
@@ -627,9 +650,9 @@ async def download_file(
             filename = cd.split("filename=")[-1].strip('"').strip("'")
         else:
             try:
-                from urllib.parse import urlparse
+                from urllib.parse import urlparse, unquote
                 path = urlparse(url).path
-                filename = path.split("/")[-1] or "file"
+                filename = unquote(path.split("/")[-1]) or "file"
             except Exception:
                 pass
 
