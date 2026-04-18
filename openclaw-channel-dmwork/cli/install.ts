@@ -83,11 +83,12 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       }
 
       if (currentVersion === latestVersion && !opts.force) {
-        console.log(`DMWork plugin is already up to date (v${currentVersion}).`);
+        console.log(`DMWork plugin v${currentVersion} is already the latest version. No update needed.`);
+        return; // Skip gateway restart — nothing changed
       } else {
         console.log(`Updating DMWork plugin: v${currentVersion} → v${latestVersion}${opts.dev ? " (dev)" : ""}...`);
         pluginsUpdateCompat(PLUGIN_ID, tag, quiet);
-        console.log("Plugin updated successfully.");
+        console.log(`DMWork plugin updated from v${currentVersion} to v${latestVersion}.`);
       }
       break;
     }
