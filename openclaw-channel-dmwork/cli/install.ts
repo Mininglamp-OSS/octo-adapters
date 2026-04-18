@@ -23,7 +23,6 @@ import {
   isHealthyInstall,
   pluginsInspect,
   pluginsInstall,
-  pluginsUpdateCompat,
   readConfigFromFile,
   removeLegacyFromConfig,
   renameLegacyDir,
@@ -76,6 +75,16 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       // Already installed — compare against target version
       const inspect = pluginsInspect(PLUGIN_ID);
       const currentVersion = inspect?.plugin?.version ?? "unknown";
+
+      if (opts.force) {
+        // --force: skip version check, always install target spec
+        console.log(`Force installing DMWork plugin${opts.dev ? " (dev)" : ""}...`);
+        pluginsInstall(spec, quiet, true);
+        console.log("Plugin installed successfully.");
+        didChange = true;
+        break;
+      }
+
       const targetVersion = getLatestNpmVersion(tag);
 
       if (!targetVersion) {
@@ -85,7 +94,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
         return;
       }
 
-      if (currentVersion === targetVersion && !opts.force) {
+      if (currentVersion === targetVersion) {
         console.log(`DMWork plugin v${currentVersion} is already the target version${opts.dev ? " (dev)" : ""}. No update needed.`);
         return; // Nothing changed — skip gateway restart
       }
