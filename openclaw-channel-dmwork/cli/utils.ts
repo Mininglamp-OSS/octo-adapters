@@ -31,8 +31,8 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
- * Check that openclaw is available and meets the minimum version.
- * Exits the process on failure.
+ * Check that openclaw is available. Exits if not found.
+ * Warns (but continues) if version is below recommended minimum.
  */
 export function ensureOpenClawCompat(): void {
   const version = getOpenClawVersion();
