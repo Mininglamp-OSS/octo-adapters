@@ -214,8 +214,8 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
   console.log("Waiting for DMWork channel to reload...");
   await new Promise((r) => setTimeout(r, 3000));
 
-  // 6. Connectivity check
-  console.log("Verifying connectivity...");
+  // 6. Send greetings to bot owner (best-effort, not a connectivity proof)
+  console.log("Sending greetings to bot owner...");
   for (const bot of successful) {
     try {
       const regResp = await fetch(`${apiBase}/v1/bot/register`, {
@@ -252,7 +252,7 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
 
   // 7. Output results
   console.log("\n========================================");
-  console.log("Quickstart complete!");
+  console.log("Quickstart complete! Send a message to each bot in DMWork to verify.");
   console.log("========================================\n");
   console.log(`  Created: ${successful.length} bot(s)`);
   if (failed.length > 0) {

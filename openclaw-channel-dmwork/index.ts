@@ -39,6 +39,13 @@ const plugin: {
   name: "DMWork",
   description: "OpenClaw DMWork channel plugin via WuKongIM WebSocket",
   register(api) {
+    // Runtime version guard
+    const runtimeVersion = api.runtime?.version ?? "";
+    if (runtimeVersion && runtimeVersion < "2026.4.15") {
+      console.error(`[dmwork] OpenClaw ${runtimeVersion} is too old. Minimum required: 2026.4.15. Plugin will not load.`);
+      return;
+    }
+
     setDmworkRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });
 

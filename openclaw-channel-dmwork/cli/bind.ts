@@ -86,7 +86,8 @@ export async function runBind(opts: BindOptions): Promise<void> {
   console.log("Waiting for DMWork channel to reload...");
   await new Promise((r) => setTimeout(r, 2000));
 
-  // 9. Connectivity check (register + sendMessage)
+  // 9. Send greeting to bot owner (best-effort, not a connectivity proof)
+  console.log("Sending greeting to bot owner...");
   try {
     const registerResp = await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/register`, {
       method: "POST",
@@ -120,5 +121,5 @@ export async function runBind(opts: BindOptions): Promise<void> {
     console.log("Could not send greeting. Please test connectivity by sending a message to the bot in DMWork.");
   }
 
-  console.log("\nBind complete!");
+  console.log("\nBind complete! Please send a message to the bot in DMWork to verify the connection.");
 }
