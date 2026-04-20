@@ -39,7 +39,6 @@ const plugin: {
   name: "DMWork",
   description: "OpenClaw DMWork channel plugin via WuKongIM WebSocket",
   register(api) {
-
     setDmworkRuntime(api.runtime);
     api.registerChannel({ plugin: dmworkPlugin });
 

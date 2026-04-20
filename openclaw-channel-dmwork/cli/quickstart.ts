@@ -40,11 +40,13 @@ interface CreatedBot {
   error?: string;
 }
 
-/** Normalize agent id to a valid bot username */
-function normalizeUsername(agentId: string): string {
-  let base = agentId.toLowerCase().replace(/[^a-z0-9_]/g, "");
-  if (base.length > 17) base = base.slice(0, 17); // leave room for _bot suffix
-  if (base.endsWith("_bot")) return base;
+/** Normalize agent id to a valid bot username, matching server-side rules. */
+export function normalizeUsername(agentId: string): string {
+  let base = agentId.trim().toLowerCase();
+  base = base.replace(/_bot$/, "");
+  base = base.replace(/[^a-z0-9_]/g, "");
+  if (!base) base = "agent"; // fallback for all-non-alphanumeric input
+  if (base.length > 17) base = base.slice(0, 17); // leave room for _2_bot/_3_bot
   return `${base}_bot`;
 }
 

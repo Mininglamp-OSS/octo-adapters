@@ -142,7 +142,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
 // Scenario 1: Legacy migration (dmwork → openclaw-channel-dmwork)
 // ---------------------------------------------------------------------------
 
-function runLegacyMigration(spec: string, quiet: boolean, force?: boolean, skipConfig?: boolean): void {
+function runLegacyMigration(spec: string, quiet: boolean, force?: boolean): void {
   console.log("Detected legacy DMWork plugin (dmwork). Starting migration...");
 
   // 1. Backup everything to disk
@@ -163,7 +163,7 @@ function runLegacyMigration(spec: string, quiet: boolean, force?: boolean, skipC
   removeLegacyFromConfig();
   console.log("  Removed legacy config entries.");
 
-  // 3. Rename legacy directory (not delete!)
+  // 4. Rename legacy directory (not delete!)
   const legacyDirExists = existsSync(
     getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions/dmwork"),
   );
@@ -180,7 +180,7 @@ function runLegacyMigration(spec: string, quiet: boolean, force?: boolean, skipC
     }
   }
 
-  // 4. Install new plugin
+  // 5. Install new plugin
   try {
     console.log("  Installing openclaw-channel-dmwork...");
     pluginsInstall(spec, quiet, force);
@@ -193,7 +193,7 @@ function runLegacyMigration(spec: string, quiet: boolean, force?: boolean, skipC
     throw installErr;
   }
 
-  // 5. Verify healthy install
+  // 6. Verify healthy install
   if (!isHealthyInstall()) {
     console.error("  Install completed but verification failed. Restoring...");
     if (renamed) restoreLegacyDir();
@@ -202,7 +202,7 @@ function runLegacyMigration(spec: string, quiet: boolean, force?: boolean, skipC
     throw new Error("Legacy migration failed: post-install verification did not pass");
   }
 
-  // 6. Success: restore channels.dmwork + cleanup
+  // 7. Success: restore channels.dmwork + cleanup
   ensurePluginsAllow();
   restoreChannelConfigFromDisk();
 
@@ -222,7 +222,7 @@ function runLegacyMigration(spec: string, quiet: boolean, force?: boolean, skipC
 // Scenario 4: Deadlock repair
 // ---------------------------------------------------------------------------
 
-function runDeadlockRepair(spec: string, quiet: boolean, skipConfig?: boolean): void {
+function runDeadlockRepair(spec: string, quiet: boolean): void {
   console.log("Detected config deadlock (channels.dmwork exists but no plugin).");
 
   // 1. Backup
