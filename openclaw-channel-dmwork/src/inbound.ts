@@ -74,7 +74,12 @@ function extractFilename(url: string): string {
   try {
     const pathname = new URL(url).pathname;
     const parts = pathname.split("/");
-    return parts[parts.length - 1] || "file";
+    const raw = parts[parts.length - 1] || "file";
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
   } catch {
     return "file";
   }
@@ -163,6 +168,7 @@ export async function uploadAndSendMedia(params: {
       fileSize,
       contentType: ensureTextCharset(contentType),
       cdnBaseUrl: creds.cdnBaseUrl,
+      filename,
     });
 
     // Determine message type from MIME

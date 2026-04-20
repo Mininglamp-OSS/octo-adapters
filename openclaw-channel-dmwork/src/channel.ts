@@ -533,7 +533,12 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       } else {
         // HTTP(S) URL — stream download to temp file to avoid buffering in memory
         const urlPath = new URL(mediaUrl).pathname;
-        filename = path.basename(urlPath) || "file";
+        const rawFilename = path.basename(urlPath) || "file";
+        try {
+          filename = decodeURIComponent(rawFilename);
+        } catch {
+          filename = rawFilename;
+        }
         const dl = await downloadToTempFile(mediaUrl, filename);
         tempPath = dl.tempPath;
         localFilePath = dl.tempPath;
@@ -564,6 +569,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           fileSize,
           contentType: ensureTextCharset(contentType),
           cdnBaseUrl: creds.cdnBaseUrl,
+          filename,
         });
 
         // 3. Parse target using shared parseTarget + knownGroupIds
