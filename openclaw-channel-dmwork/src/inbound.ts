@@ -169,7 +169,6 @@ export async function uploadAndSendMedia(params: {
       contentType: ensureTextCharset(contentType),
       cdnBaseUrl: creds.cdnBaseUrl,
       filename,
-      isFileType: !contentType.startsWith("image/"),
     });
 
     // Determine message type from MIME

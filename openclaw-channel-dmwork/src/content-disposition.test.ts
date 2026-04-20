@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { rfc5987Encode, buildContentDisposition } from "./api-fetch.js";
 
 /**
  * Tests for issue #225 fixes:
@@ -12,10 +13,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // extractFilename — percent-decoding
 // ---------------------------------------------------------------------------
 describe("extractFilename — percent-decoding", () => {
-  // We test extractFilename indirectly since it's not exported.
-  // Instead, we import the module and test via its behavior,
-  // or we replicate the logic for unit testing.
-
   // Replicate the extractFilename logic for direct unit testing
   function extractFilename(url: string): string {
     try {
@@ -87,15 +84,9 @@ describe("channel.ts filename decoding", () => {
 });
 
 // ---------------------------------------------------------------------------
-// rfc5987Encode — unit tests (replicated logic)
+// rfc5987Encode — unit tests (imported from api-fetch)
 // ---------------------------------------------------------------------------
 describe("rfc5987Encode", () => {
-  function rfc5987Encode(s: string): string {
-    return encodeURIComponent(s).replace(/['()*]/g, c =>
-      '%' + c.charCodeAt(0).toString(16).toUpperCase()
-    );
-  }
-
   it("encodes apostrophe", () => {
     expect(rfc5987Encode("John's")).toBe("John%27s");
   });
@@ -122,26 +113,9 @@ describe("rfc5987Encode", () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildContentDisposition — unit tests (replicated logic)
+// buildContentDisposition — unit tests (imported from api-fetch)
 // ---------------------------------------------------------------------------
 describe("buildContentDisposition", () => {
-  const CD_UNSAFE_RE = /["\\\x00-\x1F\x7F;]/;
-
-  function rfc5987Encode(s: string): string {
-    return encodeURIComponent(s).replace(/['()*]/g, c =>
-      '%' + c.charCodeAt(0).toString(16).toUpperCase()
-    );
-  }
-
-  function buildContentDisposition(filename: string): string {
-    const isAsciiSafe = /^[\x20-\x7E]+$/.test(filename) && !CD_UNSAFE_RE.test(filename);
-    if (isAsciiSafe) {
-      return `attachment; filename="${filename}"`;
-    }
-    const ext = filename.includes('.') ? '.' + filename.split('.').pop() : '';
-    return `attachment; filename="download${ext}"; filename*=UTF-8''${rfc5987Encode(filename)}`;
-  }
-
   it("ASCII safe filename — simple format", () => {
     expect(buildContentDisposition("report.xlsx")).toBe('attachment; filename="report.xlsx"');
   });
@@ -185,10 +159,8 @@ describe("buildContentDisposition", () => {
     expect(result).toContain("%27");  // apostrophe encoded
   });
 
-  it("filename with parens and asterisk — encoded in filename*", () => {
+  it("filename with parens and asterisk — safe in quoted-string", () => {
     const result = buildContentDisposition("file(draft)*.xlsx");
-    // Has parens and asterisk which are printable ASCII but are outside attr-char
-    // However they are safe in quoted-string filename="..." so this IS ascii safe
     expect(result).toBe('attachment; filename="file(draft)*.xlsx"');
   });
 
@@ -197,13 +169,28 @@ describe("buildContentDisposition", () => {
     expect(result).toContain('filename="download"');
     expect(result).toContain("filename*=UTF-8''");
   });
+
+  it("defaults to attachment disposition type", () => {
+    expect(buildContentDisposition("report.xlsx")).toMatch(/^attachment;/);
+  });
+
+  it("supports inline disposition type", () => {
+    expect(buildContentDisposition("video.mp4", "inline")).toBe('inline; filename="video.mp4"');
+  });
+
+  it("inline with non-ASCII filename uses download fallback", () => {
+    const result = buildContentDisposition("视频.mp4", "inline");
+    expect(result).toMatch(/^inline;/);
+    expect(result).toContain('filename="download.mp4"');
+    expect(result).toContain("filename*=UTF-8''");
+  });
 });
 
 // ---------------------------------------------------------------------------
 // uploadFileToCOS — Content-Disposition integration
 // ---------------------------------------------------------------------------
 describe("uploadFileToCOS Content-Disposition", () => {
-  it("sets ContentDisposition for file type with ASCII filename", async () => {
+  it("sets attachment ContentDisposition for document type", async () => {
     let capturedParams: any = null;
 
     vi.resetModules();
@@ -227,13 +214,12 @@ describe("uploadFileToCOS Content-Disposition", () => {
       fileBody: Buffer.from("data"),
       contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       filename: "report.xlsx",
-      isFileType: true,
     });
 
     expect(capturedParams.ContentDisposition).toBe('attachment; filename="report.xlsx"');
   });
 
-  it("sets ContentDisposition with RFC 5987 for non-ASCII filename", async () => {
+  it("sets attachment ContentDisposition with RFC 5987 for non-ASCII filename", async () => {
     let capturedParams: any = null;
 
     vi.resetModules();
@@ -257,7 +243,6 @@ describe("uploadFileToCOS Content-Disposition", () => {
       fileBody: Buffer.from("data"),
       contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       filename: "审查.xlsx",
-      isFileType: true,
     });
 
     expect(capturedParams.ContentDisposition).toContain('filename="download.xlsx"');
@@ -289,10 +274,98 @@ describe("uploadFileToCOS Content-Disposition", () => {
       fileBody: Buffer.from("data"),
       contentType: "image/png",
       filename: "photo.png",
-      isFileType: false,
     });
 
     expect(capturedParams.ContentDisposition).toBeUndefined();
+  });
+
+  it("sets inline ContentDisposition for video type", async () => {
+    let capturedParams: any = null;
+
+    vi.resetModules();
+    vi.doMock("cos-nodejs-sdk-v5", () => ({
+      default: class FakeCOS {
+        putObject(params: any, cb: any) {
+          capturedParams = params;
+          cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
+        }
+      },
+    }));
+
+    const { uploadFileToCOS } = await import("./api-fetch.js");
+    await uploadFileToCOS({
+      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+      startTime: 0,
+      expiredTime: 9999999999,
+      bucket: "test-bucket",
+      region: "ap-test",
+      key: "test/video.mp4",
+      fileBody: Buffer.from("data"),
+      contentType: "video/mp4",
+      filename: "meeting.mp4",
+    });
+
+    expect(capturedParams.ContentDisposition).toBe('inline; filename="meeting.mp4"');
+  });
+
+  it("sets inline ContentDisposition for audio type", async () => {
+    let capturedParams: any = null;
+
+    vi.resetModules();
+    vi.doMock("cos-nodejs-sdk-v5", () => ({
+      default: class FakeCOS {
+        putObject(params: any, cb: any) {
+          capturedParams = params;
+          cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
+        }
+      },
+    }));
+
+    const { uploadFileToCOS } = await import("./api-fetch.js");
+    await uploadFileToCOS({
+      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+      startTime: 0,
+      expiredTime: 9999999999,
+      bucket: "test-bucket",
+      region: "ap-test",
+      key: "test/audio.mp3",
+      fileBody: Buffer.from("data"),
+      contentType: "audio/mpeg",
+      filename: "recording.mp3",
+    });
+
+    expect(capturedParams.ContentDisposition).toBe('inline; filename="recording.mp3"');
+  });
+
+  it("sets inline ContentDisposition with RFC 5987 for non-ASCII video filename", async () => {
+    let capturedParams: any = null;
+
+    vi.resetModules();
+    vi.doMock("cos-nodejs-sdk-v5", () => ({
+      default: class FakeCOS {
+        putObject(params: any, cb: any) {
+          capturedParams = params;
+          cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
+        }
+      },
+    }));
+
+    const { uploadFileToCOS } = await import("./api-fetch.js");
+    await uploadFileToCOS({
+      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+      startTime: 0,
+      expiredTime: 9999999999,
+      bucket: "test-bucket",
+      region: "ap-test",
+      key: "test/video.mp4",
+      fileBody: Buffer.from("data"),
+      contentType: "video/mp4",
+      filename: "会议录像.mp4",
+    });
+
+    expect(capturedParams.ContentDisposition).toMatch(/^inline;/);
+    expect(capturedParams.ContentDisposition).toContain('filename="download.mp4"');
+    expect(capturedParams.ContentDisposition).toContain("filename*=UTF-8''");
   });
 
   it("does NOT set ContentDisposition when filename is not provided", async () => {
@@ -318,37 +391,6 @@ describe("uploadFileToCOS Content-Disposition", () => {
       key: "test/file.txt",
       fileBody: Buffer.from("data"),
       contentType: "text/plain",
-      isFileType: true,
-    });
-
-    expect(capturedParams.ContentDisposition).toBeUndefined();
-  });
-
-  it("does NOT set ContentDisposition when isFileType is not set", async () => {
-    let capturedParams: any = null;
-
-    vi.resetModules();
-    vi.doMock("cos-nodejs-sdk-v5", () => ({
-      default: class FakeCOS {
-        putObject(params: any, cb: any) {
-          capturedParams = params;
-          cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
-        }
-      },
-    }));
-
-    const { uploadFileToCOS } = await import("./api-fetch.js");
-    await uploadFileToCOS({
-      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
-      startTime: 0,
-      expiredTime: 9999999999,
-      bucket: "test-bucket",
-      region: "ap-test",
-      key: "test/file.txt",
-      fileBody: Buffer.from("data"),
-      contentType: "text/plain",
-      filename: "report.txt",
-      // isFileType not set (defaults to undefined/false)
     });
 
     expect(capturedParams.ContentDisposition).toBeUndefined();
@@ -378,11 +420,68 @@ describe("uploadFileToCOS Content-Disposition", () => {
       fileBody: Buffer.from("data"),
       contentType: "application/octet-stream",
       filename: "审查's.xlsx",
-      isFileType: true,
     });
 
     // Non-ASCII + apostrophe: apostrophe must be encoded as %27
     expect(capturedParams.ContentDisposition).toContain("%27");
     expect(capturedParams.ContentDisposition).toContain("filename*=UTF-8''");
+  });
+
+  it("sets attachment for application/pdf", async () => {
+    let capturedParams: any = null;
+
+    vi.resetModules();
+    vi.doMock("cos-nodejs-sdk-v5", () => ({
+      default: class FakeCOS {
+        putObject(params: any, cb: any) {
+          capturedParams = params;
+          cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
+        }
+      },
+    }));
+
+    const { uploadFileToCOS } = await import("./api-fetch.js");
+    await uploadFileToCOS({
+      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+      startTime: 0,
+      expiredTime: 9999999999,
+      bucket: "test-bucket",
+      region: "ap-test",
+      key: "test/doc.pdf",
+      fileBody: Buffer.from("data"),
+      contentType: "application/pdf",
+      filename: "report.pdf",
+    });
+
+    expect(capturedParams.ContentDisposition).toBe('attachment; filename="report.pdf"');
+  });
+
+  it("sets attachment for text/plain", async () => {
+    let capturedParams: any = null;
+
+    vi.resetModules();
+    vi.doMock("cos-nodejs-sdk-v5", () => ({
+      default: class FakeCOS {
+        putObject(params: any, cb: any) {
+          capturedParams = params;
+          cb(null, { Location: "bucket.cos.region.myqcloud.com/key" });
+        }
+      },
+    }));
+
+    const { uploadFileToCOS } = await import("./api-fetch.js");
+    await uploadFileToCOS({
+      credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+      startTime: 0,
+      expiredTime: 9999999999,
+      bucket: "test-bucket",
+      region: "ap-test",
+      key: "test/file.txt",
+      fileBody: Buffer.from("data"),
+      contentType: "text/plain",
+      filename: "notes.txt",
+    });
+
+    expect(capturedParams.ContentDisposition).toBe('attachment; filename="notes.txt"');
   });
 });

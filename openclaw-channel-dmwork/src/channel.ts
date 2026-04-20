@@ -570,7 +570,6 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           contentType: ensureTextCharset(contentType),
           cdnBaseUrl: creds.cdnBaseUrl,
           filename,
-          isFileType: !contentType.startsWith("image/"),
         });
 
         // 3. Parse target using shared parseTarget + knownGroupIds
