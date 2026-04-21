@@ -141,27 +141,32 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
           (resp.status === 400 && /已被占用|occupied/i.test(text));
 
         if (isUsernameConflict) {
+          console.log(`  ${username} already occupied, trying next...`);
           continue;
         }
 
+        const errMsg = `HTTP ${resp.status}: ${text.slice(0, 200)}`;
+        console.error(`  ${agent.id}: ${errMsg}`);
         results.push({
           agentId: agent.id,
           robotId: username,
           botToken: "",
           name: agent.name || agent.id,
           status: "failed",
-          error: `HTTP ${resp.status}: ${text}`,
+          error: errMsg,
         });
         created = true;
         break;
       } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`  ${agent.id}: ${errMsg}`);
         results.push({
           agentId: agent.id,
           robotId: username,
           botToken: "",
           name: agent.name || agent.id,
           status: "failed",
-          error: err instanceof Error ? err.message : String(err),
+          error: errMsg,
         });
         created = true;
         break;
@@ -169,13 +174,15 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
     }
 
     if (!created) {
+      const tried = candidates.join(", ");
+      console.error(`  ${agent.id}: all username variants conflicted (${tried})`);
       results.push({
         agentId: agent.id,
         robotId: baseName,
         botToken: "",
         name: agent.name || agent.id,
         status: "failed",
-        error: "All username variants conflicted",
+        error: `All username variants conflicted: ${tried}`,
       });
     }
   }
@@ -184,7 +191,11 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
   const failed = results.filter((r) => r.status === "failed");
 
   if (successful.length === 0) {
-    console.error("\nNo bots were created. Please check the errors above.");
+    console.error(`\n${failed.length} agent(s) failed:`);
+    for (const f of failed) {
+      console.error(`  ${f.agentId} → ${f.error}`);
+    }
+    console.error("\nSuggestion: create manually with /newbot, or retry with a different agent name.");
     process.exit(1);
   }
 
