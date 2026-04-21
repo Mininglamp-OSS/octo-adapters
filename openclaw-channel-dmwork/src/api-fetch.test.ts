@@ -646,7 +646,7 @@ describe("sendMediaMessage", () => {
     global.fetch = originalFetch;
   });
 
-  it("Image type should include width/height and exclude name/size", async () => {
+  it("Image type should include width/height and name/size", async () => {
     let sentBody: any = null;
     global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
       sentBody = JSON.parse(init?.body as string);
@@ -666,8 +666,8 @@ describe("sendMediaMessage", () => {
       url: "https://cdn.example.com/img.png",
       width: 800,
       height: 600,
-      name: "img.png",   // should be ignored for Image
-      size: 12345,        // should be ignored for Image
+      name: "img.png",
+      size: 12345,
     });
 
     expect(sentBody).not.toBeNull();
@@ -676,9 +676,9 @@ describe("sendMediaMessage", () => {
     expect(payload.url).toBe("https://cdn.example.com/img.png");
     expect(payload.width).toBe(800);
     expect(payload.height).toBe(600);
-    // Image type must NOT include name/size
-    expect(payload.name).toBeUndefined();
-    expect(payload.size).toBeUndefined();
+    // Image type must include name/size
+    expect(payload.name).toBe("img.png");
+    expect(payload.size).toBe(12345);
   });
 
   it("File type should include name/size and exclude width/height", async () => {

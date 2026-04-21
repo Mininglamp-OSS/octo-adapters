@@ -71,10 +71,12 @@ export async function sendMediaMessage(params: {
     url: params.url,
   };
 
-  // Image (type=2) needs width/height; File (type=8) needs name/size
+  // Image (type=2) needs width/height/name/size; File (type=8) needs name/size
   if (params.type === MessageType.Image) {
     if (params.width) payload.width = params.width;
     if (params.height) payload.height = params.height;
+    if (params.name) payload.name = params.name;
+    if (params.size != null) payload.size = params.size;
   } else {
     if (params.name) payload.name = params.name;
     if (params.size != null) payload.size = params.size;
