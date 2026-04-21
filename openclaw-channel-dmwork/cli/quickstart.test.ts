@@ -34,7 +34,7 @@ describe("normalizeUsername", () => {
     const long = "a".repeat(30);
     const result = normalizeUsername(long);
     expect(result).toBe("a".repeat(17) + "_bot");
-    expect(result.length).toBeLessThanOrEqual(21); // 17 + len("_bot")
+    expect(result.length).toBeLessThanOrEqual(21);
   });
 
   it("long id with _bot suffix — truncated correctly", () => {
