@@ -195,8 +195,8 @@ export async function uploadAndSendMedia(params: {
       channelType,
       type: msgType,
       url: uploadedUrl,
-      name: isImage ? undefined : filename,
-      size: isImage ? undefined : fileSize,
+      name: filename,
+      size: fileSize,
       width,
       height,
     });

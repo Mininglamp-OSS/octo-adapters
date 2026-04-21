@@ -602,6 +602,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             url: cdnUrl,
             width: dims?.width,
             height: dims?.height,
+            name: filename,
+            size: fileSize,
           });
         } else {
           await sendMediaMessage({
