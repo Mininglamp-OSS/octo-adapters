@@ -52,19 +52,36 @@ export async function runBind(opts: BindOptions): Promise<void> {
   if (!cfg.channels.dmwork) cfg.channels.dmwork = {};
   if (!cfg.channels.dmwork.accounts) cfg.channels.dmwork.accounts = {};
 
-  // 4. Write account config
-  cfg.channels.dmwork.accounts[opts.accountId] = {
+  // 4. Try to get bot name from register (best-effort)
+  let botName = "";
+  try {
+    const regResp = await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/register`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${opts.botToken}`, "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (regResp.ok) {
+      const regData = await regResp.json() as { name?: string };
+      botName = regData.name ?? "";
+    }
+  } catch { /* best-effort */ }
+
+  // 5. Write account config
+  const accountConfig: Record<string, string> = {
     botToken: opts.botToken,
     apiUrl: opts.apiUrl,
   };
+  if (botName) accountConfig.name = botName;
+  cfg.channels.dmwork.accounts[opts.accountId] = accountConfig;
 
-  // 5. Set dmScope (multi-bot isolation)
+  // 6. Set dmScope (multi-bot isolation)
   if (!cfg.session) cfg.session = {};
   if (!cfg.session.dmScope) {
     cfg.session.dmScope = RECOMMENDED_DM_SCOPE;
   }
 
-  // 6. Add or update binding
+  // 7. Add or update binding
   if (!cfg.bindings) cfg.bindings = [];
   const existingIdx = (cfg.bindings as any[]).findIndex(
     (b: any) => b.match?.channel === "dmwork" && b.match?.accountId === opts.accountId,
@@ -78,18 +95,19 @@ export async function runBind(opts: BindOptions): Promise<void> {
     });
   }
 
-  // 7. Atomic write
+  // 8. Atomic write
   writeConfigAtomic(cfg);
-  console.log(`Bot account "${opts.accountId}" configured and bound to agent "${opts.agent}".`);
+  const displayLabel = botName || opts.accountId;
+  console.log(`Bot "${displayLabel}" (${opts.accountId}) configured and bound to agent "${opts.agent}".`);
 
-  // 8. Wait for channel hot-reload
+  // 9. Wait for channel hot-reload
   console.log("Waiting for DMWork channel to reload...");
   await new Promise((r) => setTimeout(r, 2000));
 
-  // 9. Send greeting to bot owner (best-effort, not a connectivity proof)
+  // 10. Send greeting to bot owner (best-effort, reuse register data from step 4)
   console.log("Sending greeting to bot owner...");
   try {
-    const registerResp = await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/register`, {
+    const regResp = await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/register`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${opts.botToken}`,
@@ -98,9 +116,10 @@ export async function runBind(opts: BindOptions): Promise<void> {
       body: "{}",
       signal: AbortSignal.timeout(10000),
     });
-    if (registerResp.ok) {
-      const data = await registerResp.json() as { owner_uid?: string; robot_id?: string };
+    if (regResp.ok) {
+      const data = await regResp.json() as { owner_uid?: string; name?: string };
       if (data.owner_uid) {
+        const greetName = data.name || displayLabel;
         await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/sendMessage`, {
           method: "POST",
           headers: {
@@ -110,7 +129,7 @@ export async function runBind(opts: BindOptions): Promise<void> {
           body: JSON.stringify({
             channel_id: data.owner_uid,
             channel_type: 1,
-            payload: { type: 1, content: `你好！我是 ${data.robot_id ?? opts.accountId}，已上线 👋` },
+            payload: { type: 1, content: `你好！我是 ${greetName}，已上线 👋` },
           }),
           signal: AbortSignal.timeout(10000),
         });
