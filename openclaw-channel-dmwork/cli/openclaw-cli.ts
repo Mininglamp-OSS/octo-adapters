@@ -109,24 +109,34 @@ function resolveCommand(name: string): string {
 
 /**
  * Execute an external command, compatible with Windows .cmd shims.
- * On Windows, if the resolved path ends in .cmd, uses shell: true.
+ * On Windows, .cmd files are executed via cmd.exe /d /s /c explicitly.
  * All external command invocations (openclaw, npm, etc.) should use this.
  */
 export function runCmd(command: string, args: string[], opts: Record<string, unknown> = {}): string {
   const resolved = resolveCommand(command);
-  const shellOpt = IS_WINDOWS && /\.cmd$/i.test(resolved) ? { shell: true } : {};
-  return execFileSync(resolved, args, { encoding: "utf-8", ...shellOpt, ...opts } as any) as unknown as string;
+  if (IS_WINDOWS && /\.cmd$/i.test(resolved)) {
+    const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+    const escaped = args.map((a) => /[\s"&|<>^%]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+    const cmdline = `"${resolved}" ${escaped.join(" ")}`;
+    return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+  }
+  return execFileSync(resolved, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }
 
 const OPENCLAW = findGlobalOpenclaw();
 const NEEDS_SHELL = IS_WINDOWS && /\.cmd$/i.test(OPENCLAW);
 
 /**
- * Execute openclaw CLI command. Wrapper around runCmd with pre-resolved path.
+ * Execute openclaw CLI command. Wrapper with pre-resolved path.
  */
 function runOpenclaw(args: string[], opts: Record<string, unknown> = {}): string {
-  const shellOpt = NEEDS_SHELL ? { shell: true } : {};
-  return execFileSync(OPENCLAW, args, { encoding: "utf-8", ...shellOpt, ...opts } as any) as unknown as string;
+  if (NEEDS_SHELL) {
+    const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+    const escaped = args.map((a) => /[\s"&|<>^%]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+    const cmdline = `"${OPENCLAW}" ${escaped.join(" ")}`;
+    return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+  }
+  return execFileSync(OPENCLAW, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }
 
 /** Get the resolved openclaw binary path */

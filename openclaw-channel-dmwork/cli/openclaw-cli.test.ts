@@ -181,10 +181,11 @@ describe("findGlobalOpenclaw (via module load)", () => {
       const mod = await loadModule();
       mockExecFileSync.mockReturnValue("OpenClaw 2026.4.21\n");
       mod.getOpenClawVersion();
+      // Windows .cmd files are executed via cmd.exe /d /s /c
       expect(mockExecFileSync).toHaveBeenCalledWith(
-        "C:\\Users\\mLamp\\AppData\\Roaming\\npm\\openclaw.cmd",
-        expect.any(Array),
-        expect.objectContaining({ shell: true }),
+        expect.stringContaining("cmd.exe"),
+        expect.arrayContaining(["/d", "/s", "/c"]),
+        expect.any(Object),
       );
     } finally {
       Object.defineProperty(process, "platform", { value: originalPlatform });
