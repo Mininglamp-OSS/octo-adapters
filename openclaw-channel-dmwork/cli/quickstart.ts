@@ -39,16 +39,6 @@ interface CreatedBot {
   error?: string;
 }
 
-/** Normalize agent id to a valid bot username, matching server-side rules. */
-export function normalizeUsername(agentId: string): string {
-  let base = agentId.trim().toLowerCase();
-  base = base.replace(/_bot$/, "");
-  base = base.replace(/[^a-z0-9_]/g, "");
-  if (!base) base = "agent"; // fallback for all-non-alphanumeric input
-  if (base.length > 17) base = base.slice(0, 17); // leave room for _2_bot/_3_bot
-  return `${base}_bot`;
-}
-
 export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
   ensureOpenClawCompat();
 
@@ -93,93 +83,52 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
   const results: CreatedBot[] = [];
 
   for (const agent of agents) {
-    const baseName = normalizeUsername(agent.id);
-    let created = false;
+    const displayName = agent.name || agent.id;
+    try {
+      const resp = await fetch(`${apiBase}/v1/user/bots`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${opts.apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ name: displayName }),
+        signal: AbortSignal.timeout(15000),
+      });
 
-    // Try base name, then _2_bot, _3_bot
-    const candidates = [baseName];
-    const baseWithout = baseName.replace(/_bot$/, "");
-    candidates.push(`${baseWithout}_2_bot`, `${baseWithout}_3_bot`);
+      const text = await resp.text().catch(() => "");
 
-    for (const username of candidates) {
-      try {
-        const resp = await fetch(`${apiBase}/v1/user/bots`, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${opts.apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            username,
-            name: agent.name || agent.id,
-          }),
-          signal: AbortSignal.timeout(15000),
+      if (resp.ok) {
+        const data = JSON.parse(text) as { robot_id: string; bot_token: string; name: string };
+        results.push({
+          agentId: agent.id,
+          robotId: data.robot_id,
+          botToken: data.bot_token,
+          name: data.name,
+          status: "ok",
         });
-
-        const text = await resp.text().catch(() => "");
-
-        if (resp.ok) {
-          const data = JSON.parse(text) as { robot_id: string; bot_token: string; name: string };
-          results.push({
-            agentId: agent.id,
-            robotId: data.robot_id,
-            botToken: data.bot_token,
-            name: data.name,
-            status: "ok",
-          });
-          console.log(`  Created bot: ${data.robot_id} → agent ${agent.id}`);
-          created = true;
-          break;
-        }
-
-        // Username conflict: 409 (new server) or 400 with "已被占用"/"occupied" (old server)
-        const isUsernameConflict =
-          resp.status === 409 ||
-          (resp.status === 400 && /已被占用|occupied/i.test(text));
-
-        if (isUsernameConflict) {
-          console.log(`  ${username} already occupied, trying next...`);
-          continue;
-        }
-
+        console.log(`  Created bot: ${data.name} (${data.robot_id}) → agent ${agent.id}`);
+      } else {
         const errMsg = `HTTP ${resp.status}: ${text.slice(0, 200)}`;
         console.error(`  ${agent.id}: ${errMsg}`);
         results.push({
           agentId: agent.id,
-          robotId: username,
+          robotId: "",
           botToken: "",
-          name: agent.name || agent.id,
+          name: displayName,
           status: "failed",
           error: errMsg,
         });
-        created = true;
-        break;
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        console.error(`  ${agent.id}: ${errMsg}`);
-        results.push({
-          agentId: agent.id,
-          robotId: username,
-          botToken: "",
-          name: agent.name || agent.id,
-          status: "failed",
-          error: errMsg,
-        });
-        created = true;
-        break;
       }
-    }
-
-    if (!created) {
-      const tried = candidates.join(", ");
-      console.error(`  ${agent.id}: all username variants conflicted (${tried})`);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error(`  ${agent.id}: ${errMsg}`);
       results.push({
         agentId: agent.id,
-        robotId: baseName,
+        robotId: "",
         botToken: "",
-        name: agent.name || agent.id,
+        name: displayName,
         status: "failed",
-        error: `All username variants conflicted: ${tried}`,
+        error: errMsg,
       });
     }
   }
@@ -210,6 +159,7 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
     cfg.channels.dmwork.accounts[bot.robotId] = {
       botToken: bot.botToken,
       apiUrl: opts.apiUrl,
+      name: bot.name,
     };
 
     // Binding
@@ -252,8 +202,9 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
         signal: AbortSignal.timeout(10000),
       });
       if (regResp.ok) {
-        const data = await regResp.json() as { owner_uid?: string };
+        const data = await regResp.json() as { owner_uid?: string; name?: string };
         if (data.owner_uid) {
+          const greetName = data.name || bot.name;
           await fetch(`${apiBase}/v1/bot/sendMessage`, {
             method: "POST",
             headers: {
@@ -263,7 +214,7 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
             body: JSON.stringify({
               channel_id: data.owner_uid,
               channel_type: 1,
-              payload: { type: 1, content: `你好！我是 ${bot.name}，已上线 👋` },
+              payload: { type: 1, content: `你好！我是 ${greetName}，已上线 👋` },
             }),
             signal: AbortSignal.timeout(10000),
           });
@@ -285,7 +236,7 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
   console.log();
 
   for (const bot of successful) {
-    console.log(`  ✅ ${bot.agentId} → ${bot.robotId}`);
+    console.log(`  ✅ ${bot.agentId} → ${bot.name} (${bot.robotId})`);
   }
   for (const bot of failed) {
     console.log(`  ❌ ${bot.agentId} → ${bot.error}`);

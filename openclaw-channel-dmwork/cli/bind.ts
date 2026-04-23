@@ -52,19 +52,38 @@ export async function runBind(opts: BindOptions): Promise<void> {
   if (!cfg.channels.dmwork) cfg.channels.dmwork = {};
   if (!cfg.channels.dmwork.accounts) cfg.channels.dmwork.accounts = {};
 
-  // 4. Write account config
-  cfg.channels.dmwork.accounts[opts.accountId] = {
+  // 4. Register once, store full result for config + greeting
+  let botName = "";
+  let ownerUID = "";
+  try {
+    const regResp = await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/register`, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${opts.botToken}`, "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(10000),
+    });
+    if (regResp.ok) {
+      const regData = await regResp.json() as { name?: string; owner_uid?: string };
+      botName = regData.name ?? "";
+      ownerUID = regData.owner_uid ?? "";
+    }
+  } catch { /* best-effort */ }
+
+  // 5. Write account config
+  const accountConfig: Record<string, string> = {
     botToken: opts.botToken,
     apiUrl: opts.apiUrl,
   };
+  if (botName) accountConfig.name = botName;
+  cfg.channels.dmwork.accounts[opts.accountId] = accountConfig;
 
-  // 5. Set dmScope (multi-bot isolation)
+  // 6. Set dmScope (multi-bot isolation)
   if (!cfg.session) cfg.session = {};
   if (!cfg.session.dmScope) {
     cfg.session.dmScope = RECOMMENDED_DM_SCOPE;
   }
 
-  // 6. Add or update binding
+  // 7. Add or update binding
   if (!cfg.bindings) cfg.bindings = [];
   const existingIdx = (cfg.bindings as any[]).findIndex(
     (b: any) => b.match?.channel === "dmwork" && b.match?.accountId === opts.accountId,
@@ -78,47 +97,37 @@ export async function runBind(opts: BindOptions): Promise<void> {
     });
   }
 
-  // 7. Atomic write
+  // 8. Atomic write
   writeConfigAtomic(cfg);
-  console.log(`Bot account "${opts.accountId}" configured and bound to agent "${opts.agent}".`);
+  const displayLabel = botName || opts.accountId;
+  console.log(`Bot "${displayLabel}" (${opts.accountId}) configured and bound to agent "${opts.agent}".`);
 
-  // 8. Wait for channel hot-reload
+  // 9. Wait for channel hot-reload
   console.log("Waiting for DMWork channel to reload...");
   await new Promise((r) => setTimeout(r, 2000));
 
-  // 9. Send greeting to bot owner (best-effort, not a connectivity proof)
-  console.log("Sending greeting to bot owner...");
-  try {
-    const registerResp = await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/register`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${opts.botToken}`,
-        "Content-Type": "application/json",
-      },
-      body: "{}",
-      signal: AbortSignal.timeout(10000),
-    });
-    if (registerResp.ok) {
-      const data = await registerResp.json() as { owner_uid?: string; robot_id?: string };
-      if (data.owner_uid) {
-        await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/sendMessage`, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${opts.botToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            channel_id: data.owner_uid,
-            channel_type: 1,
-            payload: { type: 1, content: `你好！我是 ${data.robot_id ?? opts.accountId}，已上线 👋` },
-          }),
-          signal: AbortSignal.timeout(10000),
-        });
-        console.log(`Greeting sent to owner (${data.owner_uid}).`);
-      }
+  // 10. Send greeting to bot owner (reuse register data from step 4)
+  if (ownerUID) {
+    console.log("Sending greeting to bot owner...");
+    try {
+      const greetName = botName || displayLabel;
+      await fetch(`${opts.apiUrl.replace(/\/+$/, "")}/v1/bot/sendMessage`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${opts.botToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          channel_id: ownerUID,
+          channel_type: 1,
+          payload: { type: 1, content: `你好！我是 ${greetName}，已上线 👋` },
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+      console.log(`Greeting sent to owner (${ownerUID}).`);
+    } catch {
+      console.log("Could not send greeting. Please test connectivity by sending a message to the bot in DMWork.");
     }
-  } catch {
-    console.log("Could not send greeting. Please test connectivity by sending a message to the bot in DMWork.");
   }
 
   console.log("\nBind complete! Please send a message to the bot in DMWork to verify the connection.");
