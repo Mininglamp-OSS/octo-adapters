@@ -101,13 +101,33 @@ describe("getOpenClawVersion", () => {
     expect(getOpenClawVersion()).toBe("2026.4.11");
   });
 
-  it("should return null when openclaw is not installed", async () => {
+  it("should return null when openclaw is not installed (ENOENT)", async () => {
     const { getOpenClawVersion } = await loadModule();
     mockExecFileSync.mockImplementation(() => {
-      throw new Error("ENOENT");
+      const err = new Error("spawn openclaw ENOENT") as any;
+      err.code = "ENOENT";
+      throw err;
     });
 
     expect(getOpenClawVersion()).toBeNull();
+  });
+
+  it("should return null on non-ENOENT errors (getOpenClawVersion)", async () => {
+    const { getOpenClawVersion } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error("permission denied");
+    });
+
+    expect(getOpenClawVersion()).toBeNull();
+  });
+
+  it("should throw on non-ENOENT errors (getOpenClawVersionStrict)", async () => {
+    const { getOpenClawVersionStrict } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error("permission denied");
+    });
+
+    expect(() => getOpenClawVersionStrict()).toThrow("Failed to execute openclaw");
   });
 });
 
@@ -184,7 +204,7 @@ describe("findGlobalOpenclaw (via module load)", () => {
       // Windows .cmd files are executed via cmd.exe /d /s /c
       expect(mockExecFileSync).toHaveBeenCalledWith(
         expect.stringContaining("cmd.exe"),
-        expect.arrayContaining(["/d", "/s", "/v:off", "/c"]),
+        expect.arrayContaining(["/d", "/v:off", "/c", "call"]),
         expect.any(Object),
       );
     } finally {
@@ -215,8 +235,8 @@ describe("findGlobalOpenclaw (via module load)", () => {
       mockExecFileSync.mockClear();
       mockExecFileSync.mockImplementation((_cmd: unknown, args: unknown) => {
         const argsArr = args as string[];
-        // cmd.exe /d /s /v:off /c "npm.cmd" config get prefix
-        if (argsArr?.some?.((a: string) => String(a).includes("config get prefix"))) {
+        // cmd.exe /d /v:off /c call npm.cmd config get prefix
+        if (argsArr?.includes?.("prefix")) {
           return "C:\\Users\\mLamp\\AppData\\Roaming\\npm\n";
         }
         // openclaw --version via cmd.exe

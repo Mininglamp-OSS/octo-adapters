@@ -15,7 +15,7 @@ import {
 import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
 import { ensureOpenClawCompat, PLUGIN_ID } from "./utils.js";
-import { getOpenClawVersion, resolvePluginState } from "./openclaw-cli.js";
+import { getOpenClawVersionStrict, resolvePluginState } from "./openclaw-cli.js";
 import { createRequire } from "node:module";
 
 const program = new Command();
@@ -33,7 +33,12 @@ program
   .command("info")
   .description("Show CLI and plugin version info")
   .action(() => {
-    const openclawVersion = getOpenClawVersion() ?? "not found";
+    let openclawVersion: string;
+    try {
+      openclawVersion = getOpenClawVersionStrict() ?? "not found";
+    } catch (err) {
+      openclawVersion = `error: ${err instanceof Error ? err.message : String(err)}`;
+    }
     const state = resolvePluginState(PLUGIN_ID);
     let installedVersion = "not installed";
     if (state.installed && state.version) {
