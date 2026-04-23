@@ -166,10 +166,16 @@ export function getOpenClawBin(): string {
 /** Execute openclaw command (exported for quickstart.ts etc.) */
 export { runOpenclaw };
 
-/** Expand ~ to home directory */
-function expandHome(p: string): string {
+/** Normalize config path: expand ~ and resolve Windows relative paths */
+function normalizeConfigPath(p: string): string {
   if (p.startsWith("~/")) return resolve(homedir(), p.slice(2));
-  return p;
+  if (p.startsWith("~\\")) return resolve(homedir(), p.slice(2));
+  // Windows relative path like .\.openclaw\openclaw.json → resolve to home
+  if (/^\.[\\/]\.openclaw[\\/]/.test(p)) return resolve(homedir(), p.slice(2));
+  // Already absolute → use as-is
+  if (resolve(p) === p) return p;
+  // Other relative paths → resolve from home (safest assumption for config)
+  return resolve(homedir(), p);
 }
 
 // ---------------------------------------------------------------------------
@@ -637,7 +643,7 @@ export function restoreChannelConfigToFile(
  */
 export function getConfigFilePathSafe(): string {
   try {
-    return expandHome(getConfigFilePath());
+    return normalizeConfigPath(getConfigFilePath());
   } catch {
     return resolve(homedir(), ".openclaw", "openclaw.json");
   }

@@ -553,3 +553,54 @@ describe("resolvePluginState", () => {
     expect(state.source).toBe("fallback");
   });
 });
+
+describe("getConfigFilePathSafe (Windows relative path)", () => {
+  it("should resolve Windows relative path .\\.\\.openclaw\\openclaw.json to homedir", async () => {
+    vi.resetModules();
+    const mockExec = vi.fn();
+    // openclaw config file returns Windows relative path
+    mockExec.mockReturnValue(".\\.openclaw\\openclaw.json\n");
+    vi.doMock("node:child_process", () => ({
+      execFileSync: mockExec,
+      execSync: vi.fn().mockImplementation(() => { throw new Error("not found"); }),
+    }));
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...actual,
+        existsSync: vi.fn().mockReturnValue(false),
+      };
+    });
+
+    const { getConfigFilePathSafe } = await import("./openclaw-cli.js");
+    const result = getConfigFilePathSafe();
+
+    // Should NOT contain literal ~ or relative .\ — must be resolved to absolute
+    expect(result).not.toContain("~");
+    expect(result).not.toMatch(/^\.\\/);
+    expect(result).toContain(".openclaw");
+    expect(result).toContain("openclaw.json");
+  });
+
+  it("should keep absolute paths unchanged", async () => {
+    vi.resetModules();
+    const mockExec = vi.fn();
+    mockExec.mockReturnValue("/home/user/.openclaw/openclaw.json\n");
+    vi.doMock("node:child_process", () => ({
+      execFileSync: mockExec,
+      execSync: vi.fn().mockImplementation(() => { throw new Error("not found"); }),
+    }));
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...actual,
+        existsSync: vi.fn().mockReturnValue(false),
+      };
+    });
+
+    const { getConfigFilePathSafe } = await import("./openclaw-cli.js");
+    const result = getConfigFilePathSafe();
+
+    expect(result).toBe("/home/user/.openclaw/openclaw.json");
+  });
+});
