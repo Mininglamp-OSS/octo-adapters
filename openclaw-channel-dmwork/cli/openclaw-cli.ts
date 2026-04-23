@@ -127,7 +127,10 @@ export function runCmd(command: string, args: string[], opts: Record<string, unk
   const resolved = resolveCommand(command);
   if (IS_WINDOWS && /\.cmd$/i.test(resolved)) {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-    const escaped = args.map((a) => /[\s"&|<>^%]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+    const escaped = args.map((a) => {
+      if (!/[\s"&|<>^%!]/.test(a)) return a;
+      return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
+    });
     const cmdline = `"${resolved}" ${escaped.join(" ")}`;
     return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
@@ -143,7 +146,10 @@ const NEEDS_SHELL = IS_WINDOWS && /\.cmd$/i.test(OPENCLAW);
 function runOpenclaw(args: string[], opts: Record<string, unknown> = {}): string {
   if (NEEDS_SHELL) {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-    const escaped = args.map((a) => /[\s"&|<>^%]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+    const escaped = args.map((a) => {
+      if (!/[\s"&|<>^%!]/.test(a)) return a;
+      return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
+    });
     const cmdline = `"${OPENCLAW}" ${escaped.join(" ")}`;
     return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
