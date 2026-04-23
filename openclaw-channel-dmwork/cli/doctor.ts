@@ -6,7 +6,6 @@
  */
 
 import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -26,6 +25,7 @@ import {
   removeOrphanedBindingsFromFile,
   readConfigFromFile,
   resolvePluginState,
+  runCmd,
 } from "./openclaw-cli.js";
 import { PLUGIN_ID, RECOMMENDED_DM_SCOPE } from "./utils.js";
 
@@ -251,7 +251,7 @@ export async function runDoctorChecks(params: {
         checks.push({ name: "Dependencies", status: "PASS", detail: "node_modules exists" });
       } else if (fix) {
         try {
-          execFileSync("npm", ["install", "--production", "--ignore-scripts"], {
+          runCmd("npm", ["install", "--production", "--ignore-scripts"], {
             cwd: resolvedPath,
             stdio: ["pipe", "pipe", "pipe"],
           });
