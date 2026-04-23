@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
+import { sendMessage, editMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -1491,6 +1491,11 @@ export async function handleInboundMessage(params: {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
   }, 5000);
 
+  // Draft-edit dedup: tracks the first sent message so subsequent delivers edit it.
+  // draftMessage is scoped to this handleInboundMessage invocation; deliver is called
+  // sequentially by dispatchReplyWithBufferedBlockDispatcher, so no concurrency issue.
+  let draftMessage: { messageId: string; messageSeq: number } | null = null;
+
   try {
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
@@ -1633,7 +1638,34 @@ export async function handleInboundMessage(params: {
         // Detect @all/@所有人 in final content
         const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
-        await sendMessage({
+        // Draft-edit dedup: subsequent delivers edit the first message.
+        // Note: editMessage API only updates content_edit text; mention metadata
+        // (mentionUids/mentionEntities/mentionAll) cannot be updated via edit.
+        // This is acceptable because the first sendMessage already carries the
+        // correct mention info, and subsequent edits only update the text body.
+        if (draftMessage) {
+          try {
+            const contentEdit = JSON.stringify({ type: 1, content: finalContent });
+            log?.debug?.(`dmwork: [draft-edit] editMessage attempt id=${draftMessage.messageId} seq=${draftMessage.messageSeq}`);
+            await editMessage({
+              apiUrl: account.config.apiUrl,
+              botToken: account.config.botToken ?? "",
+              messageId: draftMessage.messageId,
+              messageSeq: draftMessage.messageSeq,
+              channelId: replyChannelId,
+              channelType: replyChannelType,
+              contentEdit,
+            });
+            log?.debug?.(`dmwork: [draft-edit] editMessage success`);
+            statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+            return;
+          } catch (editErr) {
+            log?.warn?.(`dmwork: [draft-edit] editMessage failed: ${String(editErr)}, falling back to sendMessage`);
+            draftMessage = null;
+          }
+        }
+
+        const sendResult = await sendMessage({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken ?? "",
           channelId: replyChannelId,
@@ -1643,6 +1675,17 @@ export async function handleInboundMessage(params: {
           ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
           mentionAll: hasAtAll || undefined,
         });
+
+        // Save draft for subsequent edit-dedup
+        if (sendResult?.message_id != null && sendResult?.message_seq != null) {
+          draftMessage = {
+            messageId: String(sendResult.message_id),
+            messageSeq: sendResult.message_seq,
+          };
+          log?.debug?.(`dmwork: [draft-edit] sendMessage OK, draft set: id=${draftMessage.messageId} seq=${draftMessage.messageSeq}`);
+        } else {
+          log?.debug?.(`dmwork: [draft-edit] sendMessage returned no id/seq, draft-edit disabled`);
+        }
 
         statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
       },

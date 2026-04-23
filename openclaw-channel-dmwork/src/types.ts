@@ -106,7 +106,8 @@ export interface BotStreamEndReq {
 }
 
 export interface SendMessageResult {
-  message_id: number;
+  message_id: string;  // string due to int64 protection in postJson
+  client_msg_no: string;
   message_seq: number;
 }
 
