@@ -61,7 +61,7 @@ function findGlobalOpenclaw(): string {
       let prefix: string;
       if (/\.cmd$/i.test(npmResolved)) {
         const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-        prefix = execFileSync(comspec, ["/d", "/s", "/c", `"${npmResolved}" config get prefix`], {
+        prefix = execFileSync(comspec, ["/d", "/s", "/v:off", "/c", `"${npmResolved}" config get prefix`], {
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
         }).trim();
@@ -132,7 +132,7 @@ export function runCmd(command: string, args: string[], opts: Record<string, unk
       return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
     });
     const cmdline = `"${resolved}" ${escaped.join(" ")}`;
-    return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+    return execFileSync(comspec, ["/d", "/s", "/v:off", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
   return execFileSync(resolved, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }
@@ -151,7 +151,7 @@ function runOpenclaw(args: string[], opts: Record<string, unknown> = {}): string
       return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
     });
     const cmdline = `"${OPENCLAW}" ${escaped.join(" ")}`;
-    return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+    return execFileSync(comspec, ["/d", "/s", "/v:off", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
   return execFileSync(OPENCLAW, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }

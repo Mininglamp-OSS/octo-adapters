@@ -184,7 +184,7 @@ describe("findGlobalOpenclaw (via module load)", () => {
       // Windows .cmd files are executed via cmd.exe /d /s /c
       expect(mockExecFileSync).toHaveBeenCalledWith(
         expect.stringContaining("cmd.exe"),
-        expect.arrayContaining(["/d", "/s", "/c"]),
+        expect.arrayContaining(["/d", "/s", "/v:off", "/c"]),
         expect.any(Object),
       );
     } finally {
