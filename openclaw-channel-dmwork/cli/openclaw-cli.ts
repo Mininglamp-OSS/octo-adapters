@@ -84,15 +84,45 @@ function findGlobalOpenclaw(): string {
   return "openclaw";
 }
 
-const OPENCLAW = findGlobalOpenclaw();
-const NEEDS_SHELL = process.platform === "win32" && /\.cmd$/i.test(OPENCLAW);
+const IS_WINDOWS = process.platform === "win32";
 
 /**
- * Execute openclaw CLI command. On Windows, .cmd shims require shell: true.
- * All openclaw invocations in this module MUST go through this function.
- *
- * 使用 execFileSync + shell:true 而非手动拼字符串，
- * 让 Node.js 自动处理 cmd.exe 参数转义（包括 JSON 内的引号）。
+ * Resolve a command name to its .cmd shim on Windows.
+ * On Windows, `where.exe <cmd>` may return both a bare file and a .cmd;
+ * execFileSync cannot execute the bare file (ENOENT), so we prefer .cmd.
+ */
+function resolveCommand(name: string): string {
+  if (IS_WINDOWS) {
+    try {
+      const output = execSync(`where.exe ${name}`, {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const paths = output.split(/\r?\n/).map((p) => p.trim()).filter((p) => p.length > 0);
+      const cmdShim = paths.find((p) => /\.cmd$/i.test(p));
+      if (cmdShim) return cmdShim;
+      if (paths.length > 0) return paths[0];
+    } catch { /* not found via where */ }
+  }
+  return name;
+}
+
+/**
+ * Execute an external command, compatible with Windows .cmd shims.
+ * On Windows, if the resolved path ends in .cmd, uses shell: true.
+ * All external command invocations (openclaw, npm, etc.) should use this.
+ */
+export function runCmd(command: string, args: string[], opts: Record<string, unknown> = {}): string {
+  const resolved = resolveCommand(command);
+  const shellOpt = IS_WINDOWS && /\.cmd$/i.test(resolved) ? { shell: true } : {};
+  return execFileSync(resolved, args, { encoding: "utf-8", ...shellOpt, ...opts } as any) as unknown as string;
+}
+
+const OPENCLAW = findGlobalOpenclaw();
+const NEEDS_SHELL = IS_WINDOWS && /\.cmd$/i.test(OPENCLAW);
+
+/**
+ * Execute openclaw CLI command. Wrapper around runCmd with pre-resolved path.
  */
 function runOpenclaw(args: string[], opts: Record<string, unknown> = {}): string {
   const shellOpt = NEEDS_SHELL ? { shell: true } : {};

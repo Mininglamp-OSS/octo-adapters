@@ -12,7 +12,6 @@
 
 import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { execFileSync } from "node:child_process";
 import {
   cleanupBrokenInstall,
   deleteLegacyBackup,
@@ -30,6 +29,7 @@ import {
   restoreLegacyDir,
   saveChannelConfigToDisk,
   removeChannelConfigFromFile,
+  runCmd,
 } from "./openclaw-cli.js";
 import {
   PLUGIN_ID,
@@ -38,8 +38,7 @@ import {
 
 function getLatestNpmVersion(tag: string): string | null {
   try {
-    return execFileSync("npm", ["view", `${PLUGIN_ID}@${tag}`, "version"], {
-      encoding: "utf-8",
+    return runCmd("npm", ["view", `${PLUGIN_ID}@${tag}`, "version"], {
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
   } catch {
