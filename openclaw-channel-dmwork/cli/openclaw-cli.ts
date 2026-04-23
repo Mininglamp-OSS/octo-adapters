@@ -53,13 +53,24 @@ function findGlobalOpenclaw(): string {
 
   // Strategy 2 (Windows): npm global prefix + openclaw.cmd
   // npm i -g openclaw 在 Windows 上生成 .ps1 和 .cmd，但 npx 子进程的 PATH
-  // 可能不包含 npm 全局目录，导致 where 找不到。直接通过 npm prefix 定位。
+  // 可能不包含 npm 全局目录，导致 where 找不到。通过 npm prefix 定位。
+  // 注意：npm 本身也是 .cmd，必须通过 resolveCommand 找到再用 cmd.exe 执行。
   if (isWindows) {
     try {
-      const prefix = execSync("npm config get prefix", {
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
+      const npmResolved = resolveCommand("npm");
+      let prefix: string;
+      if (/\.cmd$/i.test(npmResolved)) {
+        const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
+        prefix = execFileSync(comspec, ["/d", "/s", "/v:off", "/c", `"${npmResolved}" config get prefix`], {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+      } else {
+        prefix = execSync("npm config get prefix", {
+          encoding: "utf-8",
+          stdio: ["pipe", "pipe", "pipe"],
+        }).trim();
+      }
       if (prefix) {
         const cmdPath = resolve(prefix, "openclaw.cmd");
         if (existsSync(cmdPath)) return cmdPath;
@@ -116,9 +127,12 @@ export function runCmd(command: string, args: string[], opts: Record<string, unk
   const resolved = resolveCommand(command);
   if (IS_WINDOWS && /\.cmd$/i.test(resolved)) {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-    const escaped = args.map((a) => /[\s"&|<>^%]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+    const escaped = args.map((a) => {
+      if (!/[\s"&|<>^%!]/.test(a)) return a;
+      return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
+    });
     const cmdline = `"${resolved}" ${escaped.join(" ")}`;
-    return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+    return execFileSync(comspec, ["/d", "/s", "/v:off", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
   return execFileSync(resolved, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }
@@ -132,9 +146,12 @@ const NEEDS_SHELL = IS_WINDOWS && /\.cmd$/i.test(OPENCLAW);
 function runOpenclaw(args: string[], opts: Record<string, unknown> = {}): string {
   if (NEEDS_SHELL) {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-    const escaped = args.map((a) => /[\s"&|<>^%]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a);
+    const escaped = args.map((a) => {
+      if (!/[\s"&|<>^%!]/.test(a)) return a;
+      return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
+    });
     const cmdline = `"${OPENCLAW}" ${escaped.join(" ")}`;
-    return execFileSync(comspec, ["/d", "/s", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+    return execFileSync(comspec, ["/d", "/s", "/v:off", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
   return execFileSync(OPENCLAW, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }
