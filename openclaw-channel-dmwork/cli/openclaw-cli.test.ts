@@ -192,6 +192,57 @@ describe("findGlobalOpenclaw (via module load)", () => {
     }
   });
 
+  it("should fallback to npm prefix when where openclaw fails on Windows", async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const { execSync } = await import("node:child_process");
+      const { existsSync } = await import("node:fs");
+
+      vi.mocked(execSync).mockImplementation((cmd: string) => {
+        const cmdStr = String(cmd);
+        // where openclaw / where openclaw.exe → fail
+        if (cmdStr.includes("where") && cmdStr.includes("openclaw") && !cmdStr.includes("npm")) {
+          throw new Error("not found");
+        }
+        // where.exe npm → return npm.cmd (for resolveCommand)
+        if (cmdStr.includes("where") && cmdStr.includes("npm")) {
+          return "C:\\Users\\mLamp\\AppData\\Roaming\\npm\\npm.cmd\r\n";
+        }
+        return "";
+      });
+
+      mockExecFileSync.mockClear();
+      mockExecFileSync.mockImplementation((_cmd: unknown, args: unknown) => {
+        const argsArr = args as string[];
+        // cmd.exe /d /s /v:off /c "npm.cmd" config get prefix
+        if (argsArr?.some?.((a: string) => String(a).includes("config get prefix"))) {
+          return "C:\\Users\\mLamp\\AppData\\Roaming\\npm\n";
+        }
+        // openclaw --version via cmd.exe
+        return "OpenClaw 2026.4.21\n";
+      });
+
+      vi.mocked(existsSync).mockImplementation((p: unknown) => {
+        return String(p).endsWith("openclaw.cmd");
+      });
+
+      const mod = await loadModule();
+      mod.getOpenClawVersion();
+
+      // Verify: openclaw.cmd found via npm prefix, executed via cmd.exe
+      const cmdExeCalls = mockExecFileSync.mock.calls.filter(
+        (call) => String(call[0]).includes("cmd.exe"),
+      );
+      expect(cmdExeCalls.length).toBeGreaterThanOrEqual(2); // npm prefix + openclaw --version
+      expect(cmdExeCalls.some(
+        (call) => (call[1] as string[]).some((a) => a.includes("openclaw.cmd")),
+      )).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+    }
+  });
+
   it("should fallback to candidate paths when which/where fails", async () => {
     const { execSync } = await import("node:child_process");
     const { existsSync } = await import("node:fs");
