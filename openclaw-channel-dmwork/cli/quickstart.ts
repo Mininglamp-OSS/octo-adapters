@@ -9,12 +9,11 @@
  * - NOT idempotent — designed for first-time setup only
  */
 
-import { execFileSync } from "node:child_process";
 import {
   isHealthyInstall,
   readConfigFromFile,
   writeConfigAtomic,
-  getOpenClawBin,
+  runOpenclaw,
 } from "./openclaw-cli.js";
 import {
   RECOMMENDED_DM_SCOPE,
@@ -54,9 +53,7 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
   console.log("Fetching agent list...");
   let agents: AgentInfo[];
   try {
-    const OPENCLAW = getOpenClawBin();
-    const raw = execFileSync(OPENCLAW, ["agents", "list", "--json"], {
-      encoding: "utf-8",
+    const raw = runOpenclaw(["agents", "list", "--json"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     // OpenClaw stdout may contain plugin log noise before JSON (e.g. [dmwork], [plugins]).

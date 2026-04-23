@@ -2,15 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── runQuickstart error output tests ─────────────────────────────
 
-vi.mock("node:child_process", () => ({
-  execFileSync: vi.fn(),
-}));
-
+// Mock dependencies before importing runQuickstart
 vi.mock("./openclaw-cli.js", () => ({
   isHealthyInstall: vi.fn(() => true),
   readConfigFromFile: vi.fn(() => ({})),
   writeConfigAtomic: vi.fn(),
-  getOpenClawBin: vi.fn(() => "openclaw"),
+  runOpenclaw: vi.fn(),
 }));
 
 vi.mock("./utils.js", () => ({
@@ -19,9 +16,8 @@ vi.mock("./utils.js", () => ({
   ensureOpenClawCompat: vi.fn(),
 }));
 
-import { execFileSync } from "node:child_process";
-
-const mockExecFileSync = vi.mocked(execFileSync);
+import { runOpenclaw } from "./openclaw-cli.js";
+const mockRunOpenclaw = vi.mocked(runOpenclaw);
 
 function makeResponse(status: number, body: string): Response {
   return {
@@ -35,14 +31,11 @@ function makeResponse(status: number, body: string): Response {
 async function loadAndRun(opts: { apiKey: string; apiUrl: string }) {
   vi.resetModules();
 
-  vi.doMock("node:child_process", () => ({
-    execFileSync: mockExecFileSync,
-  }));
   vi.doMock("./openclaw-cli.js", () => ({
     isHealthyInstall: vi.fn(() => true),
     readConfigFromFile: vi.fn(() => ({})),
     writeConfigAtomic: vi.fn(),
-    getOpenClawBin: vi.fn(() => "openclaw"),
+    runOpenclaw: vi.fn(() => mockRunOpenclaw()),
   }));
   vi.doMock("./utils.js", () => ({
     PLUGIN_ID: "openclaw-channel-dmwork",
@@ -74,7 +67,8 @@ describe("runQuickstart", () => {
       throw new Error(`process.exit(${code})`);
     }) as any;
 
-    mockExecFileSync.mockReturnValue('[{"id":"main","name":"main"}]');
+    // Default: agents list returns one agent "main"
+    mockRunOpenclaw.mockReturnValue('[{"id":"main","name":"main"}]');
   });
 
   afterEach(() => {
