@@ -36,7 +36,16 @@ function findGlobalOpenclaw(): string {
           !p.includes("npx-cache") &&
           !p.includes("node_modules"),
         );
-      if (paths.length > 0) return paths[0];
+      if (paths.length > 0) {
+        // On Windows, `where openclaw` may return both the extensionless shim
+        // and `openclaw.cmd`. Prefer `.cmd`, otherwise execFileSync may hit
+        // ENOENT for the extensionless path.
+        if (isWindows) {
+          const cmdShim = paths.find((p) => /\.cmd$/i.test(p));
+          if (cmdShim) return cmdShim;
+        }
+        return paths[0];
+      }
     } catch {
       // command not available on this platform
     }
