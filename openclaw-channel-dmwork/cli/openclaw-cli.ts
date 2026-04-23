@@ -61,7 +61,7 @@ function findGlobalOpenclaw(): string {
       let prefix: string;
       if (/\.cmd$/i.test(npmResolved)) {
         const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-        prefix = execFileSync(comspec, ["/d", "/s", "/v:off", "/c", `"${npmResolved}" config get prefix`], {
+        prefix = execFileSync(comspec, ["/d", "/v:off", "/c", "call", npmResolved, "config", "get", "prefix"], {
           encoding: "utf-8",
           stdio: ["pipe", "pipe", "pipe"],
         }).trim();
@@ -123,16 +123,23 @@ function resolveCommand(name: string): string {
  * On Windows, .cmd files are executed via cmd.exe /d /s /c explicitly.
  * All external command invocations (openclaw, npm, etc.) should use this.
  */
+function escapeCmdArg(a: string): string {
+  let s = a.replace(/%/g, "%%");
+  if (/[&|<>^()"\s]/.test(s)) {
+    s = `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+function escapeCmdArgs(args: string[]): string[] {
+  return args.map(escapeCmdArg);
+}
+
 export function runCmd(command: string, args: string[], opts: Record<string, unknown> = {}): string {
   const resolved = resolveCommand(command);
   if (IS_WINDOWS && /\.cmd$/i.test(resolved)) {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-    const escaped = args.map((a) => {
-      if (!/[\s"&|<>^%!]/.test(a)) return a;
-      return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
-    });
-    const cmdline = `"${resolved}" ${escaped.join(" ")}`;
-    return execFileSync(comspec, ["/d", "/s", "/v:off", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+    return execFileSync(comspec, ["/d", "/v:off", "/c", "call", resolved, ...escapeCmdArgs(args)], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
   return execFileSync(resolved, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }
@@ -146,12 +153,7 @@ const NEEDS_SHELL = IS_WINDOWS && /\.cmd$/i.test(OPENCLAW);
 function runOpenclaw(args: string[], opts: Record<string, unknown> = {}): string {
   if (NEEDS_SHELL) {
     const comspec = process.env.ComSpec || "C:\\Windows\\System32\\cmd.exe";
-    const escaped = args.map((a) => {
-      if (!/[\s"&|<>^%!]/.test(a)) return a;
-      return `"${a.replace(/%/g, "%%").replace(/"/g, '""')}"`;
-    });
-    const cmdline = `"${OPENCLAW}" ${escaped.join(" ")}`;
-    return execFileSync(comspec, ["/d", "/s", "/v:off", "/c", cmdline], { encoding: "utf-8", ...opts } as any) as unknown as string;
+    return execFileSync(comspec, ["/d", "/v:off", "/c", "call", OPENCLAW, ...escapeCmdArgs(args)], { encoding: "utf-8", ...opts } as any) as unknown as string;
   }
   return execFileSync(OPENCLAW, args, { encoding: "utf-8", ...opts } as any) as unknown as string;
 }
@@ -554,8 +556,28 @@ export function getOpenClawVersion(): string | null {
     });
     const match = out.match(/(\d{4}\.\d+\.\d+)/);
     return match?.[1] ?? null;
-  } catch {
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return null;
+    }
+    console.error(`Failed to execute openclaw --version: ${err?.message ?? err}`);
     return null;
+  }
+}
+
+export function getOpenClawVersionStrict(): string | null {
+  try {
+    const out = runOpenclaw(["--version"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const match = out.match(/(\d{4}\.\d+\.\d+)/);
+    return match?.[1] ?? null;
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return null;
+    }
+    throw new Error(`Failed to execute openclaw: ${err?.message ?? err}`);
   }
 }
 

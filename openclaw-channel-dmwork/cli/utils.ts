@@ -3,7 +3,7 @@
  */
 
 import { createInterface } from "node:readline";
-import { getOpenClawVersion } from "./openclaw-cli.js";
+import { getOpenClawVersion, getOpenClawVersionStrict } from "./openclaw-cli.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -35,7 +35,13 @@ function compareVersions(a: string, b: string): number {
  * Warns (but continues) if version is below recommended minimum.
  */
 export function ensureOpenClawCompat(): void {
-  const version = getOpenClawVersion();
+  let version: string | null = null;
+  try {
+    version = getOpenClawVersionStrict();
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
   if (!version) {
     console.error(
       "Error: openclaw not found. Install it first: npm i -g openclaw",
