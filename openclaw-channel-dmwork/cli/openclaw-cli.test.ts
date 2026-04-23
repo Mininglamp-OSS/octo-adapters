@@ -150,18 +150,45 @@ describe("findGlobalOpenclaw (via module load)", () => {
   });
 
   it("should handle CRLF output from Windows", async () => {
-    const { execSync } = await import("node:child_process");
-    vi.mocked(execSync).mockReturnValue(
-      "C:\\npm\\_npx\\openclaw.cmd\r\nC:\\Program Files\\openclaw\\openclaw.exe\r\n",
-    );
-    const mod = await loadModule();
-    mockExecFileSync.mockReturnValue("test\n");
-    mod.configGet("test.path");
-    expect(mockExecFileSync).toHaveBeenCalledWith(
-      "C:\\Program Files\\openclaw\\openclaw.exe",
-      expect.any(Array),
-      expect.any(Object),
-    );
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const { execSync } = await import("node:child_process");
+      vi.mocked(execSync).mockReturnValue(
+        "C:\\npm\\_npx\\openclaw.cmd\r\nC:\\Program Files\\openclaw\\openclaw.exe\r\n",
+      );
+      const mod = await loadModule();
+      mockExecFileSync.mockReturnValue("test\n");
+      mod.configGet("test.path");
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "C:\\Program Files\\openclaw\\openclaw.exe",
+        expect.any(Array),
+        expect.any(Object),
+      );
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+    }
+  });
+
+  it("should prefer .cmd when where returns both shim variants on Windows", async () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      const { execSync } = await import("node:child_process");
+      vi.mocked(execSync).mockReturnValue(
+        "C:\\Users\\mLamp\\AppData\\Roaming\\npm\\openclaw\r\nC:\\Users\\mLamp\\AppData\\Roaming\\npm\\openclaw.cmd\r\n",
+      );
+      const mod = await loadModule();
+      mockExecFileSync.mockReturnValue("OpenClaw 2026.4.21\n");
+      mod.getOpenClawVersion();
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "C:\\Users\\mLamp\\AppData\\Roaming\\npm\\openclaw.cmd",
+        expect.any(Array),
+        expect.objectContaining({ shell: true }),
+      );
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform });
+    }
   });
 
   it("should fallback to candidate paths when which/where fails", async () => {
