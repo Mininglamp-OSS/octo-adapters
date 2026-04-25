@@ -1499,21 +1499,138 @@ export async function handleInboundMessage(params: {
   };
   const sentMediaUrls = new Set<string>();
 
+  // --- Shared helper: resolve mentions and send text ---
+  const resolveAndSendText = async (content: string) => {
+    let replyMentionUids: string[] = [];
+    let replyMentionEntities: MentionEntity[] = [];
+    let finalContent = content;
+
+    if (isGroup) {
+      const structuredMentions = parseStructuredMentions(content);
+
+      if (structuredMentions.length > 0) {
+        // v2 path: LLM used @[uid:name] format
+        const validUids = new Set(uidToNameMap.keys());
+        const converted = convertStructuredMentions(
+          content,
+          structuredMentions,
+          validUids,
+        );
+        finalContent = converted.content;
+        replyMentionEntities = [...converted.entities];
+
+        // Mixed scenario: check for remaining @name in converted content
+        const remaining = buildEntitiesFromFallback(finalContent, memberMap);
+        const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
+        for (const rm of remaining.entities) {
+          if (!existingOffsets.has(rm.offset)) {
+            replyMentionEntities.push(rm);
+          }
+        }
+
+        log?.debug?.(
+          `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
+        );
+      } else {
+        // v1 fallback path: LLM used @name format
+        const contentMentions = extractMentionMatches(content);
+
+        const unresolvedNames: { name: string; index: number }[] = [];
+
+        const resolveMention = (name: string): { uid: string | null; newContent: string } => {
+          const uid = findUidByName(name, memberMap);
+          let newContent = finalContent;
+
+          if (uid) {
+            return { uid, newContent };
+          } else if (/^[a-f0-9]{32}$/i.test(name)) {
+            const displayName = uidToNameMap.get(name);
+            if (displayName) {
+              newContent = newContent.replace(`@${name}`, `@${displayName}`);
+              return { uid: name, newContent };
+            }
+            return { uid: name, newContent };
+          } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
+            const displayName = uidToNameMap.get(name);
+            if (displayName) {
+              newContent = newContent.replace(`@${name}`, `@${displayName}`);
+              return { uid: name, newContent };
+            }
+            return { uid: name, newContent };
+          }
+          return { uid: null, newContent };
+        };
+
+        const resolvedUids: (string | null)[] = [];
+        for (const mention of contentMentions) {
+          const name = mention.slice(1);
+          const result = resolveMention(name);
+          finalContent = result.newContent;
+          resolvedUids.push(result.uid);
+          if (!result.uid) {
+            unresolvedNames.push({ name, index: resolvedUids.length - 1 });
+          }
+        }
+
+        if (unresolvedNames.length > 0) {
+          log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
+          const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
+          if (refreshed) {
+            for (const { name, index } of unresolvedNames) {
+              const uid = findUidByName(name, memberMap);
+              if (uid) {
+                resolvedUids[index] = uid;
+              }
+            }
+          }
+        }
+
+        replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
+        const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
+        replyMentionEntities = fallbackResult.entities;
+      }
+
+      // Sort entities by offset and rebuild uids from sorted entities
+      if (replyMentionEntities.length > 0) {
+        replyMentionEntities.sort((a, b) => a.offset - b.offset);
+        replyMentionUids = replyMentionEntities.map((e) => e.uid);
+      }
+    }
+
+    // Detect @all/@所有人 in final content
+    const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
+
+    await sendMessage({
+      apiUrl: account.config.apiUrl,
+      botToken: account.config.botToken ?? "",
+      channelId: replyChannelId,
+      channelType: replyChannelType,
+      content: finalContent,
+      ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
+      ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
+      mentionAll: hasAtAll || undefined,
+    });
+    statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+  };
+
   try {
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg: config,
       replyOptions: {},
       dispatcherOptions: {
-        // Note: core's createNormalizedOutboundDeliverer currently swallows the
-        // `info` argument (kind, etc.) before calling this deliver callback.
-        // If that changes upstream, re-add the second parameter here.
         deliver: async (payload: {
           text?: string;
           mediaUrls?: string[];
           mediaUrl?: string;
           replyToId?: string | null;
-        }) => {
+          isReasoning?: boolean;
+        }, info?: { kind?: string }) => {
+          // Skip reasoning blocks
+          if (payload.isReasoning) return;
+
+          const kind = info?.kind ?? "final";
+
           // --- Media: send immediately (no edit/forward issue) with dedup ---
           const outboundMediaUrls = resolveOutboundMediaUrls(payload);
           for (const mediaUrl of outboundMediaUrls) {
@@ -1533,7 +1650,7 @@ export async function handleInboundMessage(params: {
             }
           }
 
-          // --- Text: buffer only, will be sent once after dispatcher finishes ---
+          // --- Text handling based on kind ---
           const content = payload.text?.trim() ?? "";
           if (!content && outboundMediaUrls.length > 0) {
             statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
@@ -1541,9 +1658,16 @@ export async function handleInboundMessage(params: {
           }
           if (!content) return;
 
-          // Overwrite buffer with latest cumulative text
+          if (kind === "tool") {
+            // Verbose tool call output: send immediately
+            await resolveAndSendText(content);
+            log?.info?.(`dmwork: [deliver] tool text sent (${content.length} chars)`);
+            return;
+          }
+
+          // kind === "block" / "final" / anything else: buffer, send only once after dispatcher finishes
           deliverBuffer.lastText = content;
-          log?.debug?.(`dmwork: [deliver-buffer] text buffered (${content.length} chars)`);
+          log?.debug?.(`dmwork: [deliver-buffer] ${kind} text buffered (${content.length} chars)`);
         },
         onError: async (err: unknown, info: { kind: string }) => {
           clearInterval(typingInterval);
@@ -1566,125 +1690,12 @@ export async function handleInboundMessage(params: {
       },
     });
   } finally {
-    // --- Final send: deliver buffered text even if dispatcher threw ---
+    // --- Final send: deliver buffered text if only blocks arrived (no final/tool) ---
     if (deliverBuffer.lastText && !deliverBuffer.textSent) {
       deliverBuffer.textSent = true;
       try {
-        const content = deliverBuffer.lastText;
-
-        // Build mentionUids + entities from @mentions in content
-        // Supports both @[uid:name] (v2 structured) and @name (v1 fallback)
-        let replyMentionUids: string[] = [];
-        let replyMentionEntities: MentionEntity[] = [];
-        let finalContent = content;
-
-        if (isGroup) {
-          const structuredMentions = parseStructuredMentions(content);
-
-          if (structuredMentions.length > 0) {
-            // v2 path: LLM used @[uid:name] format
-            const validUids = new Set(uidToNameMap.keys());
-            const converted = convertStructuredMentions(
-              content,
-              structuredMentions,
-              validUids,
-            );
-            finalContent = converted.content;
-            replyMentionEntities = [...converted.entities];
-
-            // Mixed scenario: check for remaining @name in converted content
-            const remaining = buildEntitiesFromFallback(finalContent, memberMap);
-            const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
-            for (const rm of remaining.entities) {
-              if (!existingOffsets.has(rm.offset)) {
-                replyMentionEntities.push(rm);
-              }
-            }
-
-            log?.debug?.(
-              `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
-            );
-          } else {
-            // v1 fallback path: LLM used @name format
-            const contentMentions = extractMentionMatches(content);
-
-            const unresolvedNames: { name: string; index: number }[] = [];
-
-            const resolveMention = (name: string): { uid: string | null; newContent: string } => {
-              const uid = findUidByName(name, memberMap);
-              let newContent = finalContent;
-
-              if (uid) {
-                return { uid, newContent };
-              } else if (/^[a-f0-9]{32}$/i.test(name)) {
-                const displayName = uidToNameMap.get(name);
-                if (displayName) {
-                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                  return { uid: name, newContent };
-                }
-                return { uid: name, newContent };
-              } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
-                const displayName = uidToNameMap.get(name);
-                if (displayName) {
-                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                  return { uid: name, newContent };
-                }
-                return { uid: name, newContent };
-              }
-              return { uid: null, newContent };
-            };
-
-            const resolvedUids: (string | null)[] = [];
-            for (const mention of contentMentions) {
-              const name = mention.slice(1);
-              const result = resolveMention(name);
-              finalContent = result.newContent;
-              resolvedUids.push(result.uid);
-              if (!result.uid) {
-                unresolvedNames.push({ name, index: resolvedUids.length - 1 });
-              }
-            }
-
-            if (unresolvedNames.length > 0) {
-              log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
-              const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
-              if (refreshed) {
-                for (const { name, index } of unresolvedNames) {
-                  const uid = findUidByName(name, memberMap);
-                  if (uid) {
-                    resolvedUids[index] = uid;
-                  }
-                }
-              }
-            }
-
-            replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
-            const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
-            replyMentionEntities = fallbackResult.entities;
-          }
-
-          // Sort entities by offset and rebuild uids from sorted entities
-          if (replyMentionEntities.length > 0) {
-            replyMentionEntities.sort((a, b) => a.offset - b.offset);
-            replyMentionUids = replyMentionEntities.map((e) => e.uid);
-          }
-        }
-
-        // Detect @all/@所有人 in final content
-        const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
-
-        await sendMessage({
-          apiUrl: account.config.apiUrl,
-          botToken: account.config.botToken ?? "",
-          channelId: replyChannelId,
-          channelType: replyChannelType,
-          content: finalContent,
-          ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
-          ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
-          mentionAll: hasAtAll || undefined,
-        });
-        log?.info?.(`dmwork: [deliver-buffer] final text sent (${finalContent.length} chars)`);
-        statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+        await resolveAndSendText(deliverBuffer.lastText);
+        log?.info?.(`dmwork: [deliver-buffer] fallback text sent (${deliverBuffer.lastText.length} chars)`);
       } catch (finalSendErr) {
         log?.error?.(`dmwork: [deliver-buffer] final text send failed: ${String(finalSendErr)}`);
       }
