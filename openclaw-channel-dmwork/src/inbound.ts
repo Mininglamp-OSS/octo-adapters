@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, editMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -1491,49 +1491,86 @@ export async function handleInboundMessage(params: {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
   }, 5000);
 
-  // Draft-edit dedup: tracks the first sent message so subsequent delivers edit it.
-  // draftMessage is scoped to this handleInboundMessage invocation; deliver is called
-  // sequentially by dispatchReplyWithBufferedBlockDispatcher, so no concurrency issue.
-  let draftMessage: { messageId: string; messageSeq: number } | null = null;
+  // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
+  // Media is sent immediately (no edit problem); text is buffered (each call overwrites).
+  const deliverBuffer = {
+    lastText: null as string | null,
+    textSent: false,
+  };
+  const sentMediaUrls = new Set<string>();
 
   try {
-  await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
-    ctx: ctxPayload,
-    cfg: config,
-    replyOptions: {},
-    dispatcherOptions: {
-      deliver: async (payload: {
-        text?: string;
-        mediaUrls?: string[];
-        mediaUrl?: string;
-        replyToId?: string | null;
-      }) => {
-        // Resolve outbound media URLs
-        const outboundMediaUrls = resolveOutboundMediaUrls(payload);
+    await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+      ctx: ctxPayload,
+      cfg: config,
+      replyOptions: {},
+      dispatcherOptions: {
+        // Note: core's createNormalizedOutboundDeliverer currently swallows the
+        // `info` argument (kind, etc.) before calling this deliver callback.
+        // If that changes upstream, re-add the second parameter here.
+        deliver: async (payload: {
+          text?: string;
+          mediaUrls?: string[];
+          mediaUrl?: string;
+          replyToId?: string | null;
+        }) => {
+          // --- Media: send immediately (no edit/forward issue) with dedup ---
+          const outboundMediaUrls = resolveOutboundMediaUrls(payload);
+          for (const mediaUrl of outboundMediaUrls) {
+            if (sentMediaUrls.has(mediaUrl)) continue;
+            try {
+              await uploadAndSendMedia({
+                mediaUrl,
+                apiUrl: account.config.apiUrl,
+                botToken: account.config.botToken ?? "",
+                channelId: replyChannelId,
+                channelType: replyChannelType,
+                log,
+              });
+              sentMediaUrls.add(mediaUrl);
+            } catch (err) {
+              log?.error?.(`dmwork: media send failed for ${mediaUrl}: ${String(err)}`);
+            }
+          }
 
-        // Upload and send each media file
-        for (const mediaUrl of outboundMediaUrls) {
+          // --- Text: buffer only, will be sent once after dispatcher finishes ---
+          const content = payload.text?.trim() ?? "";
+          if (!content && outboundMediaUrls.length > 0) {
+            statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+            return;
+          }
+          if (!content) return;
+
+          // Overwrite buffer with latest cumulative text
+          deliverBuffer.lastText = content;
+          log?.debug?.(`dmwork: [deliver-buffer] text buffered (${content.length} chars)`);
+        },
+        onError: async (err: unknown, info: { kind: string }) => {
+          clearInterval(typingInterval);
+          log?.error?.(`dmwork ${info.kind} reply failed: ${String(err)}`);
+          // Prevent finally block from sending stale buffered text after error
+          deliverBuffer.lastText = null;
+          deliverBuffer.textSent = true;
           try {
-            await uploadAndSendMedia({
-              mediaUrl,
-              apiUrl: account.config.apiUrl,
-              botToken: account.config.botToken ?? "",
+            await sendMessage({
+              apiUrl,
+              botToken,
               channelId: replyChannelId,
               channelType: replyChannelType,
-              log,
+              content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
             });
-          } catch (err) {
-            log?.error?.(`dmwork: media send failed for ${mediaUrl}: ${String(err)}`);
+          } catch (sendErr) {
+            log?.error?.(`dmwork: failed to send error message: ${String(sendErr)}`);
           }
-        }
-
-        // If there are no media URLs, fall through to text logic; if there are, only send text if caption exists
-        const content = payload.text?.trim() ?? "";
-        if (!content && outboundMediaUrls.length > 0) {
-          statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
-          return;
-        }
-        if (!content) return;
+        },
+      },
+    });
+  } finally {
+    // --- Final send: deliver buffered text even if dispatcher threw ---
+    if (deliverBuffer.lastText && !deliverBuffer.textSent) {
+      deliverBuffer.textSent = true;
+      try {
+        const content = deliverBuffer.lastText;
 
         // Build mentionUids + entities from @mentions in content
         // Supports both @[uid:name] (v2 structured) and @name (v1 fallback)
@@ -1569,13 +1606,12 @@ export async function handleInboundMessage(params: {
             );
           } else {
             // v1 fallback path: LLM used @name format
-            // Keep existing resolveMention logic for hex uid / uid-format handling
             const contentMentions = extractMentionMatches(content);
 
-            let unresolvedNames: { name: string; index: number }[] = [];
+            const unresolvedNames: { name: string; index: number }[] = [];
 
             const resolveMention = (name: string): { uid: string | null; newContent: string } => {
-              let uid = findUidByName(name, memberMap);
+              const uid = findUidByName(name, memberMap);
               let newContent = finalContent;
 
               if (uid) {
@@ -1623,7 +1659,6 @@ export async function handleInboundMessage(params: {
             }
 
             replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
-            // Build entities from fallback for the final content
             const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
             replyMentionEntities = fallbackResult.entities;
           }
@@ -1638,34 +1673,7 @@ export async function handleInboundMessage(params: {
         // Detect @all/@所有人 in final content
         const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
-        // Draft-edit dedup: subsequent delivers edit the first message.
-        // Note: editMessage API only updates content_edit text; mention metadata
-        // (mentionUids/mentionEntities/mentionAll) cannot be updated via edit.
-        // This is acceptable because the first sendMessage already carries the
-        // correct mention info, and subsequent edits only update the text body.
-        if (draftMessage) {
-          try {
-            const contentEdit = JSON.stringify({ type: 1, content: finalContent });
-            log?.debug?.(`dmwork: [draft-edit] editMessage attempt id=${draftMessage.messageId} seq=${draftMessage.messageSeq}`);
-            await editMessage({
-              apiUrl: account.config.apiUrl,
-              botToken: account.config.botToken ?? "",
-              messageId: draftMessage.messageId,
-              messageSeq: draftMessage.messageSeq,
-              channelId: replyChannelId,
-              channelType: replyChannelType,
-              contentEdit,
-            });
-            log?.debug?.(`dmwork: [draft-edit] editMessage success`);
-            statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
-            return;
-          } catch (editErr) {
-            log?.warn?.(`dmwork: [draft-edit] editMessage failed: ${String(editErr)}, falling back to sendMessage`);
-            draftMessage = null;
-          }
-        }
-
-        const sendResult = await sendMessage({
+        await sendMessage({
           apiUrl: account.config.apiUrl,
           botToken: account.config.botToken ?? "",
           channelId: replyChannelId,
@@ -1675,38 +1683,12 @@ export async function handleInboundMessage(params: {
           ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
           mentionAll: hasAtAll || undefined,
         });
-
-        // Save draft for subsequent edit-dedup
-        if (sendResult?.message_id != null && sendResult?.message_seq != null) {
-          draftMessage = {
-            messageId: String(sendResult.message_id),
-            messageSeq: sendResult.message_seq,
-          };
-          log?.debug?.(`dmwork: [draft-edit] sendMessage OK, draft set: id=${draftMessage.messageId} seq=${draftMessage.messageSeq}`);
-        } else {
-          log?.debug?.(`dmwork: [draft-edit] sendMessage returned no id/seq, draft-edit disabled`);
-        }
-
+        log?.info?.(`dmwork: [deliver-buffer] final text sent (${finalContent.length} chars)`);
         statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
-      },
-      onError: async (err: unknown, info: { kind: string }) => {
-        clearInterval(typingInterval);
-        log?.error?.(`dmwork ${info.kind} reply failed: ${String(err)}`);
-        try {
-          await sendMessage({
-            apiUrl,
-            botToken,
-            channelId: replyChannelId,
-            channelType: replyChannelType,
-            content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
-          });
-        } catch (sendErr) {
-          log?.error?.(`dmwork: failed to send error message: ${String(sendErr)}`);
-        }
-      },
-    },
-  });
-  } finally {
+      } catch (finalSendErr) {
+        log?.error?.(`dmwork: [deliver-buffer] final text send failed: ${String(finalSendErr)}`);
+      }
+    }
     clearInterval(typingInterval);
   }
 }
