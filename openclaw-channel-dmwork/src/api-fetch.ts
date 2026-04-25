@@ -845,27 +845,7 @@ export async function uploadFileToCOS(params: {
   });
 }
 
-/**
- * Edit a previously sent message (e.g. for progress updates).
- */
-export async function editMessage(params: {
-  apiUrl: string;
-  botToken: string;
-  messageId: string;
-  messageSeq: number;
-  channelId: string;
-  channelType: ChannelType;
-  contentEdit: string;
-  signal?: AbortSignal;
-}): Promise<void> {
-  await postJson(params.apiUrl, params.botToken, "/v1/bot/message/edit", {
-    message_id: params.messageId,
-    message_seq: params.messageSeq,
-    channel_id: params.channelId,
-    channel_type: params.channelType,
-    content_edit: params.contentEdit,
-  }, params.signal);
-}
+
 
 /**
  * Fetch user info by UID. Requires backend `/v1/bot/user/info` endpoint.
