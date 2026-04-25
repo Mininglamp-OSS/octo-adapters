@@ -1,6 +1,6 @@
 ---
 name: dmwork-bot-api
-version: 0.6.1
+version: 0.6.2
 description: DMWork Bot API 文档。消息发送、群管理、Thread、文件上传、User API 等接口。API 基础地址从 OpenClaw 配置 channels.dmwork.accounts.<id>.apiUrl 获取。
 metadata: {"dmwork":{"category":"messaging","api_base":"<apiUrl>"}}
 ---
