@@ -1218,6 +1218,22 @@ export async function handleInboundMessage(params: {
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
     isMentioned = mentionAll || mentionUids.includes(botUid);
     isExplicitBotMention = mentionUids.includes(botUid);
+
+    // Defensive fallback: if payload.mention is missing/empty but the message
+    // text contains @botName, treat it as a mention.  This covers old senders
+    // that don't populate the mention payload (e.g. bot-to-bot messages).
+    if (!isMentioned && rawBody && message.payload?.type === MessageType.Text) {
+      const botName = uidToNameMap.get(botUid);
+      if (botName) {
+        const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(`(?<=^|[^\\w])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`);
+        if (re.test(rawBody)) {
+          isMentioned = true;
+          isExplicitBotMention = true;
+          log?.debug?.(`dmwork: [RECV] isMentioned set by text fallback (@${botName})`);
+        }
+      }
+    }
   }
 
   if (isGroup && requireMention) {
@@ -1541,11 +1557,9 @@ export async function handleInboundMessage(params: {
 
       if (structuredMentions.length > 0) {
         // v2 path: LLM used @[uid:name] format
-        const validUids = new Set(uidToNameMap.keys());
         const converted = convertStructuredMentions(
           content,
           structuredMentions,
-          validUids,
         );
         finalContent = converted.content;
         replyMentionEntities = [...converted.entities];

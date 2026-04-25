@@ -189,8 +189,7 @@ async function handleSend(params: {
       if (uidToNameMap) {
         const structuredMentions = parseStructuredMentions(finalMessage);
         if (structuredMentions.length > 0) {
-          const validUids = new Set(uidToNameMap.keys());
-          const converted = convertStructuredMentions(finalMessage, structuredMentions, validUids);
+          const converted = convertStructuredMentions(finalMessage, structuredMentions);
           finalMessage = converted.content;
           mentionEntities = [...converted.entities];
           mentionUids = [...converted.uids];
