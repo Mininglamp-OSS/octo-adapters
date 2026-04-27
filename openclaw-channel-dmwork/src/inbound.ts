@@ -1399,10 +1399,8 @@ export async function handleInboundMessage(params: {
     body: finalBody,
   });
 
-  // Inject GROUP.md as GroupSystemPrompt for group messages
-  const groupSystemPrompt = isGroup && groupMdCache && message.channel_id
-    ? groupMdCache.get(extractParentGroupNo(message.channel_id))?.content
-    : undefined;
+  // GROUP.md injection is handled exclusively by the before_prompt_build hook
+  // (see index.ts → getGroupMdForPrompt) — no longer set here to avoid duplication.
 
   // Resolve sender display name — async fallback for DM users not in cache
   let senderName = resolveSenderName(message.from_uid, uidToNameMap);
@@ -1452,7 +1450,7 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    GroupSystemPrompt: groupSystemPrompt,
+    GroupSystemPrompt: undefined,
     Provider: "dmwork",
     Surface: "dmwork",
     OriginatingChannel: "dmwork",

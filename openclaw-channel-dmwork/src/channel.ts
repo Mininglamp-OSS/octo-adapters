@@ -30,7 +30,7 @@ import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMe
 import type { MentionEntity } from "./types.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
-import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
+import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
 import path from "node:path";
@@ -726,6 +726,18 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
               const md = await getGroupMd({ apiUrl: account.config.apiUrl, botToken: account.config.botToken!, groupNo: g.group_no, log });
               if (md.content) {
                 groupMdCache.set(g.group_no, { content: md.content, version: md.version });
+                writeGroupMdToDisk({
+                  accountId: account.accountId,
+                  groupNo: g.group_no,
+                  content: md.content,
+                  meta: {
+                    version: md.version,
+                    updated_at: null,
+                    updated_by: "prefetch",
+                    fetched_at: new Date().toISOString(),
+                    account_id: account.accountId,
+                  },
+                });
                 mdCount++;
               }
             } catch {
