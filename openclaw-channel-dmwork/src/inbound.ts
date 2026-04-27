@@ -1429,9 +1429,10 @@ export async function handleInboundMessage(params: {
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
-    BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
+    BodyForAgent: body,
     RawBody: rawBody,
     CommandBody: rawBody,
+    CommandAuthorized: true,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     MediaUrls: (() => {
       // Only pass current message's local media path (no remote history URLs)
