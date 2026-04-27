@@ -131,6 +131,9 @@ export function convertStructuredMentions(
     // While the LLM could theoretically hallucinate a uid, the server will
     // reject unknown uids, and filtering here causes cache-miss false
     // negatives that are worse than the low risk of hallucinated uids.
+    // Note: if the LLM hallucinates a uid that happens to be a real (but
+    // unintended) user, that user receives one unexpected notification.
+    // This risk is negligible given dmwork uids are random 32-char hex hashes.
     entities.push({
       uid: m.uid,
       offset: newOffset,

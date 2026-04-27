@@ -204,18 +204,6 @@ describe("convertStructuredMentions", () => {
     expect(result.uids).toEqual(["fake", "uid_bob"]);
   });
 
-  it("should generate entities for known uid", () => {
-    const text = "Hi @[uid_bob:Bob]!";
-    const mentions = parseStructuredMentions(text);
-    const result = convertStructuredMentions(text, mentions);
-
-    expect(result.content).toBe("Hi @Bob!");
-    expect(result.entities).toEqual([
-      { uid: "uid_bob", offset: 3, length: 4 },
-    ]);
-    expect(result.uids).toEqual(["uid_bob"]);
-  });
-
   it("应处理中文用户名", () => {
     const text = "你好 @[uid_chen:陈皮皮] 和 @[uid_bob:Bob]";
     const mentions = parseStructuredMentions(text);
@@ -404,63 +392,6 @@ describe("convertContentForLLM", () => {
     const mention: MentionPayload = { uids: [] };
     const result = convertContentForLLM(content, mention);
     expect(result).toBe("@Alice @Bob");
-  });
-});
-
-describe("inbound text fallback regex", () => {
-  function makeFallbackRegex(botName: string): RegExp {
-    const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(?<=^|[^\\w])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`);
-  }
-
-  it("@BotName at start of string → should match", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("@BotName")).toBe(true);
-  });
-
-  it("Hello @BotName (after space) → should match", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("Hello @BotName")).toBe(true);
-  });
-
-  it("Hello @BotName! (followed by punctuation) → should match", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("Hello @BotName!")).toBe(true);
-  });
-
-  it("@BotName at end → should match", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("@BotName at end")).toBe(true);
-  });
-
-  it("foo@BotName (no space before @) → should NOT match (email-like)", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("foo@BotName")).toBe(false);
-  });
-
-  it("word@BotName.com → should NOT match", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("word@BotName.com")).toBe(false);
-  });
-
-  it("@BotNameExtra (name is prefix of longer word) → should NOT match", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("@BotNameExtra")).toBe(false);
-  });
-
-  it("@BotName followed by CJK character → should NOT match", () => {
-    const re = makeFallbackRegex("BotName");
-    expect(re.test("@BotName你好")).toBe(false);
-  });
-
-  it("Chinese bot name like @小助手 → should match", () => {
-    const re = makeFallbackRegex("小助手");
-    expect(re.test("@小助手")).toBe(true);
-  });
-
-  it("@小助手好 (followed by CJK) → should NOT match", () => {
-    const re = makeFallbackRegex("小助手");
-    expect(re.test("@小助手好")).toBe(false);
   });
 });
 
@@ -752,9 +683,10 @@ describe("convertContentForLLM — 空格昵称支持", () => {
   });
 });
 
-describe("inbound text fallback regex — CJK boundary fix", () => {
-  // Mirrors the regex in inbound.ts text fallback block.
-  // Lookbehind must exclude CJK so that "你好@BotName" is NOT a false positive.
+describe("inbound text fallback regex", () => {
+  // Must mirror the regex in inbound.ts text fallback block exactly.
+  // Lookbehind: more conservative than MENTION_PATTERN — also excludes CJK
+  // and extended Latin to avoid false-positive bot activations.
   function buildFallbackRegex(botName: string): RegExp {
     const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return new RegExp(
@@ -762,6 +694,7 @@ describe("inbound text fallback regex — CJK boundary fix", () => {
     );
   }
 
+  // --- positive cases ---
   it("matches @BotName at start of message", () => {
     expect(buildFallbackRegex("Jeff").test("@Jeff 你好")).toBe(true);
   });
@@ -770,23 +703,49 @@ describe("inbound text fallback regex — CJK boundary fix", () => {
     expect(buildFallbackRegex("Jeff").test("嗨 @Jeff 能帮我吗")).toBe(true);
   });
 
-  it("does NOT match when CJK char immediately precedes @", () => {
-    expect(buildFallbackRegex("Jeff").test("你好@Jeff")).toBe(false);
-  });
-
-  it("does NOT match when underscore precedes @ (consistent with \\w exclusion)", () => {
-    expect(buildFallbackRegex("Jeff").test("foo_@Jeff")).toBe(false);
-  });
-
-  it("does NOT match when @BotName is followed by word char (no false positive for @Jefferson)", () => {
-    expect(buildFallbackRegex("Jeff").test("@Jefferson")).toBe(false);
-  });
-
   it("matches @BotName followed by punctuation", () => {
     expect(buildFallbackRegex("Jeff").test("@Jeff，帮我看一下")).toBe(true);
   });
 
-  it("matches with CJK bot name (bot name itself may be CJK)", () => {
+  it("matches @BotName followed by !", () => {
+    expect(buildFallbackRegex("Jeff").test("Hello @Jeff!")).toBe(true);
+  });
+
+  it("matches CJK bot name", () => {
     expect(buildFallbackRegex("张三").test("@张三 你好")).toBe(true);
+  });
+
+  it("matches @BotName at end of string", () => {
+    expect(buildFallbackRegex("Jeff").test("hey @Jeff")).toBe(true);
+  });
+
+  // --- negative: lookbehind ---
+  it("does NOT match when CJK char immediately precedes @ (intentional conservative)", () => {
+    expect(buildFallbackRegex("Jeff").test("你好@Jeff")).toBe(false);
+  });
+
+  it("does NOT match when underscore precedes @", () => {
+    expect(buildFallbackRegex("Jeff").test("foo_@Jeff")).toBe(false);
+  });
+
+  it("does NOT match email-like foo@BotName", () => {
+    expect(buildFallbackRegex("Jeff").test("foo@Jeff")).toBe(false);
+  });
+
+  // --- negative: lookahead ---
+  it("does NOT match @BotName followed by word char (@Jefferson)", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jefferson")).toBe(false);
+  });
+
+  it("does NOT match @BotName followed by CJK", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff你好")).toBe(false);
+  });
+
+  it("does NOT match @BotName followed by dot (domain-like)", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff.com")).toBe(false);
+  });
+
+  it("does NOT match CJK bot name followed by CJK", () => {
+    expect(buildFallbackRegex("小助手").test("@小助手好")).toBe(false);
   });
 });

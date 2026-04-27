@@ -1224,10 +1224,13 @@ export async function handleInboundMessage(params: {
     // that don't populate the mention payload (e.g. bot-to-bot messages).
     if (!isMentioned && rawBody && message.payload?.type === MessageType.Text) {
       const botName = uidToNameMap.get(botUid);
-      if (botName) {
+      if (botName?.trim()) {
         const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        // Lookbehind: exclude ASCII word chars AND Unicode letters/CJK — consistent with MENTION_PATTERN.
-        // Without CJK exclusion, '你好@BotName' would be a false positive (CJK is not \w).
+        // Lookbehind: more conservative than MENTION_PATTERN — also excludes CJK and extended
+        // Latin ranges so that adjacent Chinese text (e.g. '你好@BotName') is not a false
+        // positive.  Trade-off: '你好@BotName' without payload.mention is treated as non-mention;
+        // this is intentional — a false positive (spurious bot activation) is worse than a false
+        // negative (user simply re-sends with a space before @).
         const re = new RegExp(`(?<=^|[^\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`);
         if (re.test(rawBody)) {
           isMentioned = true;
