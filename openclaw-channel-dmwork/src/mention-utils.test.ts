@@ -751,3 +751,42 @@ describe("convertContentForLLM — 空格昵称支持", () => {
     expect(result).toBe("@[uid_anyang:Anyang Su] 你好");
   });
 });
+
+describe("inbound text fallback regex — CJK boundary fix", () => {
+  // Mirrors the regex in inbound.ts text fallback block.
+  // Lookbehind must exclude CJK so that "你好@BotName" is NOT a false positive.
+  function buildFallbackRegex(botName: string): RegExp {
+    const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(
+      `(?<=^|[^\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`
+    );
+  }
+
+  it("matches @BotName at start of message", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff 你好")).toBe(true);
+  });
+
+  it("matches @BotName after whitespace", () => {
+    expect(buildFallbackRegex("Jeff").test("嗨 @Jeff 能帮我吗")).toBe(true);
+  });
+
+  it("does NOT match when CJK char immediately precedes @", () => {
+    expect(buildFallbackRegex("Jeff").test("你好@Jeff")).toBe(false);
+  });
+
+  it("does NOT match when underscore precedes @ (consistent with \\w exclusion)", () => {
+    expect(buildFallbackRegex("Jeff").test("foo_@Jeff")).toBe(false);
+  });
+
+  it("does NOT match when @BotName is followed by word char (no false positive for @Jefferson)", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jefferson")).toBe(false);
+  });
+
+  it("matches @BotName followed by punctuation", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff，帮我看一下")).toBe(true);
+  });
+
+  it("matches with CJK bot name (bot name itself may be CJK)", () => {
+    expect(buildFallbackRegex("张三").test("@张三 你好")).toBe(true);
+  });
+});

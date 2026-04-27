@@ -1226,7 +1226,9 @@ export async function handleInboundMessage(params: {
       const botName = uidToNameMap.get(botUid);
       if (botName) {
         const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const re = new RegExp(`(?<=^|[^\\w])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`);
+        // Lookbehind: exclude ASCII word chars AND Unicode letters/CJK — consistent with MENTION_PATTERN.
+        // Without CJK exclusion, '你好@BotName' would be a false positive (CJK is not \w).
+        const re = new RegExp(`(?<=^|[^\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`);
         if (re.test(rawBody)) {
           isMentioned = true;
           isExplicitBotMention = true;
