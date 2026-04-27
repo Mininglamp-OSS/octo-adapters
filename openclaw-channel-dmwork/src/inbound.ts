@@ -22,6 +22,10 @@ import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
+// Pending inbound context for before_prompt_build hook injection.
+// handleInboundMessage writes here; the hook reads and clears per sessionKey.
+export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
+
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
 let clearHistoryEntriesIfEnabled: any;
@@ -1383,12 +1387,14 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
-  // Inject member list for group messages to help LLM learn @[uid:name] format
+  // memberListPrefix and historyPrefix are injected via before_prompt_build hook
+  // (not persisted to session history). Only quotePrefix stays in Body.
   const memberListPrefix = isGroup ? buildMemberListPrefix(uidToNameMap) : "";
+  if (historyPrefix || memberListPrefix) {
+    pendingInboundContext.set(route.sessionKey, { historyPrefix, memberListPrefix });
+  }
 
-  const finalBody = (memberListPrefix || historyPrefix || quotePrefix)
-    ? (memberListPrefix + historyPrefix + quotePrefix + rawBody)
-    : rawBody;
+  const finalBody = quotePrefix ? (quotePrefix + rawBody) : rawBody;
 
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
@@ -1699,5 +1705,7 @@ export async function handleInboundMessage(params: {
       }
     }
     clearInterval(typingInterval);
+    // Safety net: clean up pending inbound context in case the hook didn't fire
+    pendingInboundContext.delete(route.sessionKey);
   }
 }
