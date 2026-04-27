@@ -337,7 +337,8 @@ export async function handleGroupMdEvent(params: {
  * Get GROUP.md content for prompt injection.
  * Called by the before_prompt_build hook.
  * Only does disk reads — no network calls.
- * For thread sessions, returns cascaded group + thread content.
+ * Thread sessions: only return THREAD.md (no parent GROUP.md fallback).
+ * Group sessions: return GROUP.md.
  */
 export function getGroupMdForPrompt(ctx: {
   sessionKey?: string;
@@ -356,26 +357,13 @@ export function getGroupMdForPrompt(ctx: {
   const accountId = resolveAccountId(agentId, parentGroupNo);
   if (!accountId) return null;
 
-  // 1. Always read group-level GROUP.md
-  const groupMd = readGroupMdFromDisk(accountId, parentGroupNo);
-
-  // 2. If thread session, also read thread-level THREAD.md
-  let threadMd: string | null = null;
+  // Thread sessions: only return THREAD.md (no parent GROUP.md fallback)
   if (shortId) {
-    threadMd = readThreadMdFromDisk(accountId, parentGroupNo, shortId);
+    return readThreadMdFromDisk(accountId, parentGroupNo, shortId);
   }
 
-  // 3. Combine output
-  if (!groupMd && !threadMd) return null;
-
-  const parts: string[] = [];
-  if (groupMd) {
-    parts.push(groupMd);
-  }
-  if (threadMd) {
-    parts.push(`--- THREAD CONTEXT ---\n${threadMd}`);
-  }
-  return parts.join("\n\n");
+  // Group sessions: return GROUP.md
+  return readGroupMdFromDisk(accountId, parentGroupNo);
 }
 
 /**

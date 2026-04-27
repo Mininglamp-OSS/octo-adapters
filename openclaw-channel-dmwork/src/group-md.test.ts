@@ -634,9 +634,8 @@ describe("getGroupMdForPrompt (thread support)", () => {
   const groupNo = "grp_thread";
   const shortId = "thr_123";
 
-  it("should return group-level GROUP.md for thread sessionKey", () => {
+  it("should return empty string for thread when THREAD.md is empty", () => {
     registerGroupAccount(groupNo, accountId, agentId);
-    const content = "# Group Rules\nBe nice.";
     const meta: GroupMdMeta = {
       version: 1,
       updated_at: null,
@@ -644,17 +643,19 @@ describe("getGroupMdForPrompt (thread support)", () => {
       fetched_at: new Date().toISOString(),
       account_id: accountId,
     };
-    writeGroupMdToDisk({ accountId, groupNo, content, meta });
+    // Write an empty THREAD.md (simulates group_md_deleted writing empty content)
+    writeThreadMdToDisk({ accountId, groupNo, shortId, content: "", meta });
 
-    // Thread sessionKey contains "groupNo____shortId"
     const result = getGroupMdForPrompt({
       sessionKey: `agent:${agentId}:dmwork:group:${groupNo}____${shortId}`,
       agentId,
     });
-    expect(result).toBe(content);
+    // readThreadMdFromDisk returns "" for empty file (not null),
+    // but the hook's `if (!content)` guard will filter it out — see risk 7.5
+    expect(result).toBe("");
   });
 
-  it("should return cascaded group + thread content when both exist", () => {
+  it("should return only thread content when both group and thread md exist", () => {
     registerGroupAccount(groupNo, accountId, agentId);
     const groupContent = "# Group Rules\nBe nice.";
     const threadContent = "# Sprint 42\nGoal: auth module";
@@ -673,13 +674,10 @@ describe("getGroupMdForPrompt (thread support)", () => {
       sessionKey: `agent:${agentId}:dmwork:group:${groupNo}____${shortId}`,
       agentId,
     });
-    expect(result).not.toBeNull();
-    expect(result).toContain(groupContent);
-    expect(result).toContain("--- THREAD CONTEXT ---");
-    expect(result).toContain(threadContent);
+    expect(result).toBe(threadContent);
   });
 
-  it("should return only group content when thread md does not exist", () => {
+  it("should return null for thread when only group md exists (no fallback)", () => {
     registerGroupAccount(groupNo, accountId, agentId);
     const groupContent = "# Group only";
     const meta: GroupMdMeta = {
@@ -695,11 +693,10 @@ describe("getGroupMdForPrompt (thread support)", () => {
       sessionKey: `agent:${agentId}:dmwork:group:${groupNo}____${shortId}`,
       agentId,
     });
-    expect(result).toBe(groupContent);
-    expect(result).not.toContain("--- THREAD CONTEXT ---");
+    expect(result).toBeNull();
   });
 
-  it("should return only thread content when group md does not exist", () => {
+  it("should return thread content directly when group md does not exist", () => {
     registerGroupAccount(groupNo, accountId, agentId);
     const threadContent = "# Thread only content";
     const meta: GroupMdMeta = {
@@ -715,9 +712,7 @@ describe("getGroupMdForPrompt (thread support)", () => {
       sessionKey: `agent:${agentId}:dmwork:group:${groupNo}____${shortId}`,
       agentId,
     });
-    expect(result).not.toBeNull();
-    expect(result).toContain("--- THREAD CONTEXT ---");
-    expect(result).toContain(threadContent);
+    expect(result).toBe(threadContent);
   });
 
   it("should return null when neither group nor thread md exist", () => {
