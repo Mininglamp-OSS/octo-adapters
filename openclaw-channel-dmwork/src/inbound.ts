@@ -1427,11 +1427,16 @@ export async function handleInboundMessage(params: {
     }
   }
 
+  // Strip @mention prefix for command detection in group chat
+  const commandBody = isGroup
+    ? rawBody.replace(/^@\S+\s*/, "").trim()
+    : rawBody;
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,
     RawBody: rawBody,
-    CommandBody: rawBody,
+    CommandBody: commandBody,
     CommandAuthorized: true,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     MediaUrls: (() => {
