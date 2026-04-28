@@ -111,7 +111,6 @@ export interface ConvertResult {
 export function convertStructuredMentions(
   text: string,
   mentions: StructuredMention[],
-  validUids: Set<string>,
 ): ConvertResult {
   const sorted = [...mentions].sort((a, b) => a.offset - b.offset);
 
@@ -127,14 +126,20 @@ export function convertStructuredMentions(
     const newOffset = content.length;
     content += replacement;
 
-    if (validUids.has(m.uid)) {
-      entities.push({
-        uid: m.uid,
-        offset: newOffset,
-        length: replacement.length,
-      });
-      uids.push(m.uid);
-    }
+    // Always generate entity for structured mentions — Structured mentions
+    // are generated from the member list injected into the system prompt.
+    // While the LLM could theoretically hallucinate a uid, the server will
+    // reject unknown uids, and filtering here causes cache-miss false
+    // negatives that are worse than the low risk of hallucinated uids.
+    // Note: if the LLM hallucinates a uid that happens to be a real (but
+    // unintended) user, that user receives one unexpected notification.
+    // This risk is negligible given dmwork uids are random 32-char hex hashes.
+    entities.push({
+      uid: m.uid,
+      offset: newOffset,
+      length: replacement.length,
+    });
+    uids.push(m.uid);
 
     cursor = m.offset + m.length;
   }

@@ -292,15 +292,13 @@ describe("sendText v2 mention processing logic", () => {
     const { parseStructuredMentions, convertStructuredMentions, buildEntitiesFromFallback } = await import("./mention-utils.js");
 
     const content = "请 @[abc123:张三] 确认";
-    const uidToNameMap = new Map([["abc123", "张三"]]);
     const memberMap = new Map([["张三", "abc123"]]);
-    const validUids = new Set(uidToNameMap.keys());
 
     // v2 path
     const structuredMentions = parseStructuredMentions(content);
     expect(structuredMentions).toHaveLength(1);
 
-    const converted = convertStructuredMentions(content, structuredMentions, validUids);
+    const converted = convertStructuredMentions(content, structuredMentions);
     expect(converted.content).toBe("请 @张三 确认");
     expect(converted.entities).toHaveLength(1);
     expect(converted.entities[0]).toEqual({ uid: "abc123", offset: 2, length: 3 });
@@ -315,15 +313,13 @@ describe("sendText v2 mention processing logic", () => {
     const { parseStructuredMentions, convertStructuredMentions, buildEntitiesFromFallback } = await import("./mention-utils.js");
 
     const content = "@[abc:张三] 和 @李四";
-    const uidToNameMap = new Map([["abc", "张三"]]);
     const memberMap = new Map([["张三", "abc"], ["李四", "def"]]);
-    const validUids = new Set(uidToNameMap.keys());
 
     // v2 path
     const structuredMentions = parseStructuredMentions(content);
     expect(structuredMentions).toHaveLength(1);
 
-    const converted = convertStructuredMentions(content, structuredMentions, validUids);
+    const converted = convertStructuredMentions(content, structuredMentions);
     expect(converted.content).toBe("@张三 和 @李四");
 
     // v1 fallback resolves @李四
@@ -359,11 +355,10 @@ describe("sendText v2 mention processing logic", () => {
     const { parseStructuredMentions, convertStructuredMentions, buildEntitiesFromFallback } = await import("./mention-utils.js");
 
     const content = "@[abc:张三] @所有人";
-    const validUids = new Set(["abc"]);
     const memberMap = new Map([["张三", "abc"]]);
 
     const structured = parseStructuredMentions(content);
-    const converted = convertStructuredMentions(content, structured, validUids);
+    const converted = convertStructuredMentions(content, structured);
     expect(converted.content).toBe("@张三 @所有人");
 
     const fallback = buildEntitiesFromFallback(converted.content, memberMap);

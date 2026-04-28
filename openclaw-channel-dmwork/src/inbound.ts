@@ -1218,6 +1218,27 @@ export async function handleInboundMessage(params: {
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
     isMentioned = mentionAll || mentionUids.includes(botUid);
     isExplicitBotMention = mentionUids.includes(botUid);
+
+    // Defensive fallback: if payload.mention is missing/empty but the message
+    // text contains @botName, treat it as a mention.  This covers old senders
+    // that don't populate the mention payload (e.g. bot-to-bot messages).
+    if (!isMentioned && rawBody && message.payload?.type === MessageType.Text) {
+      const botName = uidToNameMap.get(botUid);
+      if (botName?.trim()) {
+        const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        // Lookbehind: more conservative than MENTION_PATTERN — also excludes CJK and extended
+        // Latin ranges so that adjacent Chinese text (e.g. '你好@BotName') is not a false
+        // positive.  Trade-off: '你好@BotName' without payload.mention is treated as non-mention;
+        // this is intentional — a false positive (spurious bot activation) is worse than a false
+        // negative (user simply re-sends with a space before @).
+        const re = new RegExp(`(?<=^|[^\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`);
+        if (re.test(rawBody)) {
+          isMentioned = true;
+          isExplicitBotMention = true;
+          log?.debug?.(`dmwork: [RECV] isMentioned set by text fallback (@${botName})`);
+        }
+      }
+    }
   }
 
   if (isGroup && requireMention) {
@@ -1541,11 +1562,9 @@ export async function handleInboundMessage(params: {
 
       if (structuredMentions.length > 0) {
         // v2 path: LLM used @[uid:name] format
-        const validUids = new Set(uidToNameMap.keys());
         const converted = convertStructuredMentions(
           content,
           structuredMentions,
-          validUids,
         );
         finalContent = converted.content;
         replyMentionEntities = [...converted.entities];

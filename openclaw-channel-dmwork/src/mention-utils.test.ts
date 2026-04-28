@@ -168,8 +168,7 @@ describe("convertStructuredMentions", () => {
   it("应正确转换单个 mention", () => {
     const text = "Hi @[uid_bob:Bob]!";
     const mentions = parseStructuredMentions(text);
-    const validUids = new Set(["uid_bob"]);
-    const result = convertStructuredMentions(text, mentions, validUids);
+    const result = convertStructuredMentions(text, mentions);
 
     expect(result.content).toBe("Hi @Bob!");
     expect(result.entities).toEqual([
@@ -182,8 +181,7 @@ describe("convertStructuredMentions", () => {
   it("应处理多个 mention", () => {
     const text = "@[uid_a:Alice] and @[uid_b:Bob]";
     const mentions = parseStructuredMentions(text);
-    const validUids = new Set(["uid_a", "uid_b"]);
-    const result = convertStructuredMentions(text, mentions, validUids);
+    const result = convertStructuredMentions(text, mentions);
 
     expect(result.content).toBe("@Alice and @Bob");
     expect(result.entities).toHaveLength(2);
@@ -193,24 +191,23 @@ describe("convertStructuredMentions", () => {
     expect(result.content.substring(11, 15)).toBe("@Bob");
   });
 
-  it("应处理无效 uid（不加入 entities 但保留 @name 文本）", () => {
+  it("should generate entities for all structured mentions including unknown uids", () => {
     const text = "@[fake:Bob] and @[uid_bob:Bob]";
     const mentions = parseStructuredMentions(text);
-    const validUids = new Set(["uid_bob"]);
-    const result = convertStructuredMentions(text, mentions, validUids);
+    const result = convertStructuredMentions(text, mentions);
 
     expect(result.content).toBe("@Bob and @Bob");
     expect(result.entities).toEqual([
+      { uid: "fake", offset: 0, length: 4 },
       { uid: "uid_bob", offset: 9, length: 4 },
     ]);
-    expect(result.content.substring(9, 13)).toBe("@Bob");
+    expect(result.uids).toEqual(["fake", "uid_bob"]);
   });
 
   it("应处理中文用户名", () => {
     const text = "你好 @[uid_chen:陈皮皮] 和 @[uid_bob:Bob]";
     const mentions = parseStructuredMentions(text);
-    const validUids = new Set(["uid_chen", "uid_bob"]);
-    const result = convertStructuredMentions(text, mentions, validUids);
+    const result = convertStructuredMentions(text, mentions);
 
     expect(result.content).toBe("你好 @陈皮皮 和 @Bob");
     expect(result.entities).toHaveLength(2);
@@ -472,8 +469,7 @@ describe("边界情况", () => {
   it("混合 v2 + fallback 后 uids 顺序", () => {
     const text = "Hi @[uid_chen:Chen] and @Bob";
     const structured = parseStructuredMentions(text);
-    const validUids = new Set(["uid_chen"]);
-    const converted = convertStructuredMentions(text, structured, validUids);
+    const converted = convertStructuredMentions(text, structured);
 
     const memberMap = new Map([["Bob", "uid_bob"]]);
     const remaining = buildEntitiesFromFallback(converted.content, memberMap);
@@ -684,5 +680,72 @@ describe("convertContentForLLM — 空格昵称支持", () => {
     const memberMap = new Map([["Anyang Su", "uid_anyang"]]);
     const result = convertContentForLLM(content, mention, memberMap);
     expect(result).toBe("@[uid_anyang:Anyang Su] 你好");
+  });
+});
+
+describe("inbound text fallback regex", () => {
+  // Must mirror the regex in inbound.ts text fallback block exactly.
+  // Lookbehind: more conservative than MENTION_PATTERN — also excludes CJK
+  // and extended Latin to avoid false-positive bot activations.
+  function buildFallbackRegex(botName: string): RegExp {
+    const escaped = botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(
+      `(?<=^|[^\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F])@${escaped}(?![\\w\\u4e00-\\u9fff\\u3040-\\u30FF\\uAC00-\\uD7AF\\u00C0-\\u024F.\\-])`
+    );
+  }
+
+  // --- positive cases ---
+  it("matches @BotName at start of message", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff 你好")).toBe(true);
+  });
+
+  it("matches @BotName after whitespace", () => {
+    expect(buildFallbackRegex("Jeff").test("嗨 @Jeff 能帮我吗")).toBe(true);
+  });
+
+  it("matches @BotName followed by punctuation", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff，帮我看一下")).toBe(true);
+  });
+
+  it("matches @BotName followed by !", () => {
+    expect(buildFallbackRegex("Jeff").test("Hello @Jeff!")).toBe(true);
+  });
+
+  it("matches CJK bot name", () => {
+    expect(buildFallbackRegex("张三").test("@张三 你好")).toBe(true);
+  });
+
+  it("matches @BotName at end of string", () => {
+    expect(buildFallbackRegex("Jeff").test("hey @Jeff")).toBe(true);
+  });
+
+  // --- negative: lookbehind ---
+  it("does NOT match when CJK char immediately precedes @ (intentional conservative)", () => {
+    expect(buildFallbackRegex("Jeff").test("你好@Jeff")).toBe(false);
+  });
+
+  it("does NOT match when underscore precedes @", () => {
+    expect(buildFallbackRegex("Jeff").test("foo_@Jeff")).toBe(false);
+  });
+
+  it("does NOT match email-like foo@BotName", () => {
+    expect(buildFallbackRegex("Jeff").test("foo@Jeff")).toBe(false);
+  });
+
+  // --- negative: lookahead ---
+  it("does NOT match @BotName followed by word char (@Jefferson)", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jefferson")).toBe(false);
+  });
+
+  it("does NOT match @BotName followed by CJK", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff你好")).toBe(false);
+  });
+
+  it("does NOT match @BotName followed by dot (domain-like)", () => {
+    expect(buildFallbackRegex("Jeff").test("@Jeff.com")).toBe(false);
+  });
+
+  it("does NOT match CJK bot name followed by CJK", () => {
+    expect(buildFallbackRegex("小助手").test("@小助手好")).toBe(false);
   });
 });

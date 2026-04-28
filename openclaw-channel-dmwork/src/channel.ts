@@ -424,8 +424,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         // v2 path: convert @[uid:name] → @name + entities
         const structuredMentions = parseStructuredMentions(finalContent);
         if (structuredMentions.length > 0) {
-          const validUids = new Set(uidToNameMap.keys());
-          const converted = convertStructuredMentions(finalContent, structuredMentions, validUids);
+          const converted = convertStructuredMentions(finalContent, structuredMentions);
           finalContent = converted.content;
           mentionEntities = [...converted.entities];
           for (const uid of converted.uids) {

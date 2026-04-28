@@ -307,7 +307,7 @@ describe("handleDmworkMessageAction", () => {
   });
 
   describe("send — invalid uid in v2 (uid not in uidToNameMap)", () => {
-    it("should convert format but not create entity for unknown uid", async () => {
+    it("should create entities for all structured mentions including unknown uids", async () => {
       let sentPayload: any = null;
       globalThis.fetch = mockFetch({
         "/v1/bot/sendMessage": async (_url, init) => {
@@ -333,10 +333,11 @@ describe("handleDmworkMessageAction", () => {
       expect(result.ok).toBe(true);
       // Format is still converted for both
       expect(sentPayload.payload.content).toBe("Hello @Ghost and @bob!");
-      // Only valid uid gets an entity
+      // All structured mentions get entities (uid trusted from LLM)
       const entities = sentPayload.payload.mention.entities;
-      expect(entities).toHaveLength(1);
-      expect(entities[0]).toMatchObject({ uid: "uid_bob" });
+      expect(entities).toHaveLength(2);
+      expect(entities[0]).toMatchObject({ uid: "uid_unknown" });
+      expect(entities[1]).toMatchObject({ uid: "uid_bob" });
     });
   });
 
