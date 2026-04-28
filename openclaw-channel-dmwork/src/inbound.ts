@@ -23,6 +23,10 @@ import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { randomUUID } from "node:crypto";
 
+// Pending inbound context for before_prompt_build hook injection.
+// handleInboundMessage writes here; the hook reads and clears per sessionKey.
+export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
+
 // Defensive imports — these may not exist in older OpenClaw versions
 // History context managed manually for cross-SDK compatibility
 let clearHistoryEntriesIfEnabled: any;
@@ -1405,12 +1409,14 @@ export async function handleInboundMessage(params: {
     sessionKey: route.sessionKey,
   });
 
-  // Inject member list for group messages to help LLM learn @[uid:name] format
+  // memberListPrefix and historyPrefix are injected via before_prompt_build hook
+  // (not persisted to session history). Only quotePrefix stays in Body.
   const memberListPrefix = isGroup ? buildMemberListPrefix(uidToNameMap) : "";
+  if (historyPrefix || memberListPrefix) {
+    pendingInboundContext.set(route.sessionKey, { historyPrefix, memberListPrefix });
+  }
 
-  const finalBody = (memberListPrefix || historyPrefix || quotePrefix)
-    ? (memberListPrefix + historyPrefix + quotePrefix + rawBody)
-    : rawBody;
+  const finalBody = quotePrefix ? (quotePrefix + rawBody) : rawBody;
 
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
@@ -1421,10 +1427,8 @@ export async function handleInboundMessage(params: {
     body: finalBody,
   });
 
-  // Inject GROUP.md as GroupSystemPrompt for group messages
-  const groupSystemPrompt = isGroup && groupMdCache && message.channel_id
-    ? groupMdCache.get(extractParentGroupNo(message.channel_id))?.content
-    : undefined;
+  // GROUP.md injection is handled exclusively by the before_prompt_build hook
+  // (see index.ts → getGroupMdForPrompt) — no longer set here to avoid duplication.
 
   // Resolve sender display name — async fallback for DM users not in cache
   let senderName = resolveSenderName(message.from_uid, uidToNameMap);
@@ -1479,7 +1483,7 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    GroupSystemPrompt: groupSystemPrompt,
+    GroupSystemPrompt: undefined,
     Provider: "dmwork",
     Surface: "dmwork",
     OriginatingChannel: "dmwork",
@@ -1728,5 +1732,7 @@ export async function handleInboundMessage(params: {
       }
     }
     clearInterval(typingInterval);
+    // Safety net: clean up pending inbound context in case the hook didn't fire
+    pendingInboundContext.delete(route.sessionKey);
   }
 }

@@ -15,6 +15,7 @@ import {
   buildMemberListPrefix,
   resolveCommandBody,
   resolveCommandAuthorized,
+  pendingInboundContext,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
@@ -1110,5 +1111,50 @@ describe("resolveCommandAuthorized", () => {
 
   it("group: non-owner + no mention → not authorized", () => {
     expect(resolveCommandAuthorized(true, false, false)).toBe(false);
+  });
+});
+
+describe("pendingInboundContext", () => {
+  beforeEach(() => {
+    pendingInboundContext.clear();
+  });
+
+  it("should store and retrieve context by sessionKey", () => {
+    const key = "dmwork:group:test123";
+    pendingInboundContext.set(key, {
+      historyPrefix: "history...",
+      memberListPrefix: "members...",
+    });
+    expect(pendingInboundContext.has(key)).toBe(true);
+    const entry = pendingInboundContext.get(key);
+    expect(entry?.historyPrefix).toBe("history...");
+    expect(entry?.memberListPrefix).toBe("members...");
+  });
+
+  it("should allow delete after read (consume-once pattern)", () => {
+    const key = "dmwork:group:consume";
+    pendingInboundContext.set(key, {
+      historyPrefix: "h",
+      memberListPrefix: "m",
+    });
+    const entry = pendingInboundContext.get(key);
+    pendingInboundContext.delete(key);
+    expect(entry).toBeDefined();
+    expect(pendingInboundContext.has(key)).toBe(false);
+  });
+
+  it("should keep separate entries for different sessionKeys", () => {
+    pendingInboundContext.set("key1", { historyPrefix: "h1", memberListPrefix: "" });
+    pendingInboundContext.set("key2", { historyPrefix: "", memberListPrefix: "m2" });
+    expect(pendingInboundContext.get("key1")?.historyPrefix).toBe("h1");
+    expect(pendingInboundContext.get("key2")?.memberListPrefix).toBe("m2");
+  });
+
+  it("should overwrite on repeated set for same key", () => {
+    const key = "dmwork:group:overwrite";
+    pendingInboundContext.set(key, { historyPrefix: "old", memberListPrefix: "" });
+    pendingInboundContext.set(key, { historyPrefix: "new", memberListPrefix: "ml" });
+    expect(pendingInboundContext.get(key)?.historyPrefix).toBe("new");
+    expect(pendingInboundContext.get(key)?.memberListPrefix).toBe("ml");
   });
 });
