@@ -936,6 +936,25 @@ export function buildMemberListPrefix(uidToNameMap: Map<string, string>): string
   return `[Group Info] This group has ${uidToNameMap.size} members. Use the group management tool to look up member info when needed. When mentioning a group member, use the format @[uid:displayName].\n\n`;
 }
 
+/**
+ * Strip @mention prefix from raw message text for command detection.
+ * Only strips when bot is explicitly mentioned (not @all).
+ */
+export function resolveCommandBody(rawBody: string, isGroup: boolean, isExplicitBotMention: boolean): string {
+  if (isGroup && isExplicitBotMention) {
+    return rawBody.replace(/^@\S+\s*/, "").trim();
+  }
+  return rawBody;
+}
+
+/**
+ * Determine if the sender is authorized to execute slash commands.
+ * DM: anyone can execute. Group: owner + explicit @bot mention required.
+ */
+export function resolveCommandAuthorized(isGroup: boolean, isOwnerUser: boolean, isExplicitBotMention: boolean): boolean {
+  return !isGroup || (isOwnerUser && isExplicitBotMention);
+}
+
 export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
@@ -1186,13 +1205,15 @@ export async function handleInboundMessage(params: {
     await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", log });
   }
 
-  // Compute isMentioned at top level so it's available for WasMentioned in finalizeInboundContext
+  // Compute mention flags — separate "reply gating" from "command gating"
   let isMentioned = false;
+  let isExplicitBotMention = false;
   if (isGroup) {
     const mentionUids = extractMentionUids(message.payload?.mention);
     const mentionAllRaw = message.payload?.mention?.all;
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
     isMentioned = mentionAll || mentionUids.includes(botUid);
+    isExplicitBotMention = mentionUids.includes(botUid);
   }
 
   if (isGroup && requireMention) {
@@ -1428,17 +1449,16 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // Strip @mention prefix for command detection in group chat
-  const commandBody = isGroup
-    ? rawBody.replace(/^@\S+\s*/, "").trim()
-    : rawBody;
+  const commandBody = resolveCommandBody(rawBody, isGroup, isExplicitBotMention);
+  const commandAuthorized = resolveCommandAuthorized(isGroup, isOwner(account.accountId, message.from_uid), isExplicitBotMention);
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,
     RawBody: rawBody,
     CommandBody: commandBody,
-    CommandAuthorized: !isGroup || isOwner(account.accountId, message.from_uid),
+    BodyForCommands: commandBody,
+    CommandAuthorized: commandAuthorized,
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     MediaUrls: (() => {
       // Only pass current message's local media path (no remote history URLs)

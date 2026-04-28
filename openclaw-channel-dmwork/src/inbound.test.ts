@@ -13,6 +13,8 @@ import {
   uploadAndSendMedia,
   downloadMediaToLocal,
   buildMemberListPrefix,
+  resolveCommandBody,
+  resolveCommandAuthorized,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
@@ -1065,5 +1067,48 @@ describe("resolveMultipleForwardText with URL resolution", () => {
     expect(result).toContain("Test: [图片]");
     expect(result).toContain("Test: [文件: doc.pdf]");
     expect(result).not.toContain("https://");
+  });
+});
+
+// ─── Slash command authorization & body resolution ───────────────────────────
+
+describe("resolveCommandBody", () => {
+  it("DM: keeps raw body as-is", () => {
+    expect(resolveCommandBody("/new", false, false)).toBe("/new");
+  });
+
+  it("group + explicit @bot: strips @mention prefix", () => {
+    expect(resolveCommandBody("@ona /new", true, true)).toBe("/new");
+  });
+
+  it("group + @all (not explicit bot mention): keeps raw body", () => {
+    expect(resolveCommandBody("@all /new", true, false)).toBe("@all /new");
+  });
+
+  it("group + no mention: keeps raw body", () => {
+    expect(resolveCommandBody("/new", true, false)).toBe("/new");
+  });
+});
+
+describe("resolveCommandAuthorized", () => {
+  it("DM: anyone can execute commands", () => {
+    expect(resolveCommandAuthorized(false, false, false)).toBe(true);
+    expect(resolveCommandAuthorized(false, true, false)).toBe(true);
+  });
+
+  it("group: owner + explicit @bot → authorized", () => {
+    expect(resolveCommandAuthorized(true, true, true)).toBe(true);
+  });
+
+  it("group: non-owner + explicit @bot → not authorized", () => {
+    expect(resolveCommandAuthorized(true, false, true)).toBe(false);
+  });
+
+  it("group: owner + @all (no explicit bot mention) → not authorized", () => {
+    expect(resolveCommandAuthorized(true, true, false)).toBe(false);
+  });
+
+  it("group: non-owner + no mention → not authorized", () => {
+    expect(resolveCommandAuthorized(true, false, false)).toBe(false);
   });
 });
