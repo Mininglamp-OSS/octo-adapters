@@ -17,6 +17,7 @@ import {
 } from "./mention-utils.js";
 import type { MentionPayload, MentionEntity } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
+import { isOwner } from "./owner-registry.js";
 import { createWriteStream } from "node:fs";
 import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
@@ -1437,7 +1438,7 @@ export async function handleInboundMessage(params: {
     BodyForAgent: body,
     RawBody: rawBody,
     CommandBody: commandBody,
-    CommandAuthorized: true,
+    CommandAuthorized: !isGroup || isOwner(account.accountId, message.from_uid),
     MediaUrl: isFileMessage ? undefined : inboundMediaUrl,
     MediaUrls: (() => {
       // Only pass current message's local media path (no remote history URLs)
