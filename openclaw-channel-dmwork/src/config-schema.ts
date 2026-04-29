@@ -10,6 +10,7 @@ export interface DmworkAccountConfig {
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
   requireMention?: boolean;
+  ignoreMentionAll?: boolean;
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
@@ -25,6 +26,7 @@ export interface DmworkConfig {
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
   requireMention?: boolean;
+  ignoreMentionAll?: boolean;
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
@@ -49,6 +51,7 @@ export const DmworkConfigJsonSchema = {
       pollIntervalMs: { type: "number", minimum: 500 },
       heartbeatIntervalMs: { type: "number", minimum: 5000 },
       requireMention: { type: "boolean" },
+      ignoreMentionAll: { type: "boolean" },
       botUid: { type: "string" },
       historyLimit: { type: "number", minimum: 1, maximum: 100 },
       historyPromptTemplate: { type: "string" },
@@ -66,6 +69,7 @@ export const DmworkConfigJsonSchema = {
             pollIntervalMs: { type: "number", minimum: 500 },
             heartbeatIntervalMs: { type: "number", minimum: 5000 },
             requireMention: { type: "boolean" },
+            ignoreMentionAll: { type: "boolean" },
             botUid: { type: "string" },
             historyLimit: { type: "number", minimum: 1, maximum: 100 },
             historyPromptTemplate: { type: "string" },

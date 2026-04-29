@@ -214,7 +214,7 @@ async function checkForUpdates(
 ): Promise<void> {
   try {
     // Check npm version
-    const localVersion = (await import("../package.json", { with: { type: "json" } })).default.version;
+    const localVersion = PLUGIN_VERSION;
     const resp = await fetch("https://registry.npmjs.org/openclaw-channel-dmwork/latest");
     if (resp.ok) {
       const data = await resp.json() as { version?: string };

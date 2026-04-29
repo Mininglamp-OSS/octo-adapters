@@ -788,6 +788,8 @@ This lets you understand context when someone asks about a specific message.
 
 **To reply to every message:** set requireMention to false in your dmwork channel config (channels.dmwork.requireMention = false). This costs more tokens but lets the AI decide when to reply.
 
+**To ignore @all/@所有人:** set ignoreMentionAll to true (channels.dmwork.accounts.xxx.ignoreMentionAll = true). This only applies when requireMention is true — @all will not trigger a bot reply, but direct @bot still will. When requireMention is false, ignoreMentionAll has no effect since the bot replies to all messages anyway.
+
 ### Rule 2: Don't respond to other bots
 
 If "from_uid" belongs to another bot (check if it ends with "_bot" or matches a known bot ID), **ignore** the message.
