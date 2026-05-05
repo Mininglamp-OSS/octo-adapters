@@ -1,10 +1,16 @@
-import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
 import type {
   ChannelOutboundContext,
   ChannelPlugin,
   OpenClawConfig,
   ChannelMessageActionAdapter,
 } from "openclaw/plugin-sdk";
+
+/**
+ * Matches the SDK's DEFAULT_ACCOUNT_ID value ("default").
+ * Defined locally to stay backward-compatible with older OpenClaw versions
+ * where the sub-path export openclaw/plugin-sdk/account-id may not exist.
+ */
+const DEFAULT_ACCOUNT_ID = "default";
 import { DmworkConfigJsonSchema } from "./config-schema.js";
 import {
   listDmworkAccountIds,

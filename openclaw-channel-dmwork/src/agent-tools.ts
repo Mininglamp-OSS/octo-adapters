@@ -42,7 +42,12 @@ import { broadcastGroupMdUpdate, broadcastThreadMdUpdate } from "./group-md.js";
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
 
-import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/account-id";
+/**
+ * Matches the SDK's DEFAULT_ACCOUNT_ID value ("default").
+ * Defined locally to stay backward-compatible with older OpenClaw versions
+ * where the sub-path export openclaw/plugin-sdk/account-id may not exist.
+ */
+const DEFAULT_ACCOUNT_ID = "default";
 
 // ---------------------------------------------------------------------------
 // Types
