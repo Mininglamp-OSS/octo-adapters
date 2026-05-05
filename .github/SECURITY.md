@@ -11,7 +11,7 @@
 
 If you discover a security vulnerability, please report it responsibly:
 
-1. **Email:** Send details to [security@example.com](mailto:security@example.com)
+1. **Email:** Send details to [security@mlamp.cn](mailto:security@mlamp.cn)
 2. **Do not** open a public GitHub issue for security vulnerabilities
 
 ### What to include
