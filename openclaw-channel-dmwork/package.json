@@ -14,7 +14,6 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "_comment_exports": "No 'require' condition — intentionally omitted to prevent Node.js 25 dual-mode ESM race condition in plugin loaders",
   "files": [
     "bin",
     "dist",

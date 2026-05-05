@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 
 // ─── Token refresh cooldown tests ───────────────────────────────────────────
 // These test the time-based cooldown pattern used in channel.ts onError handler
@@ -201,7 +202,6 @@ describe("resolveOutboundAccountId — explicit accountId should not be overridd
     // ...but the sendText/sendMedia logic should gate on rawAccountId === DEFAULT_ACCOUNT_ID.
     // Simulate the gating logic:
     const rawAccountId: string = "allen-imtest"; // explicit, non-default
-    const DEFAULT_ACCOUNT_ID = "default";
     const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
       ? resolveOutboundAccountId("group:some_group", rawAccountId)
       : rawAccountId;
@@ -213,7 +213,6 @@ describe("resolveOutboundAccountId — explicit accountId should not be overridd
 
     registerGroupToAccount("some_group", "thomas_fu_bot");
 
-    const DEFAULT_ACCOUNT_ID = "default";
     const rawAccountId = DEFAULT_ACCOUNT_ID;
     const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
       ? resolveOutboundAccountId("group:some_group", rawAccountId)
