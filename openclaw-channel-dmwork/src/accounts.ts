@@ -1,11 +1,5 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
-
-/**
- * Matches the SDK's DEFAULT_ACCOUNT_ID value ("default").
- * Defined locally to stay backward-compatible with older OpenClaw versions
- * where the sub-path export openclaw/plugin-sdk/account-id may not exist.
- */
-const DEFAULT_ACCOUNT_ID = "default";
+import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import type { DmworkConfig } from "./config-schema.js";
 
 export type DmworkAccountConfig = DmworkConfig & {
