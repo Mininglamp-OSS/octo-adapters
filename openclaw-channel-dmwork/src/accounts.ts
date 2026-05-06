@@ -1,5 +1,5 @@
-import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import type { DmworkConfig } from "./config-schema.js";
 
 export type DmworkAccountConfig = DmworkConfig & {
