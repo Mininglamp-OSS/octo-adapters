@@ -1,9 +1,9 @@
 import type {
-  ChannelOutboundContext,
   ChannelPlugin,
   OpenClawConfig,
   ChannelMessageActionAdapter,
 } from "openclaw/plugin-sdk";
+import type { ChannelOutboundContext } from "openclaw/plugin-sdk/channel-contract";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 import { DmworkConfigJsonSchema } from "./config-schema.js";
 import {
