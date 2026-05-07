@@ -29,15 +29,6 @@ import { randomUUID } from "node:crypto";
 // handleInboundMessage writes here; the hook reads and clears per sessionKey.
 export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
 
-
-
-// Re-export a minimal HistoryEntry type for when SDK doesn't have it
-export interface HistoryEntryCompat {
-  sender: string;
-  body: string;
-  timestamp: number;
-}
-
 export type DmworkStatusSink = (patch: {
   lastInboundAt?: number;
   lastOutboundAt?: number;
