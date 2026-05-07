@@ -1,4 +1,6 @@
-import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
+import { DEFAULT_GROUP_HISTORY_LIMIT } from "openclaw/plugin-sdk/reply-history";
 import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
@@ -26,30 +28,6 @@ import { randomUUID } from "node:crypto";
 // Pending inbound context for before_prompt_build hook injection.
 // handleInboundMessage writes here; the hook reads and clears per sessionKey.
 export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
-
-// Defensive imports — these may not exist in older OpenClaw versions
-// History context managed manually for cross-SDK compatibility
-let clearHistoryEntriesIfEnabled: any;
-let DEFAULT_GROUP_HISTORY_LIMIT = 20;
-let _sdkLoaded = false;
-
-async function ensureSdkLoaded() {
-  if (_sdkLoaded) return;
-  _sdkLoaded = true;
-  try {
-    const sdk = await import("openclaw/plugin-sdk");
-    // History context managed manually (SDK buildPendingHistoryContextFromMap
-    // has incompatible entry format expectations across versions)
-    if (typeof sdk.clearHistoryEntriesIfEnabled === "function") {
-      clearHistoryEntriesIfEnabled = sdk.clearHistoryEntriesIfEnabled;
-    }
-    if (sdk.DEFAULT_GROUP_HISTORY_LIMIT) {
-      DEFAULT_GROUP_HISTORY_LIMIT = sdk.DEFAULT_GROUP_HISTORY_LIMIT;
-    }
-  } catch {
-    // Older OpenClaw versions may not export these — fallback implementations used
-  }
-}
 
 
 
@@ -972,8 +950,6 @@ export async function handleInboundMessage(params: {
   statusSink?: DmworkStatusSink;
 }) {
   const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
-
-  await ensureSdkLoaded();
 
   // Detect GROUP.md update/delete notification — refresh both memory + disk cache, do NOT pass to LLM
   const earlyEventType = (message.payload as any)?.event?.type;
