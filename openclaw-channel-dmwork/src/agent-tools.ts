@@ -168,7 +168,7 @@ export function createDmworkManagementTools(params: {
           accountId: {
             type: "string",
             description:
-              "DMWork account ID (optional, defaults to the primary configured account).",
+              "Required when multiple DMWork accounts are configured. Use the exact accountId from the current DMWork context; casing is normalized when unambiguous. Omit when only one account is configured.",
           },
         },
         required: ["action"],
@@ -192,22 +192,54 @@ export function createDmworkManagementTools(params: {
             ? rawAccountId
             : undefined;
 
-        // Strict validation: reject explicitly requested accountIds that
-        // don't correspond to a real account entry.
-        if (requestedAccountId) {
-          const knownIds = listDmworkAccountIds(cfg);
-          if (!knownIds.includes(requestedAccountId)) {
-            return makeError(`Account not found: ${requestedAccountId}`);
+        const knownIds = listDmworkAccountIds(cfg);
+
+        // Account routing:
+        //   - Single-account: force-route to the only configured account,
+        //     regardless of what (if anything) the LLM passed. A stray /
+        //     hallucinated accountId can't silently fail auth.
+        //   - Multi-account + requested: case-insensitive match against
+        //     config keys. Bot IDs generated via util.Ten2Hex are mixed-case
+        //     (e.g. "27lZl4QjPzh72d10c8c_bot"); LLMs routinely drop the
+        //     capitals in tool calls.
+        //   - Multi-account + not requested: require the caller to pick.
+        //     Don't silently use the first account — that lets tool calls
+        //     target the wrong bot without anyone noticing.
+        let accountId: string;
+        if (knownIds.length === 1) {
+          accountId = knownIds[0];
+        } else if (requestedAccountId) {
+          // Exact match wins — protects against the pathological case where
+          // two accountIds differ only in casing (e.g. "BotA" + "bota"):
+          // passing "BotA" must hit the exact one, not whichever sorted
+          // first in a lowercase collapse.
+          if (knownIds.includes(requestedAccountId)) {
+            accountId = requestedAccountId;
+          } else {
+            const lower = requestedAccountId.toLowerCase();
+            const matches = knownIds.filter((id) => id.toLowerCase() === lower);
+            if (matches.length === 0) {
+              return makeError(
+                `Account not found: ${requestedAccountId}. Available: ${knownIds.join(", ")}`,
+              );
+            }
+            if (matches.length > 1) {
+              return makeError(
+                `Account "${requestedAccountId}" is ambiguous (case-insensitive match hits ${matches.join(", ")}). Pass the exact accountId.`,
+              );
+            }
+            accountId = matches[0];
+          }
+        } else {
+          const defaultId = resolveDefaultDmworkAccountId(cfg);
+          if (defaultId) {
+            accountId = defaultId;
+          } else {
+            return makeError(
+              `Multiple DMWork accounts configured; please specify accountId. Available: ${knownIds.join(", ")}`,
+            );
           }
         }
-
-        // Four-level fallback (consistent with channel.ts):
-        //   1. explicitly requested id  2. configured default  3. first account  4. DEFAULT_ACCOUNT_ID
-        const accountId =
-          requestedAccountId ??
-          resolveDefaultDmworkAccountId(cfg) ??
-          listDmworkAccountIds(cfg)[0] ??
-          DEFAULT_ACCOUNT_ID;
 
         const account = resolveDmworkAccount({ cfg, accountId });
 

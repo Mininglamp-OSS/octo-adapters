@@ -312,43 +312,37 @@ describe("createDmworkManagementTools", () => {
       });
     });
 
-    it("falls back to default accountId when not provided", async () => {
+    it("single-account: force-routes to the only configured account", async () => {
+      // Default mock setup has listDmworkAccountIds returning a single "test-account".
+      // No accountId passed — the single-account branch short-circuits directly to
+      // knownIds[0], bypassing resolveDefaultDmworkAccountId.
       vi.mocked(fetchBotGroups).mockResolvedValue([]);
       const execute = getExecute();
       await execute("tc", { action: "list-groups" });
-      expect(resolveDefaultDmworkAccountId).toHaveBeenCalled();
       expect(fetchBotGroups).toHaveBeenCalledWith({
         apiUrl: "http://api.test",
         botToken: "tok-secret",
       });
     });
 
-    it("multi-account: falls back to first account when no accountId and no default", async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
-      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
-      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
-        accountId,
-        enabled: true,
-        configured: true,
-        config: {
-          botToken: `tok-${accountId}`,
-          apiUrl: `http://api-${accountId}.test`,
-          pollIntervalMs: 2000,
-          heartbeatIntervalMs: 30000,
-        },
-      }));
+    it("single-account: force-routes even when the LLM passes a different accountId", async () => {
+      // Single-account → whatever the LLM passes is ignored; the only configured
+      // account wins. Guards against a stray/hallucinated accountId silently
+      // failing auth.
       vi.mocked(fetchBotGroups).mockResolvedValue([]);
       const execute = getExecute();
-      await execute("tc", { action: "list-groups" });
+      await execute("tc", { action: "list-groups", accountId: "test-account" });
       expect(fetchBotGroups).toHaveBeenCalledWith({
-        apiUrl: "http://api-bot-a.test",
-        botToken: "tok-bot-a",
+        apiUrl: "http://api.test",
+        botToken: "tok-secret",
       });
     });
 
-    it('multi-account: accountId="default" falls back to first account', async () => {
-      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
-      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+    it("case-insensitive accountId match normalises to the real config key", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue([
+        "27lZl4QjPzh72d10c8c_bot",
+        "other_bot",
+      ]);
       vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
         accountId,
         enabled: true,
@@ -362,11 +356,85 @@ describe("createDmworkManagementTools", () => {
       }));
       vi.mocked(fetchBotGroups).mockResolvedValue([]);
       const execute = getExecute();
-      await execute("tc", { action: "list-groups", accountId: "default" });
+      // LLM drops the capitals — should still hit the mixed-case config key.
+      await execute("tc", { action: "list-groups", accountId: "27lzl4qjpzh72d10c8c_bot" });
       expect(fetchBotGroups).toHaveBeenCalledWith({
-        apiUrl: "http://api-bot-a.test",
-        botToken: "tok-bot-a",
+        apiUrl: "http://api-27lZl4QjPzh72d10c8c_bot.test",
+        botToken: "tok-27lZl4QjPzh72d10c8c_bot",
       });
+    });
+
+    it("exact-case match wins even if a case-fold variant also exists", async () => {
+      // Pathological but legal: two accountIds differ only in casing.
+      // Passing the exact one must hit the exact one, not whichever the
+      // lowercase collapse happens to find first.
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["BotA", "bota"]);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+        accountId,
+        enabled: true,
+        configured: true,
+        config: {
+          botToken: `tok-${accountId}`,
+          apiUrl: `http://api-${accountId}.test`,
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      }));
+      vi.mocked(fetchBotGroups).mockResolvedValue([]);
+      const execute = getExecute();
+      await execute("tc", { action: "list-groups", accountId: "BotA" });
+      expect(fetchBotGroups).toHaveBeenCalledWith({
+        apiUrl: "http://api-BotA.test",
+        botToken: "tok-BotA",
+      });
+    });
+
+    it("case-fold ambiguity (no exact match) is rejected, not silently resolved", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["BotA", "bota"]);
+      const execute = getExecute();
+      // Neither exact; lowercased collapses to same key hitting both.
+      const result = await execute("tc", { action: "list-groups", accountId: "BOTA" });
+      const data = parseText(result);
+      expect(data.error).toContain("ambiguous");
+      expect(data.error).toContain("BotA");
+      expect(data.error).toContain("bota");
+      expect(fetchBotGroups).not.toHaveBeenCalled();
+    });
+
+    it("multi-account: unresolvable accountId returns error with available options", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      const execute = getExecute();
+      const result = await execute("tc", {
+        action: "list-groups",
+        accountId: "does-not-exist",
+      });
+      const data = parseText(result);
+      expect(data.error).toContain("Account not found: does-not-exist");
+      expect(data.error).toContain("bot-a");
+      expect(data.error).toContain("bot-b");
+    });
+
+    it("multi-account: no accountId and no default returns error with available options", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      const execute = getExecute();
+      const result = await execute("tc", { action: "list-groups" });
+      const data = parseText(result);
+      expect(data.error).toContain("Multiple DMWork accounts");
+      expect(data.error).toContain("bot-a");
+      expect(data.error).toContain("bot-b");
+      // Must NOT silently pick an account and make the call.
+      expect(fetchBotGroups).not.toHaveBeenCalled();
+    });
+
+    it('multi-account: accountId="default" alias behaves as unspecified → error when no default resolvable', async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
+      vi.mocked(resolveDefaultDmworkAccountId).mockReturnValue(null as any);
+      const execute = getExecute();
+      const result = await execute("tc", { action: "list-groups", accountId: "default" });
+      const data = parseText(result);
+      expect(data.error).toContain("Multiple DMWork accounts");
+      expect(fetchBotGroups).not.toHaveBeenCalled();
     });
 
     it("resolves correct account in multi-account setup", async () => {
