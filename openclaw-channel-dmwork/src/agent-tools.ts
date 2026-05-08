@@ -192,22 +192,41 @@ export function createDmworkManagementTools(params: {
             ? rawAccountId
             : undefined;
 
-        // Strict validation: reject explicitly requested accountIds that
-        // don't correspond to a real account entry.
-        if (requestedAccountId) {
-          const knownIds = listDmworkAccountIds(cfg);
-          if (!knownIds.includes(requestedAccountId)) {
-            return makeError(`Account not found: ${requestedAccountId}`);
+        const knownIds = listDmworkAccountIds(cfg);
+
+        // Account routing:
+        //   - Single-account: force-route to the only configured account,
+        //     regardless of what (if anything) the LLM passed. A stray /
+        //     hallucinated accountId can't silently fail auth.
+        //   - Multi-account + requested: case-insensitive match against
+        //     config keys. Bot IDs generated via util.Ten2Hex are mixed-case
+        //     (e.g. "27lZl4QjPzh72d10c8c_bot"); LLMs routinely drop the
+        //     capitals in tool calls.
+        //   - Multi-account + not requested: require the caller to pick.
+        //     Don't silently use the first account — that lets tool calls
+        //     target the wrong bot without anyone noticing.
+        let accountId: string;
+        if (knownIds.length === 1) {
+          accountId = knownIds[0];
+        } else if (requestedAccountId) {
+          const lower = requestedAccountId.toLowerCase();
+          const match = knownIds.find((id) => id.toLowerCase() === lower);
+          if (!match) {
+            return makeError(
+              `Account not found: ${requestedAccountId}. Available: ${knownIds.join(", ")}`,
+            );
+          }
+          accountId = match;
+        } else {
+          const defaultId = resolveDefaultDmworkAccountId(cfg);
+          if (defaultId) {
+            accountId = defaultId;
+          } else {
+            return makeError(
+              `Multiple DMWork accounts configured; please specify accountId. Available: ${knownIds.join(", ")}`,
+            );
           }
         }
-
-        // Four-level fallback (consistent with channel.ts):
-        //   1. explicitly requested id  2. configured default  3. first account  4. DEFAULT_ACCOUNT_ID
-        const accountId =
-          requestedAccountId ??
-          resolveDefaultDmworkAccountId(cfg) ??
-          listDmworkAccountIds(cfg)[0] ??
-          DEFAULT_ACCOUNT_ID;
 
         const account = resolveDmworkAccount({ cfg, accountId });
 
