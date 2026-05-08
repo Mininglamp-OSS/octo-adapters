@@ -168,7 +168,7 @@ export function createDmworkManagementTools(params: {
           accountId: {
             type: "string",
             description:
-              "DMWork account ID (optional, defaults to the primary configured account).",
+              "Required when multiple DMWork accounts are configured. Use the exact accountId from the current DMWork context; casing is normalized when unambiguous. Omit when only one account is configured.",
           },
         },
         required: ["action"],
@@ -209,14 +209,27 @@ export function createDmworkManagementTools(params: {
         if (knownIds.length === 1) {
           accountId = knownIds[0];
         } else if (requestedAccountId) {
-          const lower = requestedAccountId.toLowerCase();
-          const match = knownIds.find((id) => id.toLowerCase() === lower);
-          if (!match) {
-            return makeError(
-              `Account not found: ${requestedAccountId}. Available: ${knownIds.join(", ")}`,
-            );
+          // Exact match wins — protects against the pathological case where
+          // two accountIds differ only in casing (e.g. "BotA" + "bota"):
+          // passing "BotA" must hit the exact one, not whichever sorted
+          // first in a lowercase collapse.
+          if (knownIds.includes(requestedAccountId)) {
+            accountId = requestedAccountId;
+          } else {
+            const lower = requestedAccountId.toLowerCase();
+            const matches = knownIds.filter((id) => id.toLowerCase() === lower);
+            if (matches.length === 0) {
+              return makeError(
+                `Account not found: ${requestedAccountId}. Available: ${knownIds.join(", ")}`,
+              );
+            }
+            if (matches.length > 1) {
+              return makeError(
+                `Account "${requestedAccountId}" is ambiguous (case-insensitive match hits ${matches.join(", ")}). Pass the exact accountId.`,
+              );
+            }
+            accountId = matches[0];
           }
-          accountId = match;
         } else {
           const defaultId = resolveDefaultDmworkAccountId(cfg);
           if (defaultId) {

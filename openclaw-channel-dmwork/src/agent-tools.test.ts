@@ -364,6 +364,43 @@ describe("createDmworkManagementTools", () => {
       });
     });
 
+    it("exact-case match wins even if a case-fold variant also exists", async () => {
+      // Pathological but legal: two accountIds differ only in casing.
+      // Passing the exact one must hit the exact one, not whichever the
+      // lowercase collapse happens to find first.
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["BotA", "bota"]);
+      vi.mocked(resolveDmworkAccount).mockImplementation(({ accountId }: any) => ({
+        accountId,
+        enabled: true,
+        configured: true,
+        config: {
+          botToken: `tok-${accountId}`,
+          apiUrl: `http://api-${accountId}.test`,
+          pollIntervalMs: 2000,
+          heartbeatIntervalMs: 30000,
+        },
+      }));
+      vi.mocked(fetchBotGroups).mockResolvedValue([]);
+      const execute = getExecute();
+      await execute("tc", { action: "list-groups", accountId: "BotA" });
+      expect(fetchBotGroups).toHaveBeenCalledWith({
+        apiUrl: "http://api-BotA.test",
+        botToken: "tok-BotA",
+      });
+    });
+
+    it("case-fold ambiguity (no exact match) is rejected, not silently resolved", async () => {
+      vi.mocked(listDmworkAccountIds).mockReturnValue(["BotA", "bota"]);
+      const execute = getExecute();
+      // Neither exact; lowercased collapses to same key hitting both.
+      const result = await execute("tc", { action: "list-groups", accountId: "BOTA" });
+      const data = parseText(result);
+      expect(data.error).toContain("ambiguous");
+      expect(data.error).toContain("BotA");
+      expect(data.error).toContain("bota");
+      expect(fetchBotGroups).not.toHaveBeenCalled();
+    });
+
     it("multi-account: unresolvable accountId returns error with available options", async () => {
       vi.mocked(listDmworkAccountIds).mockReturnValue(["bot-a", "bot-b"]);
       const execute = getExecute();
