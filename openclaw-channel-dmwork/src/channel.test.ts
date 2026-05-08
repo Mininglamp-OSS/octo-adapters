@@ -1,6 +1,34 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
 
+// Mock api-fetch so outbound adapter wiring tests (below) can observe the
+// final sendMessage / sendMediaMessage arguments without actually hitting
+// DMWork. Real implementations still ship in the bundle — this is test-only.
+vi.mock("./api-fetch.js", async () => {
+  return {
+    sendMessage: vi.fn().mockResolvedValue(undefined),
+    sendMediaMessage: vi.fn().mockResolvedValue(undefined),
+    getUploadCredentials: vi.fn().mockResolvedValue({
+      credentials: { TmpSecretId: "id", TmpSecretKey: "k", Token: "t" },
+      startTime: 0,
+      expiredTime: 0,
+      bucket: "b", region: "r", key: "k",
+      cdnBaseUrl: "https://cdn.example/",
+    }),
+    uploadFileToCOS: vi.fn().mockResolvedValue({ url: "https://cdn.example/file.txt" }),
+    inferContentType: (fn: string) =>
+      fn.endsWith(".txt") ? "text/plain" : "application/octet-stream",
+    ensureTextCharset: (ct: string) =>
+      ct.startsWith("text/") && !ct.includes("charset") ? ct + "; charset=utf-8" : ct,
+    parseImageDimensions: () => null,
+    parseImageDimensionsFromFile: async () => null,
+    registerBot: vi.fn(),
+    sendHeartbeat: vi.fn(),
+    fetchBotGroups: vi.fn().mockResolvedValue([]),
+    getGroupMd: vi.fn(),
+  };
+});
+
 // ─── Token refresh cooldown tests ───────────────────────────────────────────
 // These test the time-based cooldown pattern used in channel.ts onError handler
 // to prevent token refresh storms.
@@ -180,44 +208,68 @@ describe("resolveOutboundAccountId", () => {
     const result = resolveOutboundAccountId("user:some_uid", "fallback_acct");
     expect(result).toBe("fallback_acct");
   });
+
+  // channel:<id> is an alternative prefix OpenClaw's delivery pipeline can emit
+  // for group channels. If the normalisation layer misses it, the group→account
+  // lookup silently falls back to the caller-provided accountId and the turn
+  // goes out through the wrong bot's token. Keep these three cases as a
+  // regression guard for the prefix-normalisation step in particular.
+
+  it("should resolve channel:<id> alias like group:<id>", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+    registerGroupToAccount("abc", "acct_chan");
+    const result = resolveOutboundAccountId("channel:abc", "fallback");
+    expect(result).toBe("acct_chan");
+  });
+
+  it("should resolve channel:<id>____<short> to the parent group's account", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+    registerGroupToAccount("abc", "acct_thread");
+    const result = resolveOutboundAccountId("channel:abc____topicA", "fallback");
+    expect(result).toBe("acct_thread");
+  });
+
+  it("should strip @uid suffix from channel:<id>@uid1,uid2 target", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+    registerGroupToAccount("abc", "acct_chan_uid");
+    const result = resolveOutboundAccountId("channel:abc@uid1,uid2", "fallback");
+    expect(result).toBe("acct_chan_uid");
+  });
 });
 
-describe("resolveOutboundAccountId — explicit accountId should not be overridden", () => {
+describe("resolveOutboundAccountId — group→account correction semantics", () => {
   beforeEach(() => {
     vi.resetModules();
   });
 
-  it("should NOT override explicit non-default accountId even when group is registered to another account", async () => {
+  it("corrects unambiguously owned single-bot groups even when a different accountId is explicitly passed", async () => {
+    // Intent: if the group belongs to exactly one configured bot, always use
+    // that bot's accountId — otherwise the turn goes out with a token the
+    // backend will reject (bot not a member of the group). This is the safe
+    // default; explicit accountId is only meaningful when the group has
+    // multiple bots registered to it (see next test).
     const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
-
-    // group registered to thomas_fu_bot
     registerGroupToAccount("some_group", "thomas_fu_bot");
-
-    // User explicitly passes allen-imtest — resolveOutboundAccountId would return thomas_fu_bot,
-    // but the caller (sendText/sendMedia) should not call resolveOutboundAccountId when accountId != default.
-    // We test that resolveOutboundAccountId itself still resolves to the registered account...
     const resolved = resolveOutboundAccountId("group:some_group", "allen-imtest");
-    expect(resolved).toBe("thomas_fu_bot"); // resolveOutboundAccountId always resolves
-
-    // ...but the sendText/sendMedia logic should gate on rawAccountId === DEFAULT_ACCOUNT_ID.
-    // Simulate the gating logic:
-    const rawAccountId: string = "allen-imtest"; // explicit, non-default
-    const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
-      ? resolveOutboundAccountId("group:some_group", rawAccountId)
-      : rawAccountId;
-    expect(accountId).toBe("allen-imtest"); // NOT corrected
+    expect(resolved).toBe("thomas_fu_bot");
   });
 
-  it("should correct when accountId is default", async () => {
+  it("falls back to explicit accountId when group is shared by multiple bots", async () => {
+    // When >1 bots are registered to the same group, resolveAccountForGroup
+    // returns undefined and we honour whatever the caller passed — this is
+    // where "explicit accountId wins" applies.
     const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
+    registerGroupToAccount("shared_group", "bot_a");
+    registerGroupToAccount("shared_group", "bot_b");
+    const resolved = resolveOutboundAccountId("group:shared_group", "bot_a");
+    expect(resolved).toBe("bot_a");
+  });
 
+  it("corrects when rawAccountId is the DEFAULT alias", async () => {
+    const { registerGroupToAccount, resolveOutboundAccountId } = await import("./channel.js");
     registerGroupToAccount("some_group", "thomas_fu_bot");
-
-    const rawAccountId = DEFAULT_ACCOUNT_ID;
-    const accountId = (rawAccountId === DEFAULT_ACCOUNT_ID)
-      ? resolveOutboundAccountId("group:some_group", rawAccountId)
-      : rawAccountId;
-    expect(accountId).toBe("thomas_fu_bot"); // corrected
+    const resolved = resolveOutboundAccountId("group:some_group", DEFAULT_ACCOUNT_ID);
+    expect(resolved).toBe("thomas_fu_bot");
   });
 });
 
@@ -376,5 +428,288 @@ describe("sendText v2 mention processing logic", () => {
     // hasAtAll should be true
     const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(converted.content);
     expect(hasAtAll).toBe(true);
+  });
+});
+
+// ─── outbound adapter wiring (thread cross-channel regression) ──────────────
+// These exercise the full sendText / sendMedia adapter path — not just the
+// resolveOutboundDmworkTarget helper — to pin down that ctx.threadId is
+// correctly wired from framework input all the way to sendMessage /
+// sendMediaMessage. Motivated by the bug where OpenClaw passed
+// to="group:<group_no>" + threadId="<short>" and files silently landed in
+// the parent group (channel_type=2) instead of the sub-topic (5).
+
+describe("outbound.sendText — threadId wiring", () => {
+  const cfg = {
+    channels: {
+      dmwork: {
+        apiUrl: "https://api.example",
+        accounts: {
+          default: { botToken: "bf_test", apiUrl: "https://api.example" },
+        },
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    const apiFetch = await import("./api-fetch.js");
+    (apiFetch.sendMessage as any).mockClear();
+  });
+
+  it("merges ctx.threadId into the group target as CommunityTopic (type=5)", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg,
+      to: "group:grp1",
+      threadId: "topicA",
+      text: "hi from bot",
+      accountId: "default",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call.channelId).toBe("grp1____topicA");
+    expect(call.channelType).toBe(5); // ChannelType.CommunityTopic
+    expect(call.content).toBe("hi from bot");
+  });
+
+  it("leaves a parent-group target (no threadId) as Group (type=2)", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg,
+      to: "group:grp1",
+      text: "parent group reply",
+      accountId: "default",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call.channelId).toBe("grp1");
+    expect(call.channelType).toBe(2); // ChannelType.Group
+  });
+
+  it("accepts channel:<id> alias + threadId and routes to CommunityTopic", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg,
+      to: "channel:grp1",
+      threadId: "topicA",
+      text: "hi",
+      accountId: "default",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call.channelId).toBe("grp1____topicA");
+    expect(call.channelType).toBe(5);
+  });
+});
+
+describe("outbound.sendMedia — threadId wiring", () => {
+  const cfg = {
+    channels: {
+      dmwork: {
+        apiUrl: "https://api.example",
+        accounts: {
+          default: { botToken: "bf_test", apiUrl: "https://api.example" },
+        },
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    const apiFetch = await import("./api-fetch.js");
+    (apiFetch.sendMediaMessage as any).mockClear();
+    (apiFetch.getUploadCredentials as any).mockClear();
+    (apiFetch.uploadFileToCOS as any).mockClear();
+  });
+
+  it("merges ctx.threadId into the group target as CommunityTopic (type=5)", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg,
+      to: "group:grp1",
+      threadId: "topicA",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "default",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    expect(call.channelId).toBe("grp1____topicA");
+    expect(call.channelType).toBe(5);
+    expect(call.url).toBe("https://cdn.example/file.txt");
+  });
+
+  it("leaves a parent-group target (no threadId) as Group (type=2)", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg,
+      to: "group:grp1",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "default",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    expect(call.channelId).toBe("grp1");
+    expect(call.channelType).toBe(2);
+  });
+
+  it("accepts channel:<id> alias + threadId and routes to CommunityTopic", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg,
+      to: "channel:grp1",
+      threadId: "topicA",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "default",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    expect(call.channelId).toBe("grp1____topicA");
+    expect(call.channelType).toBe(5);
+  });
+
+  it("preserves an already-synthesised channel_id even if threadId is also passed", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg,
+      to: "group:grp1____topicA",
+      threadId: "different",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "default",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    // ctx.to wins; duplicate threadId must not re-concat or downgrade.
+    expect(call.channelId).toBe("grp1____topicA");
+    expect(call.channelType).toBe(5);
+  });
+});
+
+// ─── outbound accountId correction — end-to-end token assertion ─────────────
+// These close the gap the review flagged: resolveOutboundAccountId's behaviour
+// is covered in isolation, but the outbound adapters (sendText/sendMedia) also
+// have to actually USE the corrected accountId's botToken when calling the
+// DMWork API. Without these tests, a regression in the wiring (e.g. passing
+// the original ctx.accountId to resolveDmworkAccount instead of the corrected
+// one) would go undetected.
+
+describe("outbound sendText/sendMedia — accountId correction threads through to API", () => {
+  const cfgWithTwoBots = {
+    channels: {
+      dmwork: {
+        apiUrl: "https://api.example",
+        accounts: {
+          "bot-a": { botToken: "tok-bot-a", apiUrl: "https://api.example" },
+          "bot-b": { botToken: "tok-bot-b", apiUrl: "https://api.example" },
+        },
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    // Reset module state so _groupToAccounts doesn't leak across these tests —
+    // otherwise an earlier "shared group" registration would leave the group
+    // ambiguous for the next test, silently masking the correction under test.
+    vi.resetModules();
+    vi.clearAllMocks();
+  });
+
+  it("sendText corrects to the group-owning bot's token when group has a single owner, even if a different accountId is passed", async () => {
+    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    // Group grp1 belongs to bot-b only; caller passed bot-a.
+    registerGroupToAccount("grp1", "bot-b");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg: cfgWithTwoBots,
+      to: "group:grp1",
+      text: "hi",
+      accountId: "bot-a",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call.botToken).toBe("tok-bot-b"); // corrected from bot-a → bot-b
+  });
+
+  it("sendMedia corrects to the group-owning bot's token", async () => {
+    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    registerGroupToAccount("grp1", "bot-b");
+
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg: cfgWithTwoBots,
+      to: "group:grp1",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "bot-a",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    expect(call.botToken).toBe("tok-bot-b");
+  });
+
+  it("sendText respects explicit accountId when group is shared by multiple bots (no single owner)", async () => {
+    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    // Shared group — resolveAccountForGroup returns undefined for ambiguity.
+    registerGroupToAccount("grp1", "bot-a");
+    registerGroupToAccount("grp1", "bot-b");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg: cfgWithTwoBots,
+      to: "group:grp1",
+      text: "hi",
+      accountId: "bot-a",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call.botToken).toBe("tok-bot-a"); // explicit choice honoured
+  });
+
+  it("sendText corrects through the channel:<id> prefix alias too", async () => {
+    const { dmworkPlugin, registerGroupToAccount } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    registerGroupToAccount("grp1", "bot-b");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg: cfgWithTwoBots,
+      to: "channel:grp1",
+      text: "hi",
+      accountId: "bot-a",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call.botToken).toBe("tok-bot-b");
   });
 });

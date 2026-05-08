@@ -455,6 +455,133 @@ describe("handleDmworkMessageAction", () => {
     });
   });
 
+  // Foot-gun UX guard (#232 review): when the agent explicitly passes a bare
+  // parent-group target while the session's currentChannelId is inside a
+  // thread, log a warning. This doesn't reroute and doesn't reject (the
+  // parent-group reply may be intentional), it just surfaces the ambiguity
+  // so operators can notice model misuse.
+
+  describe("send — thread-context foot-gun warning", () => {
+    it("warns (via log.warn) when target is the thread's parent group", async () => {
+      registerBotGroupIds(["grp1"]);
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
+      });
+      const logWarn = vi.fn();
+      const logInfo = vi.fn();
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "hi" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA",
+        log: { warn: logWarn, info: logInfo } as any,
+      });
+      expect(logWarn).toHaveBeenCalledTimes(1);
+      expect(logInfo).not.toHaveBeenCalled();
+      const msg = logWarn.mock.calls[0][0] as string;
+      expect(msg).toContain("target=\"group:grp1\"");
+      expect(msg).toContain("grp1____topicA");
+    });
+
+    it("falls back to log.info when log.warn is not provided", async () => {
+      registerBotGroupIds(["grp1"]);
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
+      });
+      const logInfo = vi.fn();
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "hi" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA",
+        log: { info: logInfo } as any, // no .warn
+      });
+      expect(logInfo).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT warn when target is a DIFFERENT group (legitimate cross-channel send)", async () => {
+      registerBotGroupIds(["grp1", "otherGroup"]);
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
+      });
+      const logWarn = vi.fn();
+      const logInfo = vi.fn();
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:otherGroup", message: "hi" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA", // in thread of grp1, but sending to otherGroup
+        log: { warn: logWarn, info: logInfo } as any,
+      });
+      expect(logWarn).not.toHaveBeenCalled();
+      expect(logInfo).not.toHaveBeenCalled();
+    });
+
+    it("does NOT warn when target already carries the thread short id", async () => {
+      registerBotGroupIds(["grp1"]);
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
+      });
+      const logWarn = vi.fn();
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1____topicA", message: "hi" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA",
+        log: { warn: logWarn } as any,
+      });
+      expect(logWarn).not.toHaveBeenCalled();
+    });
+
+    it("does NOT warn when session is NOT in a thread (plain group chat)", async () => {
+      registerBotGroupIds(["grp1"]);
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
+      });
+      const logWarn = vi.fn();
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "hi" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1",
+        log: { warn: logWarn } as any,
+      });
+      expect(logWarn).not.toHaveBeenCalled();
+    });
+
+    it("still sends the message when the warning fires (warn, not reject)", async () => {
+      registerBotGroupIds(["grp1"]);
+      let sent = false;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () => {
+          sent = true;
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "hi" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA",
+        log: { warn: vi.fn() } as any,
+      });
+      expect(sent).toBe(true);
+      expect(result.ok).toBe(true);
+    });
+  });
+
   // -----------------------------------------------------------------------
   // read action
   // -----------------------------------------------------------------------
@@ -1484,5 +1611,217 @@ describe("parseTarget", () => {
     const result = parseTarget("dmwork:grpZ", undefined, knownGroups);
     expect(result.channelId).toBe("grpZ");
     expect(result.channelType).toBe(ChannelType.Group);
+  });
+
+  // OpenClaw's delivery pipeline can emit `channel:<id>` as a parallel alias
+  // for group channels. parseTarget handles it directly now so every caller
+  // (outbound adapters, message-tool, account resolver) sees consistent
+  // routing without having to normalise upstream first.
+
+  it("should parse channel:<id> as Group", async () => {
+    const { parseTarget } = await import("./actions.js");
+    const result = parseTarget("channel:grp1");
+    expect(result.channelId).toBe("grp1");
+    expect(result.channelType).toBe(ChannelType.Group);
+  });
+
+  it("should parse channel:<id>____<short> as CommunityTopic", async () => {
+    const { parseTarget } = await import("./actions.js");
+    const result = parseTarget("channel:grp1____topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+});
+
+describe("resolveOutboundDmworkTarget", () => {
+  // Regression guard for the thread cross-channel bug: OpenClaw passes thread
+  // replies as `to: "group:<group_no>"` plus a separate `threadId: "<short_id>"`,
+  // and callers used to run only parseTarget which collapsed the routing back
+  // to the parent group (channel_type=2). The merged helper must synthesise
+  // the CommunityTopic channel_id (channel_type=5).
+
+  it("merges threadId into CommunityTopic channel_id", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("group:grp1", "topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("accepts numeric threadId", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("group:grp1", 2052674378482585600);
+    expect(result.channelId).toBe("grp1____2052674378482585600");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("passes through an already-synthesised thread channel_id untouched", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("group:grp1____topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("does not re-merge threadId when ctx.to already carries ____", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    // Caller gave both — ctx.to wins (already fully specified). Don't concat again.
+    const result = resolveOutboundDmworkTarget("group:grp1____topicA", "topicB");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("leaves DM targets alone even when threadId is accidentally provided", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    const result = resolveOutboundDmworkTarget("user:uid123", "stray");
+    expect(result.channelId).toBe("uid123");
+    expect(result.channelType).toBe(ChannelType.DM);
+  });
+
+  it("returns parent group unchanged when threadId is null/undefined/empty", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    expect(resolveOutboundDmworkTarget("group:grp1").channelType).toBe(ChannelType.Group);
+    expect(resolveOutboundDmworkTarget("group:grp1", null).channelType).toBe(ChannelType.Group);
+    expect(resolveOutboundDmworkTarget("group:grp1", undefined).channelType).toBe(ChannelType.Group);
+    expect(resolveOutboundDmworkTarget("group:grp1", "").channelType).toBe(ChannelType.Group);
+  });
+
+  it("strips inline mention-UID suffix before parsing", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("group:grp1@uid1,uid2", "topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("strips dmwork:/group:/channel: prefixes from threadId", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    expect(resolveOutboundDmworkTarget("group:grp1", "dmwork:topicA").channelId)
+      .toBe("grp1____topicA");
+    expect(resolveOutboundDmworkTarget("group:grp1", "group:topicA").channelId)
+      .toBe("grp1____topicA");
+    expect(resolveOutboundDmworkTarget("group:grp1", "channel:topicA").channelId)
+      .toBe("grp1____topicA");
+  });
+
+  // The OpenClaw delivery pipeline can emit `channel:<id>` as an alternative
+  // outbound target form for group channels. parseTarget on its own doesn't
+  // recognise this prefix, so the helper has to normalise it to `group:` before
+  // anything else — otherwise the target degrades to DM and threadId merge is
+  // silently skipped.
+
+  it("normalises channel:<id> prefix to group-type target", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("channel:grp1");
+    expect(result.channelId).toBe("grp1");
+    expect(result.channelType).toBe(ChannelType.Group);
+  });
+
+  it("merges threadId into a channel:<id> target", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("channel:grp1", "topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("passes through a channel:<group>____<short> target as CommunityTopic", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("channel:grp1____topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("strips inline mention-UID suffix on channel:<id>@uid1,uid2 form", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    const result = resolveOutboundDmworkTarget("channel:grp1@uid1,uid2", "topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  // Defensive: threadId from framework/user context should never silently redirect
+  // delivery to a *different* parent group. If the threadId happens to carry its
+  // own `____<parent>` prefix and that parent disagrees with ctx.to, the safe
+  // choice is to stay on ctx.to's parent — otherwise a stale or corrupted
+  // threadId could route a reply out of the originally targeted group entirely.
+
+  it("accepts threadId that already includes ____ when its parent matches ctx.to", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    // Redundant but consistent shape: threadId = "grp1____topicA", ctx.to = grp1.
+    const result = resolveOutboundDmworkTarget("group:grp1", "grp1____topicA");
+    expect(result.channelId).toBe("grp1____topicA");
+    expect(result.channelType).toBe(ChannelType.CommunityTopic);
+  });
+
+  it("ignores threadId when its ____ parent disagrees with ctx.to (cross-channel guard)", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    // threadId points at otherGrp____topic, but ctx.to says grp1 — conflict.
+    // Fall back to the ctx.to parent group; do NOT silently route to otherGrp.
+    const result = resolveOutboundDmworkTarget("group:grp1", "otherGrp____topic");
+    expect(result.channelId).toBe("grp1");
+    expect(result.channelType).toBe(ChannelType.Group);
+  });
+
+  it("ignores threadId starting with bare ____ (no parent)", async () => {
+    const { resolveOutboundDmworkTarget } = await import("./actions.js");
+    registerBotGroupIds(["grp1"]);
+    // "____topic" split on ____ yields empty parent — still a mismatch with grp1.
+    const result = resolveOutboundDmworkTarget("group:grp1", "____topic");
+    expect(result.channelId).toBe("grp1");
+    expect(result.channelType).toBe(ChannelType.Group);
+  });
+});
+
+describe("normalizeOutboundChannelPrefix", () => {
+  it("rewrites channel:<id> to group:<id>", async () => {
+    const { normalizeOutboundChannelPrefix } = await import("./actions.js");
+    expect(normalizeOutboundChannelPrefix("channel:grp1")).toBe("group:grp1");
+  });
+
+  it("preserves channel id separators and suffixes untouched", async () => {
+    const { normalizeOutboundChannelPrefix } = await import("./actions.js");
+    expect(normalizeOutboundChannelPrefix("channel:grp1____topicA")).toBe("group:grp1____topicA");
+    expect(normalizeOutboundChannelPrefix("channel:grp1@uid1,uid2")).toBe("group:grp1@uid1,uid2");
+  });
+
+  it("passes non-channel: targets through untouched", async () => {
+    const { normalizeOutboundChannelPrefix } = await import("./actions.js");
+    expect(normalizeOutboundChannelPrefix("group:grp1")).toBe("group:grp1");
+    expect(normalizeOutboundChannelPrefix("user:uid1")).toBe("user:uid1");
+    expect(normalizeOutboundChannelPrefix("bare_id")).toBe("bare_id");
+  });
+});
+
+describe("extractInlineMentionUids", () => {
+  it("extracts UIDs from group:<id>@uid1,uid2 form", async () => {
+    const { extractInlineMentionUids } = await import("./actions.js");
+    expect(extractInlineMentionUids("group:grp1@uid1,uid2")).toEqual(["uid1", "uid2"]);
+  });
+
+  it("extracts UIDs from channel:<id>@uid1,uid2 form (same shape, parallel prefix)", async () => {
+    const { extractInlineMentionUids } = await import("./actions.js");
+    expect(extractInlineMentionUids("channel:grp1@uid1,uid2")).toEqual(["uid1", "uid2"]);
+  });
+
+  it("returns empty array for targets without the @-suffix", async () => {
+    const { extractInlineMentionUids } = await import("./actions.js");
+    expect(extractInlineMentionUids("group:grp1")).toEqual([]);
+    expect(extractInlineMentionUids("channel:grp1")).toEqual([]);
+    expect(extractInlineMentionUids("user:uid1")).toEqual([]);
+    expect(extractInlineMentionUids("bare_id")).toEqual([]);
+  });
+
+  it("filters out empty segments produced by trailing/duplicate commas", async () => {
+    const { extractInlineMentionUids } = await import("./actions.js");
+    expect(extractInlineMentionUids("group:grp1@uid1,,uid2,")).toEqual(["uid1", "uid2"]);
   });
 });

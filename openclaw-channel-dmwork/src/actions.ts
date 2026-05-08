@@ -51,6 +51,17 @@ export function parseTarget(
     }
     return { channelId, channelType: ChannelType.Group };
   }
+  // OpenClaw's delivery pipeline can emit `channel:<id>` as a parallel alias
+  // for group channels (#232 review: "channel: 支持下沉到 parseTarget"). Handle
+  // it here so every caller — outbound adapter, message tool, etc — sees
+  // consistent routing without having to normalise upstream first.
+  if (target.startsWith("channel:")) {
+    const channelId = target.slice(8);
+    if (channelId.includes(THREAD_SEP)) {
+      return { channelId, channelType: ChannelType.CommunityTopic };
+    }
+    return { channelId, channelType: ChannelType.Group };
+  }
   if (target.startsWith("user:"))
     return { channelId: target.slice(5), channelType: ChannelType.DM };
 
@@ -71,9 +82,107 @@ export function parseTarget(
 /** Strip common prefixes to get the raw group_no */
 function stripChannelPrefix(raw: string): string {
   if (raw.startsWith("group:")) return raw.slice(6);
+  if (raw.startsWith("channel:")) return raw.slice(8);
   if (raw.startsWith("g-")) return raw.slice(2);
   if (raw.startsWith("dmwork:")) return raw.slice(7);
   return raw;
+}
+
+/**
+ * Normalise outbound target prefix. OpenClaw's delivery pipeline sometimes
+ * emits `channel:<id>` as an alternative group-channel reference (parallel to
+ * `group:<id>`). `parseTarget` now recognises `channel:` natively as well,
+ * but keep this normaliser for the older outbound entry points that wrap
+ * parseTarget with extra logic (mention-UID strip, thread merge) — having a
+ * single documented place to look up prefix aliases is worth the small
+ * redundancy.
+ */
+export function normalizeOutboundChannelPrefix(ctxTo: string): string {
+  return ctxTo.startsWith("channel:") ? "group:" + ctxTo.slice(8) : ctxTo;
+}
+
+/**
+ * Extract inline mention UIDs from an outbound target of the form
+ * `(group|channel):<id>@uid1,uid2`. Returns `[]` when the suffix is absent
+ * or the target isn't a group/channel reference.
+ */
+export function extractInlineMentionUids(ctxTo: string): string[] {
+  for (const prefix of ["group:", "channel:"] as const) {
+    if (ctxTo.startsWith(prefix)) {
+      const atIdx = ctxTo.indexOf("@", prefix.length);
+      if (atIdx < 0) return [];
+      return ctxTo.slice(atIdx + 1).split(",").map((s) => s.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+/**
+ * Resolve an outbound delivery target from the framework's ChannelOutboundContext.
+ *
+ * OpenClaw passes thread/sub-topic replies as `to: "group:<group_no>"` + a separate
+ * `threadId: "<short_id>"` field. parseTarget by itself never sees threadId, so a
+ * bare call to parseTarget collapses thread routing back to the parent group
+ * (channelType=2 instead of 5) and drops the short_id entirely. This helper merges
+ * the two into the proper CommunityTopic channel_id (`<group_no>____<short_id>`,
+ * channel_type=5) so outbound messages land in the thread, not the parent group.
+ *
+ * Also strips the inline mention UID suffix ("group:<id>@uid1,uid2" → "group:<id>")
+ * before parsing — mention-UID extraction remains the caller's responsibility.
+ *
+ * Idempotent: if ctx.to already carries `____` (caller synthesised the thread id
+ * themselves), the threadId merge is skipped.
+ */
+export function resolveOutboundDmworkTarget(
+  ctxTo: string,
+  threadId?: string | number | null,
+): { channelId: string; channelType: ChannelType } {
+  const THREAD_SEP = "____";
+
+  // Normalise `channel:<id>` to `group:<id>` so downstream parseTarget sees a
+  // shape it knows. See normalizeOutboundChannelPrefix for rationale.
+  let targetForParse = normalizeOutboundChannelPrefix(ctxTo);
+
+  // Strip inline mention-UID suffix before parsing.
+  if (targetForParse.startsWith("group:")) {
+    const groupPart = targetForParse.slice(6);
+    const atIdx = groupPart.indexOf("@");
+    if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
+  }
+
+  const parsed = parseTarget(targetForParse, undefined, getKnownGroupIds());
+
+  // Merge framework-provided threadId only when ctx.to was a bare group — if the
+  // caller already encoded the thread via "____" in ctx.to, parsed.channelType
+  // is already CommunityTopic and we pass through.
+  if (threadId != null && parsed.channelType === ChannelType.Group) {
+    const shortId = String(threadId)
+      .replace(/^dmwork:/, "")
+      .replace(/^group:/, "")
+      .replace(/^channel:/, "");
+    if (!shortId) return parsed;
+
+    // Defensive: if threadId already contains `____`, validate its parent
+    // prefix matches the group parsed from ctx.to. Mismatch would route
+    // delivery to a different group entirely (cross-channel leak via stale
+    // or corrupted thread id). Prefer silently ignoring the threadId and
+    // staying on the explicit ctx.to parent over honouring an inconsistent
+    // pair — the caller's ctx.to is the stronger signal of intent.
+    if (shortId.includes(THREAD_SEP)) {
+      const shortIdParent = shortId.slice(0, shortId.indexOf(THREAD_SEP));
+      if (shortIdParent !== parsed.channelId) {
+        return parsed;
+      }
+      return { channelId: shortId, channelType: ChannelType.CommunityTopic };
+    }
+
+    return {
+      channelId: `${parsed.channelId}${THREAD_SEP}${shortId}`,
+      channelType: ChannelType.CommunityTopic,
+    };
+  }
+
+  return parsed;
 }
 
 /**
@@ -177,6 +286,34 @@ async function handleSend(params: {
   }
 
   const { channelId, channelType } = parseTarget(target, currentChannelId, getKnownGroupIds());
+
+  // UX warning for a specific foot-gun on the message-tool path (#232 review):
+  // the agent is replying inside a sub-topic (session's currentChannelId carries
+  // `____`) but explicitly passed a bare parent-group target matching the
+  // current thread's parent group. That's semantically valid (parent-group
+  // reply from a thread context) but almost always a model mistake — the
+  // reply will land in the parent group where other members see it rather
+  // than in the thread where the conversation is happening. Don't silently
+  // reroute to the thread and don't hard-reject (breaks the legitimate case),
+  // just log so operators have a paper trail. Scoped to same-group cross-room
+  // to avoid false positives on legitimate cross-channel sends (e.g. the
+  // agent explicitly shipping results to a different group entirely).
+  const THREAD_SEP = "____";
+  if (
+    channelType === ChannelType.Group &&
+    currentChannelId?.includes(THREAD_SEP) &&
+    !target.includes(THREAD_SEP)
+  ) {
+    const currentThreadParent = currentChannelId.slice(0, currentChannelId.indexOf(THREAD_SEP));
+    if (channelId === currentThreadParent) {
+      const warn = log?.warn ?? log?.info;
+      warn?.(
+        `dmwork: send action: target="${target}" is the parent group of the current thread session ` +
+        `(${currentChannelId}). Reply will land in the parent group, not the thread. If the agent ` +
+        `meant to reply to the thread, pass the full target "group:${currentChannelId}".`,
+      );
+    }
+  }
 
   // Send text message
   if (message) {
