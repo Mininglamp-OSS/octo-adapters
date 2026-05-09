@@ -29,7 +29,7 @@ import { handleInboundMessage, type DmworkStatusSink } from "./inbound.js";
 import { ChannelType, MessageType, type BotMessage, type MessagePayload } from "./types.js";
 import { buildEntitiesFromFallback, parseStructuredMentions, convertStructuredMentions } from "./mention-utils.js";
 import type { MentionEntity } from "./types.js";
-import { handleDmworkMessageAction, parseTarget } from "./actions.js";
+import { handleDmworkMessageAction, parseTarget, resolveOutboundDmworkTarget, normalizeOutboundChannelPrefix, extractInlineMentionUids } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
@@ -233,9 +233,13 @@ async function checkForUpdates(
 
 /** Resolve correct accountId for outbound context using group→account mapping */
 export function resolveOutboundAccountId(ctxTo: string, fallbackAccountId: string): string {
-  let targetForParse = ctxTo;
-  if (ctxTo.startsWith("group:")) {
-    const groupPart = ctxTo.slice(6);
+  // Same prefix / inline-mention-UID normalisation as the outbound send path —
+  // otherwise `channel:<id>` never makes it past parseTarget (which doesn't
+  // recognise that prefix) and the group→account lookup silently falls back,
+  // routing the turn through the wrong bot's token.
+  let targetForParse = normalizeOutboundChannelPrefix(ctxTo);
+  if (targetForParse.startsWith("group:")) {
+    const groupPart = targetForParse.slice(6);
     const atIdx = groupPart.indexOf("@");
     if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
   }
@@ -350,6 +354,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       return [
         `IMPORTANT: Your DMWork accountId is "${accountId}". You MUST always pass accountId: "${accountId}" when using the dmwork_management tool. Do NOT use any other accountId.`,
         `For sending messages: if the target is a group, use target="group:<groupId>". If the target is a specific user (1v1 direct message), use target="user:<userId>". If sending to the current conversation, no prefix is needed.`,
+        `For threads/sub-topics: if you are explicitly targeting a thread, the target MUST be the full "group:<group_no>____<short_id>" (four underscores) — do not send just the parent "group:<group_no>" or the reply will land in the parent group instead of the thread. The same rule applies to file uploads.`,
         `For reading message history: use action="read" with target="user:<uid>" to read DM history, or target="group:<groupId>" to read group message history. Cross-channel queries require the requester to be a participant of the target channel.`,
         `For searching: use action="search" with query="shared-groups" to find groups that the bot and the current user both belong to.`,
       ];
@@ -399,21 +404,13 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         return { channel: "dmwork", to: ctx.to, messageId: "" };
       }
 
-      // Parse target using shared parseTarget + knownGroupIds
-      let mentionUids: string[] = [];
-      let targetForParse = ctx.to;
+      // Parse target — merge framework-provided threadId into CommunityTopic
+      // channel_id when ctx.to is a bare group. Inline mention UIDs
+      // (`(group|channel):<id>@uid1,uid2`) are pulled out here via the
+      // shared extractor so both prefix forms propagate UIDs consistently.
+      const mentionUids: string[] = extractInlineMentionUids(ctx.to);
 
-      // Handle "group:channel_id@uid1,uid2" format — extract inline mention UIDs
-      if (ctx.to.startsWith("group:")) {
-        const groupPart = ctx.to.slice(6);
-        const atIdx = groupPart.indexOf("@");
-        if (atIdx >= 0) {
-          targetForParse = "group:" + groupPart.slice(0, atIdx);
-          mentionUids = groupPart.slice(atIdx + 1).split(",").filter(Boolean);
-        }
-      }
-
-      const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
+      const { channelId, channelType } = resolveOutboundDmworkTarget(ctx.to, ctx.threadId);
 
       let mentionEntities: MentionEntity[] = [];
       let finalContent = content;
@@ -572,14 +569,9 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           filename,
         });
 
-        // 3. Parse target using shared parseTarget + knownGroupIds
-        let targetForParse = ctx.to;
-        if (ctx.to.startsWith("group:")) {
-          const groupPart = ctx.to.slice(6);
-          const atIdx = groupPart.indexOf("@");
-          if (atIdx >= 0) targetForParse = "group:" + groupPart.slice(0, atIdx);
-        }
-        const { channelId, channelType } = parseTarget(targetForParse, undefined, getKnownGroupIds());
+        // 3. Resolve target — merge framework-provided threadId into
+        // CommunityTopic (channel_type=5) when ctx.to is a bare group.
+        const { channelId, channelType } = resolveOutboundDmworkTarget(ctx.to, ctx.threadId);
 
         // 4. Determine message type and send
         const msgType = contentType.startsWith("image/")
