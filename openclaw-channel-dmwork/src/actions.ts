@@ -217,11 +217,12 @@ export async function handleDmworkMessageAction(params: {
   uidToNameMap?: Map<string, string>;
   groupMdCache?: Map<string, { content: string; version: number }>;
   currentChannelId?: string;
+  threadId?: string | number | null;
   requesterSenderId?: string;
   accountId?: string;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, requesterSenderId, accountId, log } =
+  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, threadId, requesterSenderId, accountId, log } =
     params;
 
   if (!botToken) {
@@ -230,7 +231,7 @@ export async function handleDmworkMessageAction(params: {
 
   switch (action) {
     case "send":
-      return handleSend({ args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, log });
+      return handleSend({ args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, threadId, log });
     case "read":
       return handleRead({ args, apiUrl, botToken, uidToNameMap, currentChannelId, requesterSenderId, accountId, log });
     case "search":
@@ -263,9 +264,10 @@ async function handleSend(params: {
   memberMap?: Map<string, string>;
   uidToNameMap?: Map<string, string>;
   currentChannelId?: string;
+  threadId?: string | number | null;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, log } = params;
+  const { args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, threadId, log } = params;
 
   const target = args.target as string | undefined;
   if (!target) {
@@ -285,7 +287,22 @@ async function handleSend(params: {
     };
   }
 
-  const { channelId, channelType } = parseTarget(target, currentChannelId, getKnownGroupIds());
+  let effectiveThreadId: typeof threadId = threadId;
+  if (effectiveThreadId != null && currentChannelId) {
+    const SEP = "____";
+    const currentParent = currentChannelId.includes(SEP)
+      ? currentChannelId.slice(0, currentChannelId.indexOf(SEP))
+      : currentChannelId;
+    const targetRaw = target.replace(/^(group:|channel:)/, "");
+    const targetParent = targetRaw.includes(SEP)
+      ? targetRaw.slice(0, targetRaw.indexOf(SEP))
+      : targetRaw;
+    if (targetParent !== currentParent) {
+      effectiveThreadId = undefined;
+    }
+  }
+
+  const { channelId, channelType } = resolveOutboundDmworkTarget(target, effectiveThreadId);
 
   // UX warning for a specific foot-gun on the message-tool path (#232 review):
   // the agent is replying inside a sub-topic (session's currentChannelId carries

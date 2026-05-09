@@ -341,6 +341,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         uidToNameMap,
         groupMdCache,
         currentChannelId: ctx.toolContext?.currentChannelId ?? undefined,
+        threadId: ctx.toolContext?.threadId ?? ctx.params?.threadId ?? undefined,
         requesterSenderId: ctx.requesterSenderId ?? undefined,
         accountId,
         log: ctx.log,
