@@ -583,6 +583,154 @@ describe("handleDmworkMessageAction", () => {
   });
 
   // -----------------------------------------------------------------------
+  // send — threadId routing via resolveOutboundDmworkTarget
+  // -----------------------------------------------------------------------
+  describe("send — threadId routing", () => {
+    it("routes to CommunityTopic when threadId is provided", async () => {
+      registerBotGroupIds(["grp1"]);
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "thread msg" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        threadId: "topicA",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sentPayload.channel_id).toBe("grp1____topicA");
+      expect(sentPayload.channel_type).toBe(ChannelType.CommunityTopic);
+    });
+
+    it("routes to parent group when threadId is absent", async () => {
+      registerBotGroupIds(["grp1"]);
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "parent msg" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sentPayload.channel_id).toBe("grp1");
+      expect(sentPayload.channel_type).toBe(ChannelType.Group);
+    });
+
+    it("does NOT trigger parent-group warning when threadId is provided", async () => {
+      registerBotGroupIds(["grp1"]);
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async () => jsonResponse({ message_id: 1, message_seq: 1 }),
+      });
+      const logWarn = vi.fn();
+      const logInfo = vi.fn();
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "hi from thread" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA",
+        threadId: "topicA",
+        log: { warn: logWarn, info: logInfo } as any,
+      });
+
+      expect(logWarn).not.toHaveBeenCalled();
+      expect(logInfo).not.toHaveBeenCalled();
+    });
+
+    it("routes media-only message to CommunityTopic when threadId is provided", async () => {
+      registerBotGroupIds(["grp1"]);
+      const { uploadAndSendMedia } = await import("./inbound.js");
+      const uploadSpy = vi.mocked(uploadAndSendMedia);
+      uploadSpy.mockClear();
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", mediaUrl: "https://example.com/file.png" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        threadId: "topicA",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(uploadSpy).toHaveBeenCalledOnce();
+      expect(uploadSpy.mock.calls[0][0]).toMatchObject({
+        channelId: "grp1____topicA",
+        channelType: ChannelType.CommunityTopic,
+      });
+    });
+
+    it("does NOT inject ambient threadId when target is a different group", async () => {
+      registerBotGroupIds(["grp1", "otherGroup"]);
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:otherGroup", message: "cross-group msg" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA",
+        threadId: "topicA",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sentPayload.channel_id).toBe("otherGroup");
+      expect(sentPayload.channel_type).toBe(ChannelType.Group);
+    });
+
+    it("merges threadId when target matches same parent group", async () => {
+      registerBotGroupIds(["grp1"]);
+      let sentPayload: any = null;
+      globalThis.fetch = mockFetch({
+        "/v1/bot/sendMessage": async (_url, init) => {
+          sentPayload = JSON.parse(init?.body as string);
+          return jsonResponse({ message_id: 1, message_seq: 1 });
+        },
+      });
+
+      const { handleDmworkMessageAction } = await import("./actions.js");
+      const result = await handleDmworkMessageAction({
+        action: "send",
+        args: { target: "group:grp1", message: "same-group msg" },
+        apiUrl: "http://localhost:8090",
+        botToken: "test-token",
+        currentChannelId: "grp1____topicA",
+        threadId: "topicA",
+      });
+
+      expect(result.ok).toBe(true);
+      expect(sentPayload.channel_id).toBe("grp1____topicA");
+      expect(sentPayload.channel_type).toBe(ChannelType.CommunityTopic);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // read action
   // -----------------------------------------------------------------------
   describe("read — same-channel group messages", () => {
