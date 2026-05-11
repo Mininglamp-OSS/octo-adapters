@@ -1,27 +1,37 @@
 ---
-name: "[Bug] Bug Report"
-about: 报告一个 Bug
-title: "[Bug] "
+name: Bug report
+about: Report a bug to help us improve
+title: "[bug] "
 labels: bug
-assignees: ""
+assignees: ''
 ---
 
-## 环境信息
+## Describe the bug
 
-- 系统/设备：
-- 版本/分支：
-- 相关配置：
+A clear and concise description of what the bug is.
 
-## 复现步骤
+## To Reproduce
 
-1.
-2.
-3.
+Steps to reproduce the behavior:
 
-## 预期行为
+1. Go to '...'
+2. Click on '...'
+3. See error
 
-<!-- 描述你期望发生的结果 -->
+## Expected behavior
 
-## 实际行为
+What you expected to happen.
 
-<!-- 描述实际发生的结果，附截图或日志更佳 -->
+## Screenshots / Logs
+
+If applicable, add screenshots or logs.
+
+## Environment
+
+- OS: [e.g. macOS 14, Ubuntu 22.04, iOS 17]
+- Version: [e.g. v0.1.0]
+- Browser/Runtime (if relevant): [e.g. Chrome 128, Node 20]
+
+## Additional context
+
+Anything else we should know.

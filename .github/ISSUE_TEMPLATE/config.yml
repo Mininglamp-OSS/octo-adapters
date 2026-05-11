@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 🔒 Security Vulnerability
-    url: https://github.com/Mininglamp-OSS/octo-server/blob/main/SECURITY.md
-    about: Do not open a public issue for security vulnerabilities. Follow the SECURITY.md process instead.
-  - name: 💬 Discussion / Questions
-    url: https://github.com/Mininglamp-OSS/octo-adapters/discussions
-    about: For usage questions and general discussion, please use Discussions.
+  - name: OCTO Discussions
+    url: https://github.com/orgs/Mininglamp-OSS/discussions
+    about: Ask questions, share ideas, or get help from the community.
+  - name: Security Vulnerabilities
+    url: https://github.com/Mininglamp-OSS/octo-server/security/policy
+    about: Please report security issues privately, not as a GitHub issue.

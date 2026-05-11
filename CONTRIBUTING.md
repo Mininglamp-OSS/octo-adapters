@@ -1,93 +1,70 @@
-# Contributing to DMWork Adapters
+# Contributing to OCTO
 
-Thank you for your interest in contributing! This guide covers the workflow and conventions for this project.
+Thanks for your interest in contributing to OCTO! 🐙 We welcome contributions of all sizes.
 
-## Issue Claim Policy
+## Getting Started
 
-**Before starting work on any issue, you MUST:**
-
-1. **Comment on the issue** stating that you are claiming it
-2. **Describe your proposed fix/approach** in the same comment
-3. **Wait for acknowledgment** if the issue has significant scope
-
-This prevents duplicate work. If an issue already has someone working on it (check comments), coordinate with them before starting your own implementation.
-
-Example comment:
-```
-I'd like to work on this. My proposed approach:
-- Change X in `file.ts` to handle Y
-- Add tests for Z
-
-Will submit a PR within [timeframe].
-```
+1. **Fork** the repo and create your branch from `main`.
+2. **Install dependencies** — see the project's README for setup instructions.
+3. **Make your changes** — follow existing code style.
+4. **Add tests** — if you're fixing a bug or adding a feature, please add tests.
+5. **Update docs** — if behavior changes, update the README/docs accordingly.
+6. **Open a Pull Request** — fill in the PR template.
 
 ## Development Workflow
 
-We use a **fork-based** workflow. Do not push branches directly to the upstream repo.
+- All changes go through a Pull Request.
+- PRs must pass CI before merging.
+- PRs require at least one approving review from a maintainer.
+- We use squash-merge to keep history clean.
 
-### Setup (first time)
+## Commit Messages
 
-```bash
-# 1. Fork the repo on GitHub
-# 2. Clone your fork
-git clone https://github.com/<your-username>/dmwork-adapters.git
-cd dmwork-adapters
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
-# 3. Add upstream remote
-git remote add upstream https://github.com/Mininglamp-OSS/octo-adapters.git
+```
+feat: add user presence API
+fix: resolve message ordering race condition
+docs: update README install steps
+chore: bump dependency versions
 ```
 
-### Working on an Issue
+## Pull Request Description
 
-1. Claim the issue (see above)
-2. Sync with upstream:
-   ```bash
-   git fetch upstream
-   git checkout -b fix/issue-<number>-<description> upstream/main
-   ```
-3. Implement the fix
-4. Ensure no new TypeScript compilation errors
-5. Push to **your fork**:
-   ```bash
-   git push origin fix/issue-<number>-<description>
-   ```
-6. Open a PR from your fork to `Mininglamp-OSS/octo-adapters:main`
-7. Reference the issue in the PR description (`Fixes #<number>`)
-
-## Feature Requests
-
-1. **Do not start coding immediately** — open a Discussion or comment on the issue first
-2. Discuss the approach, scope, and potential impact
-3. Once the approach is agreed upon, claim the issue and proceed
-
-## Pull Request Guidelines
-
-- **One PR = one concern.** Do not mix unrelated changes
-- **PR title** should be descriptive: `fix: resolve WebSocket reconnect on token expiry`
-- **PR description** must include What, Why, How, and Testing sections (see PR template)
-- **CI must pass** before requesting review
-- **Request cross-review** from at least one other contributor
-
-### AI-Assisted Contributions
-
-If you used AI tools to help write the code:
-- State which tool(s) you used in the PR description
-- Indicate testing level (untested / lightly tested / fully tested)
-- Confirm you understand what the code does
-
-## Branch Naming
-
-- Bug fixes: `fix/issue-<number>-<description>`
-- Features: `feat/<description>`
-- Chores: `chore/<description>`
+- Describe **what** you changed and **why**.
+- Reference any related issues (e.g. `Fixes #123`).
+- Include screenshots for UI changes.
+- **Write PR descriptions in English** to keep the history accessible to the global community.
 
 ## Code Style
 
-- TypeScript for all source code
-- English for code, comments, and documentation
-- Avoid `any` types — use specific type definitions
-- Use the project's existing patterns as reference
+- **Go**: `gofmt` + `golangci-lint`
+- **TypeScript/JavaScript**: Prettier + ESLint (config in repo)
+- **Swift**: SwiftFormat
+- **Kotlin**: ktlint / Android Studio default
 
-## Security
+## Reporting Bugs
 
-Do **not** open public issues for security vulnerabilities. Follow the process in [SECURITY.md](https://github.com/Mininglamp-OSS/octo-server/blob/main/SECURITY.md).
+Open a GitHub issue using the **Bug Report** template. Include:
+
+- Expected vs actual behavior
+- Steps to reproduce
+- Environment (OS, version, etc.)
+- Logs/screenshots if relevant
+
+## Suggesting Features
+
+Open a GitHub issue using the **Feature Request** template. Explain the
+use case and why existing features don't solve it.
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the
+project's [Apache License 2.0](LICENSE).
+
+## Questions?
+
+- Open a [GitHub Discussion](https://github.com/orgs/Mininglamp-OSS/discussions)
+- Read the [docs](https://docs.octo.chat) _(coming soon)_
+
+Thanks for helping make OCTO better! 🚀

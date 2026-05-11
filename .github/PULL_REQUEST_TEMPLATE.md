@@ -1,18 +1,29 @@
-## 改动描述
+## Summary
 
-<!-- 简要说明本次改动的内容和目的 -->
+<!-- What does this PR do? -->
 
-## 改动类型
+## Related Issue
 
-- [ ] feat: 新功能
-- [ ] fix: Bug 修复
-- [ ] docs: 文档更新
-- [ ] chore: 构建/工具/依赖等维护
+<!-- Link the issue this PR addresses, e.g. Fixes #123 -->
 
-## 测试说明
+## Changes
 
-<!-- 说明如何测试本次改动，或标注"无需测试" -->
+<!-- Bullet list of concrete changes -->
 
-## 影响范围
+-
+-
 
-<!-- 本次改动影响的模块、服务或接口 -->
+## Testing
+
+<!-- How was this tested? Include commands, screenshots, or test output. -->
+
+- [ ] Unit tests added/updated
+- [ ] Manually verified
+
+## Checklist
+
+- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md)
+- [ ] PR description is in English
+- [ ] Added tests for my changes
+- [ ] Updated documentation
+- [ ] Followed commit message conventions (Conventional Commits)
