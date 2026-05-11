@@ -10,3 +10,5 @@ src/**/*.d.ts
 .DS_Store
 openclaw-channel-dmwork.bak/
 .idea/
+.claude/
+TASK.md

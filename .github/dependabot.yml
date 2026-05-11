@@ -1,6 +1,6 @@
 version: 2
 updates:
-  - package-ecosystem: "gomod"
-    directory: "/"
+  - package-ecosystem: "npm"
+    directory: "/openclaw-channel-dmwork"
     schedule:
       interval: "weekly"

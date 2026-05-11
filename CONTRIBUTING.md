@@ -52,6 +52,10 @@ Open a GitHub issue using the **Bug Report** template. Include:
 - Environment (OS, version, etc.)
 - Logs/screenshots if relevant
 
+## Security
+
+Do **not** open public issues for security vulnerabilities. Follow the process in [SECURITY.md](SECURITY.md) and report via `security@mininglamp.com`.
+
 ## Suggesting Features
 
 Open a GitHub issue using the **Feature Request** template. Explain the

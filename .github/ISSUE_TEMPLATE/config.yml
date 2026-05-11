@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/orgs/Mininglamp-OSS/discussions
     about: Ask questions, share ideas, or get help from the community.
   - name: Security Vulnerabilities
-    url: https://github.com/Mininglamp-OSS/octo-server/security/policy
-    about: Please report security issues privately, not as a GitHub issue.
+    url: https://github.com/Mininglamp-OSS/octo-adapters/blob/main/SECURITY.md
+    about: Please report security issues privately via security@mininglamp.com, not as a GitHub issue.
