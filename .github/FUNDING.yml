@@ -1,5 +1,1 @@
-# YUJ-432 Round-3 Tier-0 #2 (Coda 2026-05-11): overlay replaces source
-# FUNDING.yml (which pointed at the private `dmwork-org` GitHub org)
-# with the public OSS org. OSS users clicking the Sponsors button
-# should land on the Mininglamp-OSS org page, not a 404 / private page.
 github: [Mininglamp-OSS]

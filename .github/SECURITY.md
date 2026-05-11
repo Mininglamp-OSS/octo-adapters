@@ -4,14 +4,14 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| v0.3.x  | ✅ Yes             |
-| v0.2.x  | ❌ No              |
+| v0.6.3  | ✅ Yes             |
+| v0.5.x  | ❌ No              |
 
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability, please report it responsibly:
 
-1. **Email:** Send details to [security@mlamp.cn](mailto:security@mlamp.cn)
+1. **Email:** Send details to [security@mininglamp.com](mailto:security@mininglamp.com)
 2. **Do not** open a public GitHub issue for security vulnerabilities
 
 ### What to include
