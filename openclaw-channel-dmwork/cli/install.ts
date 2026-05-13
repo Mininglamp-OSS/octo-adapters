@@ -16,6 +16,7 @@ import {
   cleanupBrokenInstall,
   deleteLegacyBackup,
   detectScenario,
+  ensurePluginEnabled,
   ensurePluginsAllow,
   gatewayRestart,
   getConfigFilePathSafe,
@@ -87,15 +88,15 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       const targetVersion = getLatestNpmVersion(tag);
 
       if (!targetVersion) {
-        // Cannot determine target — skip install and restart
+        // Cannot determine target — skip install and restart, but still self-heal config below
         console.log(`Cannot reach npm registry to check ${tag} version.`);
         console.log(`Current version: v${currentVersion}`);
-        return;
+        break;
       }
 
       if (currentVersion === targetVersion) {
         console.log(`DMWork plugin v${currentVersion} is already the target version${opts.dev ? " (dev)" : ""}. No update needed.`);
-        return; // Nothing changed — skip gateway restart
+        break; // No install/restart needed, but self-heal still runs (didChange stays false)
       }
 
       console.log(`Updating DMWork plugin: v${currentVersion} → v${targetVersion}${opts.dev ? " (dev)" : ""}...`);
@@ -125,6 +126,14 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       didChange = true;
       break;
   }
+
+  // Self-heal config — runs even when no install happened (already-at-target case).
+  // After OpenClaw major upgrades (4.x → 5.x), plugins.entries.<id>.enabled has been
+  // observed to be reset to false on third-party plugins, leaving the plugin installed
+  // but inactive. This restores it without requiring users to run
+  // `openclaw plugins enable openclaw-channel-dmwork` manually.
+  ensurePluginsAllow();
+  ensurePluginEnabled();
 
   if (!didChange) return;
 

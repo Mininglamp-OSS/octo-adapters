@@ -175,4 +175,51 @@ describe("runInstall — update scenario", () => {
     expect(pluginsInstallSpec(calls)).toBe("openclaw-channel-dmwork");
     expect(didCallGatewayRestart(calls)).toBe(true);
   });
+
+  it("already target version + entries.enabled=false: self-heals enabled, no install, no restart", async () => {
+    // Regression: install used to early-return on already-at-target, bypassing
+    // the self-heal that re-enables the plugin after OpenClaw major upgrades
+    // reset entries.<id>.enabled.
+    const fs = await import("node:fs");
+    const mockReadFileSync = vi.mocked(fs.readFileSync);
+    const mockWriteFileSync = vi.mocked(fs.writeFileSync);
+
+    mockReadFileSync.mockImplementation((path) => {
+      if (String(path).endsWith("openclaw.json")) {
+        return JSON.stringify({
+          plugins: {
+            entries: { "openclaw-channel-dmwork": { enabled: false } },
+            installs: {
+              "openclaw-channel-dmwork": { source: "npm", version: "0.6.0" },
+            },
+          },
+        });
+      }
+      return "{}";
+    });
+
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        return JSON.stringify({ plugin: { id: "openclaw-channel-dmwork", version: "0.6.0", enabled: false } });
+      }
+      if (a[0] === "view") return "0.6.0\n";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    const calls = getCalledArgs();
+    expect(didCallPluginsInstall(calls)).toBe(false);
+    expect(didCallGatewayRestart(calls)).toBe(false);
+
+    // Self-heal must have written a config with enabled: true
+    const writes = mockWriteFileSync.mock.calls.map((c) => String(c[1]));
+    const enabledWrite = writes.find((w) => w.includes('"enabled": true'));
+    expect(enabledWrite).toBeDefined();
+  });
 });

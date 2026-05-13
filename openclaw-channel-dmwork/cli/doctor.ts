@@ -223,6 +223,10 @@ export async function runDoctorChecks(params: {
   }
 
   // 2. Plugin enabled
+  // After OpenClaw major upgrades, plugins.entries.<id>.enabled may be reset on
+  // third-party plugins. Doctor surfaces this as a WARN (not FAIL) with a one-liner
+  // fix command, so users don't have to dig through config to figure out why the bot
+  // went silent.
   if (!params.inProcess) {
     const enabled = reader.get(
       "plugins.entries.openclaw-channel-dmwork.enabled",
@@ -234,10 +238,21 @@ export async function runDoctorChecks(params: {
         configSet("plugins.entries.openclaw-channel-dmwork.enabled", "true");
         checks.push({ name: "Plugin enabled", status: "FIXED", detail: "Enabled" });
       } catch {
-        checks.push({ name: "Plugin enabled", status: "FAIL", detail: "No (auto-fix failed)" });
+        checks.push({
+          name: "Plugin enabled",
+          status: "FAIL",
+          detail:
+            "No (auto-fix failed; run `openclaw plugins enable openclaw-channel-dmwork`)",
+        });
       }
     } else {
-      checks.push({ name: "Plugin enabled", status: "FAIL", detail: "No" });
+      checks.push({
+        name: "Plugin enabled",
+        status: "WARN",
+        detail:
+          "No — installed but disabled. Run `openclaw-channel-dmwork doctor --fix` " +
+          "or `openclaw plugins enable openclaw-channel-dmwork`.",
+      });
     }
   }
 

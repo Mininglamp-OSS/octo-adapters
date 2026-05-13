@@ -927,6 +927,36 @@ export function ensurePluginsAllow(): void {
   } catch { /* best effort */ }
 }
 
+/**
+ * Ensure plugins.entries.openclaw-channel-dmwork.enabled === true.
+ *
+ * Why: OpenClaw 4.x → 5.x major upgrades have been observed to reset
+ * `plugins.entries.<id>.enabled` for third-party plugins, leaving the
+ * plugin installed but inactive. install calls this to self-heal so users
+ * don't have to manually run `openclaw plugins enable ...`.
+ *
+ * (doctor surfaces the same issue but uses its own `openclaw config set` path
+ * via --fix, so it does not call this helper directly.)
+ *
+ * Idempotent and best-effort: returns true if entry is now (or was already)
+ * enabled, false on any I/O error.
+ */
+export function ensurePluginEnabled(): boolean {
+  try {
+    const cfg = readConfigFromFile();
+    if (!cfg) return false;
+    const plugins = (cfg.plugins ??= {});
+    const entries = (plugins.entries ??= {});
+    const entry = (entries["openclaw-channel-dmwork"] ??= {});
+    if (entry.enabled === true) return true;
+    entry.enabled = true;
+    writeConfigAtomic(cfg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // pluginsUpdateCompat
 // ---------------------------------------------------------------------------
