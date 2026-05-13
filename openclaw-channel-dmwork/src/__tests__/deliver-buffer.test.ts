@@ -3,22 +3,43 @@ import { describe, it, expect, vi } from "vitest";
 /**
  * Unit tests for the deliver buffer pattern used in handleInboundMessage.
  *
- * The deliver callback uses info.kind to decide behavior:
- * - "tool"  → send immediately via resolveAndSendText (verbose output)
- * - "block" / "final" / other → buffer text (overwrite), send once in finally
+ * The deliver callback dispatches by `info.kind`:
+ *   - "tool"  → send immediately via sendTextFn (verbose tool output)
+ *   - "block" → push into blockChunks (streaming fragment, joined with "")
+ *   - "final" / unknown → push into finals (independent payload, joined with "\n\n")
+ *   - isReasoning payloads are skipped entirely
+ *   - media payloads are sent immediately with dedup
  *
- * - isReasoning payloads are skipped entirely
- * - Media payloads are always sent immediately with dedup
- * - The finally block sends the last buffered text after dispatcher finishes
- * - onError clears the buffer to prevent stale text
+ * After the dispatcher finishes, `flushBufferedText` joins blockChunks (no separator,
+ * stream semantics) and finals (blank-line separator, payload semantics), and sends
+ * everything once. `onError` flushes whatever was buffered first, then sends a
+ * generic error notice.
+ *
+ * This mirrors the production logic in inbound.ts; if you change one, change the other.
  */
 
 // ---- helpers that mirror the production logic in inbound.ts ----
 
 function createDeliverBuffer() {
   return {
-    lastText: null as string | null,
+    blockChunks: [] as string[],
+    finals: [] as string[],
     textSent: false,
+  };
+}
+
+function makeFlushBufferedText(
+  deliverBuffer: ReturnType<typeof createDeliverBuffer>,
+  sendTextFn: (text: string) => Promise<void>,
+) {
+  return async (_reason: "finally" | "on-error"): Promise<void> => {
+    if (deliverBuffer.textSent) return;
+    const blockText = deliverBuffer.blockChunks.join("");
+    const finalText = deliverBuffer.finals.join("\n\n");
+    const parts = [blockText, finalText].filter((s) => s.length > 0);
+    if (parts.length === 0) return;
+    deliverBuffer.textSent = true;
+    await sendTextFn(parts.join("\n\n"));
   };
 }
 
@@ -37,12 +58,10 @@ function makeDeliver(
     },
     info?: { kind?: string },
   ) => {
-    // Skip reasoning blocks
     if (payload.isReasoning) return;
 
     const kind = info?.kind ?? "final";
 
-    // Media: send immediately with dedup
     const outboundMediaUrls = [
       ...(payload.mediaUrls ?? []),
       ...(payload.mediaUrl ? [payload.mediaUrl] : []),
@@ -58,87 +77,123 @@ function makeDeliver(
       }
     }
 
-    // Text handling based on kind
-    const content = payload.text?.trim() ?? "";
+    const content = (payload.text ?? "").trim();
+    const rawText = payload.text ?? "";
     if (!content && outboundMediaUrls.length > 0) return;
     if (!content) return;
 
     if (kind === "tool") {
-      // Verbose tool call output: send immediately
       await sendTextFn(content);
       return;
     }
 
-    // kind === "block" / "final" / anything else: buffer, send once after dispatcher finishes
-    deliverBuffer.lastText = content;
+    if (kind === "block") {
+      // Preserve raw text (including spaces) so join("") recovers the original stream.
+      deliverBuffer.blockChunks.push(rawText);
+      return;
+    }
+
+    // "final" or unknown kinds — trim, independent payloads
+    deliverBuffer.finals.push(content);
   };
 }
 
 function makeOnError(
   deliverBuffer: ReturnType<typeof createDeliverBuffer>,
+  flushBufferedText: (reason: "finally" | "on-error") => Promise<void>,
   sendErrorFn: () => Promise<void>,
 ) {
   return async (_err: unknown) => {
-    deliverBuffer.lastText = null;
+    // Try to flush already-buffered partial output first; do NOT discard.
+    await flushBufferedText("on-error");
     deliverBuffer.textSent = true;
     await sendErrorFn();
   };
 }
 
-async function runFinally(
-  deliverBuffer: ReturnType<typeof createDeliverBuffer>,
-  sendTextFn: (text: string) => Promise<void>,
-) {
-  if (deliverBuffer.lastText && !deliverBuffer.textSent) {
-    deliverBuffer.textSent = true;
-    await sendTextFn(deliverBuffer.lastText);
-  }
-}
-
 // ---- tests ----
 
 describe("deliver buffer pattern", () => {
-  it("block kind: buffers text without sending", async () => {
+  it("multiple blocks: all chunks accumulate, finally joins them with no separator", async () => {
+    // Regression: 0.6.4 only kept the LAST block, dropping every prior chunk.
     const deliverBuffer = createDeliverBuffer();
     const sentMediaUrls = new Set<string>();
     const sendMedia = vi.fn().mockResolvedValue(undefined);
     const sendText = vi.fn().mockResolvedValue(undefined);
     const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
 
-    await deliver({ text: "Hello" }, { kind: "block" });
-    await deliver({ text: "Hello, how are you" }, { kind: "block" });
-    await deliver({ text: "Hello, how are you? I'm here to help." }, { kind: "block" });
+    // Streaming fragments — each block is a NEW slice of text, not a snapshot.
+    await deliver({ text: "Hello, " }, { kind: "block" });
+    await deliver({ text: "world! " }, { kind: "block" });
+    await deliver({ text: "This is a test." }, { kind: "block" });
 
-    // Text should NOT have been sent
+    // Nothing sent yet
     expect(sendText).not.toHaveBeenCalled();
-    // Buffer should have the latest text
-    expect(deliverBuffer.lastText).toBe("Hello, how are you? I'm here to help.");
+    expect(deliverBuffer.blockChunks).toHaveLength(3);
     expect(deliverBuffer.textSent).toBe(false);
 
-    // finally block sends the buffered text
-    await runFinally(deliverBuffer, sendText);
+    // finally → joined with "" (stream semantics)
+    await flush("finally");
     expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText).toHaveBeenCalledWith("Hello, how are you? I'm here to help.");
+    expect(sendText).toHaveBeenCalledWith("Hello, world! This is a test.");
     expect(deliverBuffer.textSent).toBe(true);
   });
 
-  it("final kind: buffers text, sends via finally", async () => {
+  it("single final: buffered, sent via finally", async () => {
     const deliverBuffer = createDeliverBuffer();
     const sentMediaUrls = new Set<string>();
     const sendMedia = vi.fn().mockResolvedValue(undefined);
     const sendText = vi.fn().mockResolvedValue(undefined);
     const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
 
     await deliver({ text: "Final answer" }, { kind: "final" });
 
-    // final is buffered, NOT sent immediately
     expect(sendText).not.toHaveBeenCalled();
-    expect(deliverBuffer.lastText).toBe("Final answer");
+    expect(deliverBuffer.finals).toEqual(["Final answer"]);
 
-    // finally block sends it
-    await runFinally(deliverBuffer, sendText);
+    await flush("finally");
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith("Final answer");
+  });
+
+  it("multiple finals: each independent payload, joined with blank lines", async () => {
+    // Regression: 0.6.4 only kept the LAST final.
+    const deliverBuffer = createDeliverBuffer();
+    const sentMediaUrls = new Set<string>();
+    const sendMedia = vi.fn().mockResolvedValue(undefined);
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
+
+    await deliver({ text: "First reply" }, { kind: "final" });
+    await deliver({ text: "Second reply" }, { kind: "final" });
+
+    expect(sendText).not.toHaveBeenCalled();
+    expect(deliverBuffer.finals).toHaveLength(2);
+
+    await flush("finally");
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith("First reply\n\nSecond reply");
+  });
+
+  it("blocks then final: stream concatenated then final separated by blank line", async () => {
+    const deliverBuffer = createDeliverBuffer();
+    const sentMediaUrls = new Set<string>();
+    const sendMedia = vi.fn().mockResolvedValue(undefined);
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
+
+    await deliver({ text: "Working on it" }, { kind: "block" });
+    await deliver({ text: "..." }, { kind: "block" });
+    await deliver({ text: "Done!" }, { kind: "final" });
+
+    await flush("finally");
+    expect(sendText).toHaveBeenCalledTimes(1);
+    // block stream → "Working on it..."  ; then final → "Done!"
+    expect(sendText).toHaveBeenCalledWith("Working on it...\n\nDone!");
   });
 
   it("tool kind: sends text immediately, does not affect buffer", async () => {
@@ -152,115 +207,134 @@ describe("deliver buffer pattern", () => {
 
     expect(sendText).toHaveBeenCalledTimes(1);
     expect(sendText).toHaveBeenCalledWith("Tool output: file listing...");
-    // tool does NOT set textSent — final text should still be sent via finally
     expect(deliverBuffer.textSent).toBe(false);
-    expect(deliverBuffer.lastText).toBeNull();
+    expect(deliverBuffer.blockChunks).toEqual([]);
+    expect(deliverBuffer.finals).toEqual([]);
   });
 
-  it("tool then final: tool sent immediately, final sent via finally", async () => {
+  it("tool then block + final: tool sent immediately, blocks/final flushed by finally", async () => {
     const deliverBuffer = createDeliverBuffer();
     const sentMediaUrls = new Set<string>();
     const sendMedia = vi.fn().mockResolvedValue(undefined);
     const sendText = vi.fn().mockResolvedValue(undefined);
     const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
 
-    // Tool output sent immediately
     await deliver({ text: "🔧 exec: ls" }, { kind: "tool" });
     expect(sendText).toHaveBeenCalledTimes(1);
 
-    // Block and final buffered
-    await deliver({ text: "Checking files..." }, { kind: "block" });
+    await deliver({ text: "Checking files" }, { kind: "block" });
+    await deliver({ text: "..." }, { kind: "block" });
     await deliver({ text: "Here are your files: ..." }, { kind: "final" });
-    expect(sendText).toHaveBeenCalledTimes(1); // still 1, final buffered
+    expect(sendText).toHaveBeenCalledTimes(1); // still 1; blocks/final pending
 
-    // finally sends the last buffered text
-    await runFinally(deliverBuffer, sendText);
+    await flush("finally");
     expect(sendText).toHaveBeenCalledTimes(2);
-    expect(sendText).toHaveBeenLastCalledWith("Here are your files: ...");
+    expect(sendText).toHaveBeenLastCalledWith("Checking files...\n\nHere are your files: ...");
   });
 
-  it("undefined kind falls back to buffer (sends via finally)", async () => {
+  it("undefined kind falls back to final-style accumulation", async () => {
     const deliverBuffer = createDeliverBuffer();
     const sentMediaUrls = new Set<string>();
     const sendMedia = vi.fn().mockResolvedValue(undefined);
     const sendText = vi.fn().mockResolvedValue(undefined);
     const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
 
-    // No info parameter at all
-    await deliver({ text: "Fallback text" });
+    await deliver({ text: "Fallback text" }); // no info at all → defaults to "final"
 
-    expect(sendText).not.toHaveBeenCalled();
-    expect(deliverBuffer.lastText).toBe("Fallback text");
-
-    await runFinally(deliverBuffer, sendText);
-    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(deliverBuffer.finals).toEqual(["Fallback text"]);
+    await flush("finally");
     expect(sendText).toHaveBeenCalledWith("Fallback text");
   });
 
-  it("isReasoning: skips entirely", async () => {
+  it("isReasoning: skips entirely for both block and final", async () => {
     const deliverBuffer = createDeliverBuffer();
     const sentMediaUrls = new Set<string>();
     const sendMedia = vi.fn().mockResolvedValue(undefined);
     const sendText = vi.fn().mockResolvedValue(undefined);
     const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
 
     await deliver({ text: "Internal reasoning...", isReasoning: true }, { kind: "block" });
     await deliver({ text: "More reasoning", isReasoning: true }, { kind: "final" });
 
-    expect(sendText).not.toHaveBeenCalled();
-    expect(deliverBuffer.lastText).toBeNull();
+    expect(deliverBuffer.blockChunks).toEqual([]);
+    expect(deliverBuffer.finals).toEqual([]);
 
-    await runFinally(deliverBuffer, sendText);
+    await flush("finally");
     expect(sendText).not.toHaveBeenCalled();
   });
 
-  it("blocks then final: all buffered, finally sends last final", async () => {
-    const deliverBuffer = createDeliverBuffer();
-    const sentMediaUrls = new Set<string>();
-    const sendMedia = vi.fn().mockResolvedValue(undefined);
-    const sendText = vi.fn().mockResolvedValue(undefined);
-    const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
-
-    // Streaming blocks
-    await deliver({ text: "Part 1" }, { kind: "block" });
-    await deliver({ text: "Part 1 Part 2" }, { kind: "block" });
-    expect(sendText).not.toHaveBeenCalled();
-    expect(deliverBuffer.lastText).toBe("Part 1 Part 2");
-
-    // Final arrives — also buffered (overwrites block buffer)
-    await deliver({ text: "Complete response" }, { kind: "final" });
-    expect(sendText).not.toHaveBeenCalled();
-    expect(deliverBuffer.lastText).toBe("Complete response");
-
-    // finally block sends the last buffered text
-    await runFinally(deliverBuffer, sendText);
-    expect(sendText).toHaveBeenCalledTimes(1);
-    expect(sendText).toHaveBeenCalledWith("Complete response");
-  });
-
-  it("onError clears buffer so finally does not send stale text", async () => {
+  it("onError: flushes already-buffered content first, THEN sends error notice", async () => {
+    // Regression: 0.6.4 nuked the buffer on any error and sent a generic message,
+    // discarding partial replies the user could have seen.
     const deliverBuffer = createDeliverBuffer();
     const sentMediaUrls = new Set<string>();
     const sendMedia = vi.fn().mockResolvedValue(undefined);
     const sendText = vi.fn().mockResolvedValue(undefined);
     const sendError = vi.fn().mockResolvedValue(undefined);
     const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
-    const onError = makeOnError(deliverBuffer, sendError);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
+    const onError = makeOnError(deliverBuffer, flush, sendError);
 
-    // Partial text buffered before error
-    await deliver({ text: "Partial response from AI..." }, { kind: "block" });
-    expect(deliverBuffer.lastText).toBe("Partial response from AI...");
+    // Two blocks + a final arrive cleanly before the error
+    await deliver({ text: "Step 1: " }, { kind: "block" });
+    await deliver({ text: "Step 2 succeeded." }, { kind: "block" });
+    await deliver({ text: "Summary" }, { kind: "final" });
 
-    // onError fires
-    await onError(new Error("AI generation failed"));
+    // Error fires
+    await onError(new Error("downstream failure"));
 
-    expect(deliverBuffer.lastText).toBeNull();
-    expect(deliverBuffer.textSent).toBe(true);
+    // Already-buffered text was flushed
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith("Step 1: Step 2 succeeded.\n\nSummary");
+    // Error notice was also sent
     expect(sendError).toHaveBeenCalledTimes(1);
+    expect(deliverBuffer.textSent).toBe(true);
+  });
 
-    // finally block — should NOT send anything
-    await runFinally(deliverBuffer, sendText);
+  it("onError with empty buffer: only the error notice is sent", async () => {
+    const deliverBuffer = createDeliverBuffer();
+    const sentMediaUrls = new Set<string>();
+    const sendMedia = vi.fn().mockResolvedValue(undefined);
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    const sendError = vi.fn().mockResolvedValue(undefined);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
+    const onError = makeOnError(deliverBuffer, flush, sendError);
+
+    await onError(new Error("upstream failure"));
+
     expect(sendText).not.toHaveBeenCalled();
+    expect(sendError).toHaveBeenCalledTimes(1);
+    expect(deliverBuffer.textSent).toBe(true);
+  });
+
+  it("flush is idempotent: calling twice does not double-send", async () => {
+    const deliverBuffer = createDeliverBuffer();
+    const sentMediaUrls = new Set<string>();
+    const sendMedia = vi.fn().mockResolvedValue(undefined);
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
+
+    await deliver({ text: "hello" }, { kind: "final" });
+
+    await flush("on-error");
+    await flush("finally");
+
+    expect(sendText).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispatcher never calls deliver: finally flush is a no-op (no silent error)", async () => {
+    const deliverBuffer = createDeliverBuffer();
+    const sendText = vi.fn().mockResolvedValue(undefined);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
+
+    await flush("finally");
+
+    expect(sendText).not.toHaveBeenCalled();
+    expect(deliverBuffer.textSent).toBe(false);
   });
 
   it("media is sent immediately via deliver, not buffered", async () => {
@@ -269,6 +343,7 @@ describe("deliver buffer pattern", () => {
     const sendMedia = vi.fn().mockResolvedValue(undefined);
     const sendText = vi.fn().mockResolvedValue(undefined);
     const deliver = makeDeliver(deliverBuffer, sentMediaUrls, sendMedia, sendText);
+    const flush = makeFlushBufferedText(deliverBuffer, sendText);
 
     await deliver({ mediaUrl: "https://example.com/img1.png" }, { kind: "final" });
     await deliver({
@@ -278,17 +353,11 @@ describe("deliver buffer pattern", () => {
       ],
     }, { kind: "tool" });
 
-    // Media sent immediately — three calls total
     expect(sendMedia).toHaveBeenCalledTimes(3);
-    expect(sendMedia).toHaveBeenCalledWith("https://example.com/img1.png");
-    expect(sendMedia).toHaveBeenCalledWith("https://example.com/img2.png");
-    expect(sendMedia).toHaveBeenCalledWith("https://example.com/img3.png");
+    expect(deliverBuffer.blockChunks).toEqual([]);
+    expect(deliverBuffer.finals).toEqual([]);
 
-    // No text was buffered
-    expect(deliverBuffer.lastText).toBeNull();
-
-    // finally should not send text
-    await runFinally(deliverBuffer, sendText);
+    await flush("finally");
     expect(sendText).not.toHaveBeenCalled();
   });
 
@@ -302,7 +371,6 @@ describe("deliver buffer pattern", () => {
     await deliver({ mediaUrl: "https://example.com/img.png" }, { kind: "block" });
     await deliver({ mediaUrl: "https://example.com/img.png" }, { kind: "final" });
 
-    // Only one call — second was deduped
     expect(sendMedia).toHaveBeenCalledTimes(1);
     expect(sentMediaUrls.size).toBe(1);
   });
