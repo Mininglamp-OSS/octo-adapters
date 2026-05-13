@@ -1510,13 +1510,62 @@ export async function handleInboundMessage(params: {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
   }, 5000);
 
-  // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
-  // Media is sent immediately (no edit problem); text is buffered (each call overwrites).
+  // Buffer text across streaming deliver calls; flushed once after dispatcher finishes.
+  // Stored as an ordered list so the original deliver sequence is preserved (rather
+  // than partitioning by kind, which would re-group e.g. final-before-block edge cases).
+  // SDK semantics (verified against openclaw 5.x dispatch-*.js — `accumulatedBlockText`):
+  //   - "block" payloads are coalesced sentence/paragraph-level segments, not raw
+  //     token deltas. SDK separates consecutive blocks with "\n", so we do the same.
+  //   - "final" payloads are independent complete replies, separated from anything
+  //     adjacent by a blank line ("\n\n").
+  //   - "tool" payloads bypass the buffer entirely (sent inline in the deliver callback).
+  // The previous design overwrote a single `lastText` slot, which silently dropped every
+  // block/final except the last one (regression: bug #11). Media is sent immediately
+  // (no edit problem); text is accumulated.
+  type BufferedKind = "block" | "final";
   const deliverBuffer = {
-    lastText: null as string | null,
+    chunks: [] as Array<{ kind: BufferedKind; text: string }>,
     textSent: false,
   };
   const sentMediaUrls = new Set<string>();
+
+  // Combine buffered chunks into a single message and send it once. Idempotent:
+  // safe to call from both `onError` (early flush so users still see partial output)
+  // and the `finally` block (normal happy-path flush). The `textSent` flag prevents
+  // double-sending.
+  const flushBufferedText = async (reason: "finally" | "on-error"): Promise<void> => {
+    if (deliverBuffer.textSent) return;
+    if (deliverBuffer.chunks.length === 0) return;
+    deliverBuffer.textSent = true;
+
+    let combined = "";
+    for (let i = 0; i < deliverBuffer.chunks.length; i++) {
+      const cur = deliverBuffer.chunks[i];
+      if (i === 0) {
+        combined = cur.text;
+      } else {
+        const prev = deliverBuffer.chunks[i - 1];
+        // Block→block: "\n" matches SDK's accumulatedBlockText separator.
+        // Anything else (block↔final, final↔final): "\n\n" blank line.
+        const sep = prev.kind === "block" && cur.kind === "block" ? "\n" : "\n\n";
+        combined += sep + cur.text;
+      }
+    }
+
+    const blockCount = deliverBuffer.chunks.filter((c) => c.kind === "block").length;
+    const finalCount = deliverBuffer.chunks.length - blockCount;
+    try {
+      await resolveAndSendText(combined);
+      log?.info?.(
+        `dmwork: [deliver-buffer] flushed (${combined.length} chars from ` +
+          `${blockCount} blocks + ${finalCount} finals, reason=${reason})`,
+      );
+    } catch (sendErr) {
+      log?.error?.(
+        `dmwork: [deliver-buffer] flush failed (reason=${reason}): ${String(sendErr)}`,
+      );
+    }
+  };
 
   // --- Shared helper: resolve mentions and send text ---
   const resolveAndSendText = async (content: string) => {
@@ -1668,7 +1717,18 @@ export async function handleInboundMessage(params: {
           }
 
           // --- Text handling based on kind ---
+          // SDK delivers block payloads as coalesced sentence/paragraph segments
+          // (not raw token deltas), so trimming each one is fine — it just strips
+          // the wrapping whitespace SDK adds at boundaries; SDK itself joins with "\n".
           const content = payload.text?.trim() ?? "";
+
+          // Visibility into the deliver stream — without this it was impossible to
+          // distinguish "no deliver call at all" from "deliver called but content empty"
+          // when an entire turn was lost.
+          log?.debug?.(
+            `dmwork: [deliver] received kind=${kind} contentLen=${content.length} hasMedia=${outboundMediaUrls.length}`,
+          );
+
           if (!content && outboundMediaUrls.length > 0) {
             statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
             return;
@@ -1682,15 +1742,23 @@ export async function handleInboundMessage(params: {
             return;
           }
 
-          // kind === "block" / "final" / anything else: buffer, send only once after dispatcher finishes
-          deliverBuffer.lastText = content;
-          log?.debug?.(`dmwork: [deliver-buffer] ${kind} text buffered (${content.length} chars)`);
+          // Push into the ordered chunks array, preserving the real deliver sequence
+          // (in case the SDK ever interleaves final/block — `flushBufferedText` then
+          // applies the right separator at each boundary based on adjacent kinds).
+          const bufferedKind: BufferedKind = kind === "block" ? "block" : "final";
+          deliverBuffer.chunks.push({ kind: bufferedKind, text: content });
+          log?.debug?.(
+            `dmwork: [deliver-buffer] ${kind} appended as ${bufferedKind} ` +
+              `(${content.length} chars, total chunks=${deliverBuffer.chunks.length})`,
+          );
         },
         onError: async (err: unknown, info: { kind: string }) => {
           clearInterval(typingInterval);
           log?.error?.(`dmwork ${info.kind} reply failed: ${String(err)}`);
-          // Prevent finally block from sending stale buffered text after error
-          deliverBuffer.lastText = null;
+          // First, try to flush whatever was already buffered before the error —
+          // partial replies are still valuable and have always been silently dropped here.
+          await flushBufferedText("on-error");
+          // Mark sent so the finally block does not retry; then send the user-facing notice.
           deliverBuffer.textSent = true;
           try {
             await sendMessage({
@@ -1707,16 +1775,9 @@ export async function handleInboundMessage(params: {
       },
     });
   } finally {
-    // --- Final send: deliver buffered text if only blocks arrived (no final/tool) ---
-    if (deliverBuffer.lastText && !deliverBuffer.textSent) {
-      deliverBuffer.textSent = true;
-      try {
-        await resolveAndSendText(deliverBuffer.lastText);
-        log?.info?.(`dmwork: [deliver-buffer] fallback text sent (${deliverBuffer.lastText.length} chars)`);
-      } catch (finalSendErr) {
-        log?.error?.(`dmwork: [deliver-buffer] final text send failed: ${String(finalSendErr)}`);
-      }
-    }
+    // Flush any text buffered during the dispatcher run that hasn't been sent yet
+    // (covers the normal "blocks/finals only" path; tool text is already sent inline).
+    await flushBufferedText("finally");
     clearInterval(typingInterval);
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
