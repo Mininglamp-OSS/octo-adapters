@@ -18,6 +18,7 @@
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
   <a href="./README.md"><img src="https://img.shields.io/badge/lang-English-blue.svg" alt="English"></a>
+  <a href="https://nothumansearch.ai/site/xquik.com"><img src="https://nothumansearch.ai/badge/xquik.com.svg" alt="NHS Agentic Readiness"></a>
 </p>
 
 ---

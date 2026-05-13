@@ -115,6 +115,23 @@ The plugin uses the `ChannelPlugin` SDK interface with support for:
 - Multi-account configuration via `channels.dmwork.accounts`
 - Config hot-reload on `channels.dmwork` prefix changes
 
+## Companion OpenClaw Workflows
+
+DMWork is the chat surface for OpenClaw agents. If the same agent also needs
+X/Twitter automation, install [TweetClaw](https://github.com/Xquik-dev/tweetclaw)
+beside this channel instead of expanding the DMWork adapter:
+
+```bash
+openclaw plugins install @xquik/tweetclaw
+openclaw config set tools.alsoAllow '["explore", "tweetclaw"]'
+```
+
+Use TweetClaw for tweet search, reply search, follower export, user lookup,
+posting, replies, media upload/download, direct messages, tweet monitors,
+webhooks, and giveaway draws. Keep DMWork bot tokens in `channels.dmwork`, keep
+TweetClaw credentials in the TweetClaw plugin config or host environment, and
+keep visible X/Twitter write actions behind OpenClaw approval.
+
 ## Disconnect
 
 To disconnect the bot, send `/disconnect` to BotFather in DMWork. This invalidates the current IM token and kicks the WebSocket connection.
