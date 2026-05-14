@@ -15,21 +15,26 @@ concurrency:
 
 jobs:
   build:
-    name: Build & Type Check
+    name: Build & Type-check
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: openclaw-channel-dmwork
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: openclaw-channel-dmwork/package-lock.json
+          node-version: '20'
+
       - name: Install dependencies
         run: npm install
-      - name: Type check
+
+      - name: Type-check
         run: npm run type-check
+
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
