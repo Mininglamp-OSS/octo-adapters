@@ -9,10 +9,12 @@ import { runInstall, type InstallOptions } from "./install.js";
 export interface UpdateOptions {
   json?: boolean;
   dev?: boolean;
+  next?: boolean;
 }
 
 export async function runUpdate(opts: UpdateOptions): Promise<void> {
   await runInstall({
     dev: opts.dev,
+    next: opts.next,
   });
 }

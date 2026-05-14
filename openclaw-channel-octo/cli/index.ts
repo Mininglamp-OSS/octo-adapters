@@ -69,11 +69,18 @@ program
   .command("install")
   .description("Install or update the Octo plugin")
   .option("--force", "Force reinstall", false)
+  .option("--next", "Install the @next pre-release dist-tag (use during rc/beta cycles)", false)
+  .option(
+    "--from <spec>",
+    "Override install spec (tarball path or alternate npm spec). Pre-publish local testing.",
+  )
   .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
     await runInstall({
       force: opts.force,
       dev: opts.dev,
+      next: opts.next,
+      from: opts.from,
     });
   });
 
@@ -81,9 +88,10 @@ program
 program
   .command("update")
   .description("Update the Octo plugin (alias for install)")
+  .option("--next", "Update to the @next pre-release dist-tag", false)
   .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
-    await runUpdate({ dev: opts.dev });
+    await runUpdate({ dev: opts.dev, next: opts.next });
   });
 
 // --- bind ---
@@ -159,4 +167,10 @@ program
     });
   });
 
-program.parse();
+export function main(argv?: readonly string[]): void {
+  program.parse(argv);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}

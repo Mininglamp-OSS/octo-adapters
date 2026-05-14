@@ -1,0 +1,93 @@
+name: Publish Octo Dev
+
+# Auto-publish a dev version to npm when openclaw-channel-octo/ changes land
+# on main (typically via merged PR). Dev versions go to npm dist-tag `dev`.
+#
+# Version pattern: <package.json version>-dev.<short-sha>
+# Example: package.json `1.0.0-rc.1` + sha abc1234 → `1.0.0-rc.1-dev.abc1234`
+#
+# Each merge produces a unique version (sha differs), so re-publish conflicts
+# are impossible. The shim package is NOT republished on dev — only canonical
+# openclaw-channel-octo. (Stable/rc releases use publish-octo.yml.)
+#
+# Users install dev with:
+#   npx -y openclaw-channel-octo@dev install --dev
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'openclaw-channel-octo/**'
+  # Manual override (e.g. force a dev publish without code change)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run npm publish with --dry-run (no actual upload)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish-octo-dev
+  # Don't cancel in-flight publishes; let each run complete (npm version
+  # bump + publish is short, and cancelling mid-publish leaves npm registry
+  # in a weird state).
+  cancel-in-progress: false
+
+env:
+  PKG_DIR: openclaw-channel-octo
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.PKG_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm run build
+
+  publish_dev:
+    name: publish openclaw-channel-octo @dev
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.PKG_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+      - name: resolve dev version
+        id: version
+        run: |
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          SHORT_SHA="${GITHUB_SHA::7}"
+          DEV_VERSION="${BASE_VERSION}-dev.${SHORT_SHA}"
+          DRY="${{ inputs.dry_run && '--dry-run' || '' }}"
+          {
+            echo "VERSION=$DEV_VERSION"
+            echo "DRY_RUN=$DRY"
+          } >> "$GITHUB_OUTPUT"
+          echo "[publish_dev] base=$BASE_VERSION sha=$SHORT_SHA → $DEV_VERSION dry='$DRY'"
+      - run: npm ci --ignore-scripts
+      - name: npm version
+        # Must run BEFORE build: prebuild writes package.json.version into
+        # src/version.ts, so the published tarball reports the correct version.
+        run: npm version "${{ steps.version.outputs.VERSION }}" --no-git-tag-version
+      - run: npm run build
+      - name: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --access public --tag dev ${{ steps.version.outputs.DRY_RUN }}

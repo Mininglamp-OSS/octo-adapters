@@ -1,45 +1,57 @@
 /**
  * install command: install or update the Octo plugin.
- * Pure plugin management — does NOT configure bots or bindings.
  *
- * Phase A handles 4 active scenarios for the new Octo plugin:
- * 1. fresh — nothing installed
- * 2. update — already on the new plugin, check version
- * 3. broken — partial Octo install, cleanup + reinstall
- * 4. legacy-warn — old openclaw-channel-dmwork or channels.dmwork residue;
- *    Phase A merely warns and falls through to fresh (legacy plugin is left
- *    untouched). Phase B will replace this with full rebrand migration.
+ * Phase B scenarios (in detection priority order):
+ *   1. legacy-to-octo  — very-legacy plugin id "dmwork" present (predates
+ *      openclaw-channel-dmwork). Runs runLegacyToOctoMigration().
+ *   2. rebrand         — openclaw-channel-dmwork plugin OR channels.dmwork
+ *      OR bindings(channel=dmwork) residue. Runs runRebrandMigration().
+ *      Triggers even when octo is also installed (handles half-completed
+ *      migrations such as octo-already-installed-but-bindings-not-rewritten).
+ *   3. update          — octo healthy installed, compare against npm
+ *   4. broken          — octo partial, cleanup + reinstall
+ *   5. deadlock        — channels.octo without plugin
+ *   6. fresh           — clean install
  *
- * The `legacy` scenario (very-legacy plugin id "dmwork") is detected for
- * forward-compat but Phase A only warns; Phase B's legacy-to-octo path
- * (runLegacyMigration / runDeadlockRepair below, kept as-is) is not yet
- * wired into the active switch.
+ * Both rebrand and legacy-to-octo go through the same `runMigration()`
+ * implementation, parameterized by which legacy plugin id to disable/uninstall.
+ * Pure plugin management — does NOT configure new bots or bindings.
  */
 
 import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  capturePluginState,
   cleanupBrokenInstall,
-  deleteLegacyBackup,
+  cleanupStaleWorkspaceIfEmpty,
   detectScenario,
   ensurePluginEnabled,
   ensurePluginsAllow,
   gatewayRestart,
   getConfigFilePathSafe,
   isHealthyInstall,
+  migrateWorkspaceDir,
+  pluginsDisable,
+  pluginsEnable,
   pluginsInspect,
   pluginsInstall,
+  pluginsUninstall,
   readConfigFromFile,
-  removeLegacyFromConfig,
-  renameLegacyDir,
-  restoreChannelConfigFromDisk,
-  restoreLegacyDir,
-  saveChannelConfigToDisk,
+  removeBindingsFromFile,
   removeChannelConfigFromFile,
+  restoreBindingsToFile,
+  restoreChannelConfigToFile,
   runCmd,
+  saveBindingsFromFile,
+  saveChannelConfigFromFile,
+  type PluginSnapshot,
 } from "./openclaw-cli.js";
 import {
+  CHANNEL_ID,
+  LEGACY_CHANNEL_ID,
+  LEGACY_PLUGIN_ID,
   PLUGIN_ID,
+  VERY_LEGACY_PLUGIN_ID,
   ensureOpenClawCompat,
 } from "./utils.js";
 
@@ -56,53 +68,74 @@ function getLatestNpmVersion(tag: string): string | null {
 export interface InstallOptions {
   force?: boolean;
   dev?: boolean;
+  /**
+   * Install the @next pre-release dist-tag instead of @latest.
+   *
+   * Use during rc/beta cycles: `npx -y openclaw-channel-octo@next install --next`
+   * ensures the OpenClaw plugin install also resolves to the @next version
+   * (without --next, the npx CLI is @next but pluginsInstall would let
+   * OpenClaw fetch @latest, defeating the smoke test).
+   */
+  next?: boolean;
+  /**
+   * Override the install spec passed to `openclaw plugins install`.
+   * Accepts anything OpenClaw's plugins-install accepts: a tarball path,
+   * a directory path, an alternate npm spec, etc.
+   *
+   * Primary use: pre-publish local testing. Build a tarball with `npm pack`
+   * and pass it here so the migration's pluginsInstall step doesn't try to
+   * fetch a package that isn't on npm yet.
+   *
+   *   node bin/octo.js install --from ./openclaw-channel-octo-1.0.0-rc.1.tgz
+   *
+   * When set, --dev and --next are ignored for spec resolution. Update-scenario
+   * version comparison is also skipped (tarball install is unconditional).
+   */
+  from?: string;
 }
 
-const LEGACY_WARN_MESSAGE =
-  "[legacy-warn] legacy dmwork config detected; migration will be handled in a later release. " +
-  "Your existing dmwork plugin and bot configs are unaffected.";
-
-/**
- * install command: install or update the Octo plugin.
- * Pure plugin management — does NOT configure bots or bindings.
- * Use `bind` or `quickstart` for bot configuration after install.
- */
 export async function runInstall(opts: InstallOptions): Promise<void> {
   ensureOpenClawCompat();
 
   const scenario = detectScenario();
-  const tag = opts.dev ? "dev" : "latest";
-  const spec = opts.dev ? `${PLUGIN_ID}@dev` : PLUGIN_ID;
+  // Tag/spec selection: --from > --dev > --next > default (latest).
+  const tag = opts.dev ? "dev" : opts.next ? "next" : "latest";
+  const spec = opts.from
+    ? opts.from
+    : opts.dev ? `${PLUGIN_ID}@dev`
+    : opts.next ? `${PLUGIN_ID}@next`
+    : PLUGIN_ID;
   const quiet = false;
   let didChange = false;
 
+  // Display label for "(dev)", "(next)", or "(from <path>)" in log lines.
+  const tagLabel = opts.from
+    ? ` (from ${opts.from})`
+    : opts.dev ? " (dev)"
+    : opts.next ? " (next)"
+    : "";
+
   switch (scenario) {
+    case "legacy-to-octo":
     case "legacy":
-      // LEGACY-DETECT: very-legacy plugin id "dmwork" present. Phase A only warns.
-      console.warn(
-        "[legacy] very-legacy 'dmwork' plugin detected. Phase A does not migrate; " +
-        "your existing legacy plugin is left intact. Continuing with a fresh Octo install...",
-      );
-      console.log(`Installing Octo plugin${opts.dev ? " (dev)" : ""}...`);
-      pluginsInstall(spec, quiet, opts.force);
-      console.log("Plugin installed successfully.");
+      // Phase B: full migration from very-legacy "dmwork" plugin id to octo.
+      runLegacyToOctoMigration(spec, quiet, opts.force);
       didChange = true;
       break;
+    case "rebrand":
     case "legacy-warn":
-      // LEGACY-DETECT: openclaw-channel-dmwork residue present. Phase A only warns.
-      console.warn(LEGACY_WARN_MESSAGE);
-      console.log(`Installing Octo plugin${opts.dev ? " (dev)" : ""}...`);
-      pluginsInstall(spec, quiet, opts.force);
-      console.log("Plugin installed successfully.");
+      // Phase B: full migration from openclaw-channel-dmwork to openclaw-channel-octo.
+      runRebrandMigration(spec, quiet, opts.force);
       didChange = true;
       break;
     case "update": {
-      // Already installed — compare against target version
       const inspect = pluginsInspect(PLUGIN_ID);
       const currentVersion = inspect?.plugin?.version ?? "unknown";
 
-      if (opts.force) {
-        console.log(`Force installing Octo plugin${opts.dev ? " (dev)" : ""}...`);
+      if (opts.force || opts.from) {
+        // --from skips version comparison: tarball install is unconditional
+        // because npm registry doesn't know about the tarball's contents.
+        console.log(`Force installing Octo plugin${tagLabel}...`);
         pluginsInstall(spec, quiet, true);
         console.log("Plugin installed successfully.");
         didChange = true;
@@ -118,52 +151,46 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       }
 
       if (currentVersion === targetVersion) {
-        console.log(`Octo plugin v${currentVersion} is already the target version${opts.dev ? " (dev)" : ""}. No update needed.`);
+        console.log(`Octo plugin v${currentVersion} is already the target version${tagLabel}. No update needed.`);
         break;
       }
 
-      console.log(`Updating Octo plugin: v${currentVersion} → v${targetVersion}${opts.dev ? " (dev)" : ""}...`);
+      console.log(`Updating Octo plugin: v${currentVersion} → v${targetVersion}${tagLabel}...`);
       pluginsInstall(spec, quiet, true);
-      console.log(`Octo plugin updated from v${currentVersion} to v${targetVersion}${opts.dev ? " (dev)" : ""}.`);
+      console.log(`Octo plugin updated from v${currentVersion} to v${targetVersion}${tagLabel}.`);
       didChange = true;
       break;
     }
     case "broken": {
       console.log("Detected broken plugin install. Cleaning up...");
-      const actions = cleanupBrokenInstall();
+      const actions = cleanupBrokenInstall(PLUGIN_ID);
       actions.forEach((a) => console.log(`  ${a}`));
-      console.log(`Installing Octo plugin${opts.dev ? " (dev)" : ""}...`);
+      console.log(`Installing Octo plugin${tagLabel}...`);
       pluginsInstall(spec, quiet, opts.force);
       console.log("Plugin installed successfully.");
       didChange = true;
       break;
     }
     case "deadlock":
-      // Phase A: detectScenario() folds the old "deadlock" case into
-      // "legacy-warn"; this branch is unreachable but kept for type completeness.
-      // Phase B will reintroduce a proper deadlock-repair path for octo.
       runDeadlockRepair(spec, quiet);
       didChange = true;
       break;
     case "fresh":
-      console.log(`Installing Octo plugin${opts.dev ? " (dev)" : ""}...`);
+      console.log(`Installing Octo plugin${tagLabel}...`);
       pluginsInstall(spec, quiet, opts.force);
       console.log("Plugin installed successfully.");
       didChange = true;
       break;
   }
 
-  // Self-heal config — runs even when no install happened (already-at-target case).
+  // Self-heal config — runs even when no install happened.
   // After OpenClaw major upgrades (4.x → 5.x), plugins.entries.<id>.enabled has been
-  // observed to be reset to false on third-party plugins, leaving the plugin installed
-  // but inactive. This restores it without requiring users to run
-  // `openclaw plugins enable openclaw-channel-octo` manually.
+  // observed to be reset to false on third-party plugins.
   ensurePluginsAllow();
   ensurePluginEnabled();
 
   if (!didChange) return;
 
-  // Gateway restart (plugin lifecycle requires restart)
   console.log("Restarting gateway...");
   if (!gatewayRestart()) {
     console.log("Warning: Gateway restart failed. Run 'openclaw gateway restart' manually.");
@@ -173,130 +200,334 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy scaffolding — kept for Phase B (rebrand migration).
+// Phase B: unified migration
 //
-// runLegacyMigration() and runDeadlockRepair() below are NOT wired into the
-// Phase A install switch. They reference the old dmwork-channel-dmwork
-// install layout and channels.dmwork; Phase B will rework them into proper
-// rebrand / legacy-to-octo migrations using command-driven helpers.
+// Both rebrand (openclaw-channel-dmwork → openclaw-channel-octo) and
+// legacy-to-octo (very-legacy "dmwork" → openclaw-channel-octo) go through
+// runMigration() with a different `legacyPluginId` parameter. Channel config
+// and bindings always live under the same legacy channel id ("dmwork"), so
+// data migration is identical.
 // ---------------------------------------------------------------------------
 
-// LEGACY-MIGRATION: Phase B will rewrite this. Phase A keeps the body intact
-// only so the file still typechecks; the function is dead code in Phase A.
-function runLegacyMigration(spec: string, quiet: boolean, force?: boolean): void {
-  console.log("Detected legacy DMWork plugin (dmwork). Starting migration...");
+interface MigrationContext {
+  legacyPluginId: string;
+  scenarioLabel: string;
+  spec: string;
+  quiet: boolean;
+  force?: boolean;
+}
 
-  // 1. Backup everything to disk
+function runMigration(ctx: MigrationContext): void {
+  const { legacyPluginId, scenarioLabel, spec, quiet, force } = ctx;
+  console.log(`Detected ${scenarioLabel}. Starting migration...`);
+
+  // -------------------------------------------------------------------------
+  // Step 0: capture pre-migration state (everything rollback needs)
+  // -------------------------------------------------------------------------
   const configPath = getConfigFilePathSafe();
-  const backupPath = configPath + ".dmwork-upgrade-backup";
-  copyFileSync(configPath, backupPath);
-  saveChannelConfigToDisk();
-  console.log("  Backed up config and channels.dmwork to disk.");
-
-  // 2. Clean up any broken new plugin install from a previous failed attempt
-  const brokenActions = cleanupBrokenInstall();
-  if (brokenActions.length > 0) {
-    console.log("  Cleaned up broken previous install:");
-    brokenActions.forEach((a) => console.log(`    ${a}`));
-  }
-
-  // 3. Remove legacy from config FIRST (breaks deadlock)
-  removeLegacyFromConfig();
-  console.log("  Removed legacy config entries.");
-
-  // 4. Rename legacy directory (not delete!)
-  const legacyDirExists = existsSync(
-    getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions/dmwork"),
+  const backupPath = configPath + `.${scenarioLabel}-backup`;
+  const legacySnapshot = capturePluginState(legacyPluginId);
+  const octoSnapshot = capturePluginState(PLUGIN_ID);
+  const savedChannelConfigRaw = saveChannelConfigFromFile(LEGACY_CHANNEL_ID);
+  const savedChannelConfig = savedChannelConfigRaw
+    ? normalizeChannelConfig(savedChannelConfigRaw)
+    : null;
+  const savedBindings = saveBindingsFromFile(LEGACY_CHANNEL_ID);
+  const hadLegacyChannelBefore = Boolean(savedChannelConfigRaw);
+  const beforeBindingKeys = new Set(
+    savedBindings.map((b) => `${b?.agentId ?? ""}:${b?.match?.accountId ?? ""}`),
   );
-  let renamed = false;
-  if (legacyDirExists) {
-    renamed = renameLegacyDir();
-    if (renamed) {
-      console.log("  Renamed extensions/dmwork → .dmwork-backup.");
-    } else {
-      console.error("  Failed to rename extensions/dmwork. Aborting migration.");
-      try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
-      throw new Error("Legacy migration aborted: could not rename extensions/dmwork");
+
+  // -------------------------------------------------------------------------
+  // Step 1: backup the entire openclaw.json
+  // -------------------------------------------------------------------------
+  copyFileSync(configPath, backupPath);
+  console.log(`  Backed up config to ${backupPath}.`);
+
+  // -------------------------------------------------------------------------
+  // Rollback closure — invoked on any unrecoverable error in steps 2-9
+  // -------------------------------------------------------------------------
+  const rollback = (reason: string): never => {
+    console.error(`  Migration failed (${reason}). Rolling back...`);
+    // (1) tear down any partial new install
+    try { cleanupBrokenInstall(PLUGIN_ID); } catch { /* best effort */ }
+    // (2) restore full cfg from backup
+    try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
+    // (3) re-enable legacy if it was enabled before
+    if (legacySnapshot.enabled === true) {
+      try { pluginsEnable(legacyPluginId); } catch { /* best effort */ }
+    }
+    console.error(`  Rollback complete. Backup retained at ${backupPath}.`);
+    throw new Error(`Migration aborted: ${reason}`);
+  };
+
+  // -------------------------------------------------------------------------
+  // Step 2: disable legacy plugin (only if currently enabled)
+  // -------------------------------------------------------------------------
+  if (legacySnapshot.enabled === true) {
+    try {
+      pluginsDisable(legacyPluginId);
+      console.log(`  Disabled legacy plugin "${legacyPluginId}".`);
+    } catch (err) {
+      // Disable failure is non-fatal — we proceed and let uninstall handle it later.
+      console.warn(`  Warning: could not disable legacy plugin: ${(err as Error).message}`);
     }
   }
 
-  // 5. Install new plugin
-  try {
-    console.log("  Installing openclaw-channel-octo...");
-    pluginsInstall(spec, quiet, force);
-  } catch (installErr) {
-    console.error("  Install failed! Restoring previous state...");
-    if (renamed) restoreLegacyDir();
-    try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
-    console.error("  Previous state restored. Legacy plugin should still work.");
-    throw installErr;
+  // -------------------------------------------------------------------------
+  // Step 3: clear any partial octo install from a prior crashed migration
+  // (cleanupBrokenInstall is a no-op when the install is healthy, so this is
+  //  safe even in case-N where octo is already healthy.)
+  // -------------------------------------------------------------------------
+  cleanupBrokenInstall(PLUGIN_ID);
+
+  // -------------------------------------------------------------------------
+  // Step 4: temporarily remove channels.dmwork + bindings(channel=dmwork)
+  // (must happen before pluginsInstall on old OpenClaw — channel id no longer
+  //  registered after legacy plugin is disabled, validation would reject)
+  // -------------------------------------------------------------------------
+  if (hadLegacyChannelBefore) {
+    removeChannelConfigFromFile(LEGACY_CHANNEL_ID);
+    console.log(`  Removed channels.${LEGACY_CHANNEL_ID} (will restore as channels.${CHANNEL_ID}).`);
+  }
+  if (savedBindings.length > 0) {
+    removeBindingsFromFile(LEGACY_CHANNEL_ID);
+    console.log(`  Removed ${savedBindings.length} legacy bindings (will restore on channel=${CHANNEL_ID}).`);
   }
 
-  // 6. Verify healthy install
-  if (!isHealthyInstall()) {
-    console.error("  Install completed but verification failed. Restoring...");
-    if (renamed) restoreLegacyDir();
-    try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
-    console.error("  Previous state restored.");
-    throw new Error("Legacy migration failed: post-install verification did not pass");
-  }
-
-  // 7. Success: restore channels.dmwork + cleanup
-  ensurePluginsAllow();
-  restoreChannelConfigFromDisk();
-
-  const restoredCfg = readConfigFromFile();
-  if (restoredCfg?.channels?.dmwork) {
-    deleteLegacyBackup();
-    try { rmSync(backupPath, { force: true }); } catch { /* best effort */ }
+  // -------------------------------------------------------------------------
+  // Step 5: install octo (skip if already healthy from a prior partial migration)
+  // -------------------------------------------------------------------------
+  const octoAlreadyHealthy = octoSnapshot.installed && isHealthyInstall(PLUGIN_ID);
+  if (!octoAlreadyHealthy) {
+    try {
+      console.log(`  Installing ${PLUGIN_ID}...`);
+      pluginsInstall(spec, quiet, force);
+    } catch (err) {
+      rollback(`pluginsInstall(${PLUGIN_ID}) threw: ${(err as Error).message}`);
+    }
   } else {
-    console.log("  Warning: channels.dmwork restore may not have succeeded. Keeping backups for safety.");
+    console.log(`  ${PLUGIN_ID} already installed and healthy — skipping reinstall.`);
   }
-  console.log("  Legacy migration complete!");
+
+  // -------------------------------------------------------------------------
+  // Step 6: ensure octo is in plugins.allow + enabled
+  // -------------------------------------------------------------------------
+  ensurePluginsAllow(PLUGIN_ID);
+  pluginsEnable(PLUGIN_ID);
+
+  // -------------------------------------------------------------------------
+  // Step 7: write channels.octo from saved channels.dmwork
+  // -------------------------------------------------------------------------
+  if (savedChannelConfig) {
+    restoreChannelConfigToFile(savedChannelConfig, CHANNEL_ID);
+    console.log(`  Restored channels.${CHANNEL_ID} from saved channels.${LEGACY_CHANNEL_ID}.`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 8: write bindings(channel=octo) from saved bindings(channel=dmwork)
+  // -------------------------------------------------------------------------
+  let bindingsAppended = 0;
+  if (savedBindings.length > 0) {
+    bindingsAppended = restoreBindingsToFile(savedBindings, LEGACY_CHANNEL_ID, CHANNEL_ID);
+    console.log(`  Restored ${bindingsAppended} bindings on channel=${CHANNEL_ID} (deduped from ${savedBindings.length} legacy).`);
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 9: verify post-migration state
+  // -------------------------------------------------------------------------
+  const installOk = isHealthyInstall(PLUGIN_ID);
+  const restored = readConfigFromFile();
+  const channelsOk = !hadLegacyChannelBefore || Boolean(restored?.channels?.[CHANNEL_ID]);
+  const restoredOctoKeys = new Set(
+    Array.isArray(restored?.bindings)
+      ? restored!.bindings
+          .filter((b: any) => b?.match?.channel === CHANNEL_ID)
+          .map((b: any) => `${b?.agentId ?? ""}:${b?.match?.accountId ?? ""}`)
+      : [],
+  );
+  const missingKeys = [...beforeBindingKeys].filter((k) => !restoredOctoKeys.has(k));
+  const bindingsOk = missingKeys.length === 0;
+
+  if (!installOk) rollback("post-install verification: octo plugin not healthy");
+  if (!channelsOk) rollback(`post-install verification: channels.${CHANNEL_ID} missing`);
+  if (!bindingsOk) rollback(`post-install verification: ${missingKeys.length} bindings missing on channel=${CHANNEL_ID}`);
+
+  console.log(`  Verified: octo healthy + channels.${CHANNEL_ID} present + ${restoredOctoKeys.size} bindings on channel=${CHANNEL_ID}.`);
+
+  // -------------------------------------------------------------------------
+  // Step 10 (best-effort): uninstall the legacy plugin
+  // Plan B.1 decision: uninstall failure here is logged as a warning, NOT
+  // rolled back — the migration's user-visible work is already done.
+  // -------------------------------------------------------------------------
+  if (legacySnapshot.installed) {
+    try {
+      pluginsUninstall(legacyPluginId, true);
+      console.log(`  Uninstalled legacy plugin "${legacyPluginId}".`);
+    } catch (err) {
+      console.warn(`  Warning: could not uninstall legacy plugin "${legacyPluginId}". You may remove it manually with: openclaw plugins uninstall ${legacyPluginId} --force`);
+      console.warn(`    ${(err as Error).message}`);
+    }
+  }
+
+  // Step 11 (best-effort): clear any residue config entries for legacy
+  try {
+    cleanupBrokenInstall(legacyPluginId);
+  } catch { /* best effort */ }
+
+  // -------------------------------------------------------------------------
+  // Step 11b (best-effort, cross-legacy cleanup): if the OTHER legacy plugin id
+  // is also installed, uninstall it too. This handles the case where both
+  // very-legacy "dmwork" AND intermediate "openclaw-channel-dmwork" are
+  // present — one install run should leave the user fully on octo.
+  //
+  // The data migration (channels.dmwork / bindings on channel=dmwork) has
+  // already moved to channels.octo by step 7-8, so the other legacy plugin
+  // owns no live data at this point — pure plugin-record cleanup.
+  // -------------------------------------------------------------------------
+  const otherLegacyId = legacyPluginId === VERY_LEGACY_PLUGIN_ID
+    ? LEGACY_PLUGIN_ID
+    : VERY_LEGACY_PLUGIN_ID;
+  const otherSnapshot = capturePluginState(otherLegacyId);
+  if (otherSnapshot.installed) {
+    console.log(`  Detected additional legacy plugin "${otherLegacyId}" — cleaning up.`);
+    try {
+      if (otherSnapshot.enabled === true) pluginsDisable(otherLegacyId);
+      pluginsUninstall(otherLegacyId, true);
+      console.log(`    Uninstalled "${otherLegacyId}".`);
+    } catch (err) {
+      console.warn(`    Warning: could not uninstall "${otherLegacyId}": ${(err as Error).message}`);
+    }
+    try { cleanupBrokenInstall(otherLegacyId); } catch { /* best effort */ }
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 12 (best-effort, post-verify): migrate workspace dir
+  // Failure here loses regenerable cache only — bot config is already safe.
+  // -------------------------------------------------------------------------
+  const ok = migrateWorkspaceDir(LEGACY_CHANNEL_ID, CHANNEL_ID);
+  if (ok) {
+    console.log(`  Migrated workspace dir ${LEGACY_CHANNEL_ID}/ → ${CHANNEL_ID}/.`);
+    cleanupStaleWorkspaceIfEmpty(LEGACY_CHANNEL_ID);
+  } else {
+    console.warn(`  Warning: workspace dir migration failed (regenerable cache, non-fatal).`);
+  }
+
+  // Step 13: tidy up backup
+  try { rmSync(backupPath, { force: true }); } catch { /* best effort */ }
+  console.log(`  ${scenarioLabel} migration complete.`);
 }
 
-// LEGACY-MIGRATION: kept as-is for Phase B reference; not wired into Phase A.
+/**
+ * Migrate channels.<LEGACY_CHANNEL_ID> shape from flat (botToken at top level)
+ * to nested (accounts.default.{botToken, apiUrl}). Older channels.dmwork from
+ * very-legacy "dmwork" plugin id used the flat shape; channels.octo always
+ * uses the nested shape.
+ */
+function normalizeChannelConfig(raw: Record<string, unknown>): Record<string, unknown> {
+  const cloned = structuredClone(raw) as Record<string, any>;
+  if (cloned.botToken && !cloned.accounts) {
+    const apiUrl = cloned.apiUrl;
+    cloned.accounts = {
+      default: {
+        botToken: cloned.botToken,
+        ...(apiUrl !== undefined ? { apiUrl } : {}),
+      },
+    };
+    delete cloned.botToken;
+    delete cloned.apiUrl;
+  }
+  return cloned;
+}
+
+export function runRebrandMigration(spec: string, quiet: boolean, force?: boolean): void {
+  runMigration({
+    legacyPluginId: LEGACY_PLUGIN_ID,
+    scenarioLabel: "rebrand",
+    spec,
+    quiet,
+    force,
+  });
+}
+
+export function runLegacyToOctoMigration(spec: string, quiet: boolean, force?: boolean): void {
+  runMigration({
+    legacyPluginId: VERY_LEGACY_PLUGIN_ID,
+    scenarioLabel: "legacy-to-octo",
+    spec,
+    quiet,
+    force,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Deadlock repair: channels.octo exists but plugin missing.
+// (Distinct from rebrand — there's no legacy plugin/channel to migrate.)
+// ---------------------------------------------------------------------------
 function runDeadlockRepair(spec: string, quiet: boolean): void {
-  console.log("Detected config deadlock (channels.dmwork exists but no plugin).");
+  console.log(`Detected config deadlock (channels.${CHANNEL_ID} exists but no plugin).`);
 
   const configPath = getConfigFilePathSafe();
-  const backupPath = configPath + ".dmwork-upgrade-backup";
+  const backupPath = configPath + ".deadlock-backup";
   copyFileSync(configPath, backupPath);
-  saveChannelConfigToDisk();
 
-  removeChannelConfigFromFile();
-  console.log("  Temporarily removed channels.dmwork.");
+  const savedChannelConfig = saveChannelConfigFromFile(CHANNEL_ID);
+  const savedBindings = saveBindingsFromFile(CHANNEL_ID);
+  const hadChannelBefore = Boolean(savedChannelConfig);
 
-  try {
-    console.log("  Installing openclaw-channel-octo...");
-    pluginsInstall(spec, quiet);
-  } catch (installErr) {
-    console.error("  Install failed! Restoring config...");
-    try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
-    throw installErr;
+  if (hadChannelBefore) {
+    removeChannelConfigFromFile(CHANNEL_ID);
+    console.log(`  Temporarily removed channels.${CHANNEL_ID}.`);
   }
 
-  if (!isHealthyInstall()) {
+  try {
+    console.log(`  Installing ${PLUGIN_ID}...`);
+    pluginsInstall(spec, quiet);
+  } catch (err) {
+    console.error("  Install failed! Restoring config...");
+    try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
+    throw err;
+  }
+
+  if (!isHealthyInstall(PLUGIN_ID)) {
     console.error("  Install completed but verification failed. Restoring config...");
     try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
     throw new Error("Deadlock repair failed: post-install verification did not pass");
   }
 
-  ensurePluginsAllow();
-  restoreChannelConfigFromDisk();
+  ensurePluginsAllow(PLUGIN_ID);
+  pluginsEnable(PLUGIN_ID);
+
+  if (savedChannelConfig) {
+    restoreChannelConfigToFile(savedChannelConfig, CHANNEL_ID);
+  }
 
   const restoredCfg = readConfigFromFile();
-  if (restoredCfg?.channels?.dmwork) {
+  const restoredOk =
+    !hadChannelBefore || Boolean(restoredCfg?.channels?.[CHANNEL_ID]);
+  if (restoredOk) {
     try { rmSync(backupPath, { force: true }); } catch { /* best effort */ }
     console.log("  Deadlock repaired!");
   } else {
-    throw new Error("Deadlock repair incomplete: plugin installed but channels.dmwork could not be restored. Backup kept at " + backupPath);
+    throw new Error(`Deadlock repair incomplete: plugin installed but channels.${CHANNEL_ID} could not be restored. Backup kept at ${backupPath}`);
+  }
+
+  // Re-add bindings (should still be there; this is just defensive)
+  if (savedBindings.length > 0 && Array.isArray(restoredCfg?.bindings)) {
+    const haveKeys = new Set(
+      restoredCfg.bindings
+        .filter((b: any) => b?.match?.channel === CHANNEL_ID)
+        .map((b: any) => `${b?.agentId ?? ""}:${b?.match?.accountId ?? ""}`),
+    );
+    const missing = savedBindings.filter(
+      (b) => !haveKeys.has(`${b?.agentId ?? ""}:${b?.match?.accountId ?? ""}`),
+    );
+    if (missing.length > 0) {
+      restoreBindingsToFile(missing, CHANNEL_ID, CHANNEL_ID);
+    }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Exported for update.ts and doctor.ts to reuse
-// ---------------------------------------------------------------------------
-
-export { runLegacyMigration as runLegacyMigrationForUpdate };
+// Backward-compatible exports for update.ts / doctor.ts (now thin wrappers).
+export { runRebrandMigration as runLegacyMigrationForUpdate };
 export { runDeadlockRepair as runDeadlockRepairForUpdate };

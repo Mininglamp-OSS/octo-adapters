@@ -5,10 +5,10 @@
  */
 
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { CHANNEL_ID, PLUGIN_ID, LEGACY_PLUGIN_ID, VERY_LEGACY_PLUGIN_ID } from "../src/constants.js";
+import { CHANNEL_ID, PLUGIN_ID, LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID } from "../src/constants.js";
 
 /**
  * Find the user's globally installed openclaw, skipping the npx environment.
@@ -893,26 +893,29 @@ export function writeConfigAtomic(cfg: Record<string, any>): void {
 // Scenario detection
 // ---------------------------------------------------------------------------
 
-export type UpgradeScenario = "legacy" | "legacy-warn" | "update" | "fresh" | "deadlock" | "broken";
+export type UpgradeScenario =
+  | "legacy-to-octo"  // Phase B: very-legacy plugin id "dmwork" present
+  | "rebrand"         // Phase B: openclaw-channel-dmwork or channels.dmwork residue
+  | "legacy"          // Deprecated alias for legacy-to-octo (kept for backward compat)
+  | "legacy-warn"     // Deprecated alias for rebrand (kept for tests / backward compat)
+  | "update"          // octo healthy installed
+  | "fresh"           // nothing relevant present
+  | "deadlock"        // channels.octo exists but plugin missing
+  | "broken";         // octo partial install
 
 export function detectScenario(): UpgradeScenario {
   const cfg = readConfigFromFile();
   const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
 
-  // Very-legacy plugin id "dmwork" (predecessor of openclaw-channel-dmwork).
-  // Phase A: detected but not migrated; install just warns and falls through.
-  // Phase B: full legacy-to-octo migration path.
-  const hasLegacyDir = existsSync(resolve(extDir, VERY_LEGACY_PLUGIN_ID));
-  const hasLegacyEntries = Boolean(cfg?.plugins?.entries?.[VERY_LEGACY_PLUGIN_ID]);
-  const hasLegacyInstalls = Boolean(cfg?.plugins?.installs?.[VERY_LEGACY_PLUGIN_ID]);
-  const hasLegacy = hasLegacyDir || hasLegacyEntries || hasLegacyInstalls;
+  // Priority 1: very-legacy plugin id "dmwork" (predates openclaw-channel-dmwork).
+  // Phase B routes to runLegacyToOctoMigration().
+  if (hasVeryLegacyPluginArtifacts(cfg)) return "legacy-to-octo";
 
-  // Intermediate plugin id "openclaw-channel-dmwork" (the package being rebranded
-  // to openclaw-channel-octo). LEGACY-DETECT: Phase A merely warns; Phase B
-  // performs full rebrand migration.
-  const hasIntermediateDir = existsSync(resolve(extDir, LEGACY_PLUGIN_ID));
-  const hasIntermediateEntries = Boolean(cfg?.plugins?.entries?.[LEGACY_PLUGIN_ID]);
-  const hasIntermediateInstalls = Boolean(cfg?.plugins?.installs?.[LEGACY_PLUGIN_ID]);
+  // Priority 2: openclaw-channel-dmwork OR channels.dmwork OR bindings(channel=dmwork).
+  // Triggers even when octo is also present — handles half-completed migrations
+  // (e.g., crashed after channels.octo but before bindings rewrite).
+  // Phase B routes to runRebrandMigration().
+  if (hasLegacyPluginArtifacts(cfg)) return "rebrand";
 
   // Current octo plugin presence
   const hasNewDir = existsSync(resolve(extDir, PLUGIN_ID));
@@ -922,35 +925,41 @@ export function detectScenario(): UpgradeScenario {
   const isHealthy = inspectOk || (hasNewDir && hasNewEntries && hasNewInstalls);
   const hasNewPartial = (hasNewDir || hasNewEntries || hasNewInstalls) && !isHealthy;
 
-  // LEGACY-DETECT: legacy channels.dmwork or bindings(channel=dmwork) residue
-  const hasDmworkChannel = Boolean(cfg?.channels?.dmwork);
-  const hasDmworkBindings = Array.isArray(cfg?.bindings) &&
-    (cfg.bindings as any[]).some((b: any) => b?.match?.channel === "dmwork");
-  const hasIntermediate =
-    hasIntermediateDir || hasIntermediateEntries || hasIntermediateInstalls ||
-    hasDmworkChannel || hasDmworkBindings;
-
-  if (hasLegacy) return "legacy";
   if (isHealthy) return "update";
   if (hasNewPartial) return "broken";
-  if (hasIntermediate) return "legacy-warn";
+
+  // Priority: channels.octo without plugin → deadlock (config exists but no plugin)
+  if (cfg?.channels?.[CHANNEL_ID]) return "deadlock";
+
   return "fresh";
 }
 
-export function isHealthyInstall(): boolean {
+export function isHealthyInstall(pluginId: string = PLUGIN_ID): boolean {
   const cfg = readConfigFromFile();
   const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
-  const hasNewDir = existsSync(resolve(extDir, PLUGIN_ID));
-  const hasNewEntries = Boolean(cfg?.plugins?.entries?.[PLUGIN_ID]);
-  const hasNewInstalls = Boolean(cfg?.plugins?.installs?.[PLUGIN_ID]);
-  const inspectOk = Boolean(pluginsInspect(PLUGIN_ID)?.plugin);
-  return inspectOk || (hasNewDir && hasNewEntries && hasNewInstalls);
+  const hasDir = existsSync(resolve(extDir, pluginId));
+  const hasEntries = Boolean(cfg?.plugins?.entries?.[pluginId]);
+  const hasInstalls = Boolean(cfg?.plugins?.installs?.[pluginId]);
+  const inspectOk = Boolean(pluginsInspect(pluginId)?.plugin);
+  return inspectOk || (hasDir && hasEntries && hasInstalls);
 }
 
+/**
+ * Ensure `plugins.allow` exists and contains `pluginId`.
+ *
+ * On OpenClaw 4.20 the default config has no `plugins.allow` field at all —
+ * gateway falls back to "auto-load anything in extensions/" but logs a
+ * hardening warning every restart. We create the array if missing so the
+ * recommendation is satisfied for users we migrate.
+ *
+ * Idempotent: returns silently if the plugin is already in allow.
+ */
 export function ensurePluginsAllow(pluginId: string = PLUGIN_ID): void {
   try {
     const cfg = readConfigFromFile();
-    if (!cfg?.plugins?.allow || !Array.isArray(cfg.plugins.allow)) return;
+    if (!cfg) return;
+    cfg.plugins ??= {};
+    if (!Array.isArray(cfg.plugins.allow)) cfg.plugins.allow = [];
     if (cfg.plugins.allow.includes(pluginId)) return;
     cfg.plugins.allow.push(pluginId);
     writeConfigAtomic(cfg);
@@ -1112,18 +1121,18 @@ export function restoreChannelConfigFromDisk(): void {
   } catch { /* best effort */ }
 }
 
-export function cleanupBrokenInstall(): string[] {
+export function cleanupBrokenInstall(pluginId: string = PLUGIN_ID): string[] {
   const actions: string[] = [];
   const cfg = readConfigFromFile();
   const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
-  const pluginDir = resolve(extDir, PLUGIN_ID);
+  const pluginDir = resolve(extDir, pluginId);
 
   const hasDir = existsSync(pluginDir);
-  const hasEntries = Boolean(cfg?.plugins?.entries?.[PLUGIN_ID]);
-  const hasInstalls = Boolean(cfg?.plugins?.installs?.[PLUGIN_ID]);
+  const hasEntries = Boolean(cfg?.plugins?.entries?.[pluginId]);
+  const hasInstalls = Boolean(cfg?.plugins?.installs?.[pluginId]);
 
   // Use same healthy definition as detectScenario(): inspect OK OR all 3 artifacts present
-  const inspectOk = Boolean(pluginsInspect(PLUGIN_ID)?.plugin);
+  const inspectOk = Boolean(pluginsInspect(pluginId)?.plugin);
   const isHealthy = inspectOk || (hasDir && hasEntries && hasInstalls);
   if (isHealthy) return actions; // Actually healthy, nothing to clean
 
@@ -1131,7 +1140,7 @@ export function cleanupBrokenInstall(): string[] {
   if (hasDir) {
     try {
       rmSync(pluginDir, { recursive: true, force: true });
-      actions.push("Removed broken/orphan plugin directory");
+      actions.push(`Removed broken/orphan plugin directory (${pluginId})`);
     } catch { /* best effort */ }
   }
 
@@ -1139,18 +1148,299 @@ export function cleanupBrokenInstall(): string[] {
   if (cfg && (hasEntries || hasInstalls)) {
     let changed = false;
     if (hasEntries) {
-      delete cfg.plugins!.entries![PLUGIN_ID];
+      delete cfg.plugins!.entries![pluginId];
       changed = true;
     }
     if (hasInstalls) {
-      delete cfg.plugins!.installs![PLUGIN_ID];
+      delete cfg.plugins!.installs![pluginId];
       changed = true;
     }
     if (changed) {
       writeConfigAtomic(cfg);
-      actions.push("Cleaned stale config entries");
+      actions.push(`Cleaned stale config entries (${pluginId})`);
     }
   }
 
   return actions;
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: command-style plugin lifecycle with 4.20 fallback
+//
+// rebrand / legacy-to-octo migration prefers the explicit `openclaw plugins
+// disable|enable|uninstall` commands so OpenClaw's own state machine handles
+// each transition. Older OpenClaw versions (4.20 era) lack these subcommands;
+// we fall back to direct config edits.
+// ---------------------------------------------------------------------------
+
+function isUnknownCommandError(err: unknown): boolean {
+  const sources = [
+    (err as any)?.stderr?.toString?.(),
+    (err as any)?.stdout?.toString?.(),
+    (err as any)?.message,
+    String(err),
+  ];
+  return sources.some(
+    (s) => s && /unknown command|unrecognized command|invalid command/i.test(s),
+  );
+}
+
+/**
+ * Disable a plugin via `openclaw plugins disable <id>` with a 4.20 fallback
+ * to setting `plugins.entries.<id>.enabled = false` directly.
+ *
+ * Idempotent: returns silently if the plugin is already disabled or not present.
+ */
+export function pluginsDisable(id: string): void {
+  try {
+    runOpenclaw(["plugins", "disable", id], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return;
+  } catch (err) {
+    if (!isUnknownCommandError(err)) {
+      // Plugin may already be disabled or not installed — both are OK
+      if (isPluginNotInstalledError(err)) return;
+      throw err;
+    }
+  }
+  // 4.20 fallback: edit cfg directly
+  try {
+    const cfg = readConfigFromFile();
+    if (!cfg) return;
+    const entry = cfg.plugins?.entries?.[id];
+    if (!entry) return;
+    if (entry.enabled === false) return;
+    entry.enabled = false;
+    writeConfigAtomic(cfg);
+  } catch { /* best effort */ }
+}
+
+/**
+ * Enable a plugin via `openclaw plugins enable <id>` with a 4.20 fallback
+ * to setting `plugins.entries.<id>.enabled = true` directly.
+ *
+ * Distinct from {@link ensurePluginEnabled} which is the post-install self-heal
+ * for 4.x→5.x upgrade-induced resets. This helper is used by migration paths
+ * that explicitly toggle plugin state.
+ */
+export function pluginsEnable(id: string): void {
+  try {
+    runOpenclaw(["plugins", "enable", id], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return;
+  } catch (err) {
+    if (!isUnknownCommandError(err)) {
+      if (isPluginNotInstalledError(err)) return;
+      throw err;
+    }
+  }
+  // 4.20 fallback
+  ensurePluginEnabled(id);
+}
+
+/**
+ * Snapshot a plugin's install state for rollback.
+ * `installed` is the OR-set across pluginsInspect, plugins.entries,
+ * plugins.installs, plugins.allow — matches the broadest possible signal so
+ * rollback knows whether to re-enable, re-add to allow, or simply do nothing.
+ */
+export interface PluginSnapshot {
+  id: string;
+  installed: boolean;
+  enabled: boolean | null;
+  version: string | null;
+  installPath: string | null;
+  inAllow: boolean;
+}
+
+export function capturePluginState(id: string): PluginSnapshot {
+  const state = resolvePluginState(id);
+  const cfg = readConfigFromFile();
+  const inAllow = Array.isArray(cfg?.plugins?.allow)
+    ? cfg!.plugins!.allow.includes(id)
+    : false;
+
+  // Broaden installed beyond resolvePluginState's strict criteria — for rollback
+  // we want to capture even partial residue so re-enable can put things back.
+  const hasEntry = Boolean(cfg?.plugins?.entries?.[id]);
+  const hasInstall = Boolean(cfg?.plugins?.installs?.[id]);
+  const broadInstalled = state.installed || hasEntry || hasInstall || inAllow;
+
+  return {
+    id,
+    installed: broadInstalled,
+    enabled: state.enabled ?? (cfg?.plugins?.entries?.[id]?.enabled ?? null),
+    version: state.version,
+    installPath: state.installPath,
+    inAllow,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: bindings save/restore with channel rewrite + dedupe
+// ---------------------------------------------------------------------------
+
+/**
+ * Read all bindings on a given channel from the config file.
+ * Returns a fresh array snapshot (not a reference into cfg).
+ */
+export function saveBindingsFromFile(channelId: string): any[] {
+  const cfg = readConfigFromFile();
+  if (!Array.isArray(cfg?.bindings)) return [];
+  return cfg.bindings
+    .filter((b: any) => b?.match?.channel === channelId)
+    .map((b: any) => structuredClone(b));
+}
+
+/**
+ * Drop all bindings on a given channel from the config file.
+ * Idempotent. Creates a .bak before writing.
+ */
+export function removeBindingsFromFile(channelId: string): void {
+  try {
+    const configPath = getConfigFilePathSafe();
+    copyFileSync(configPath, configPath + ".bak");
+    const cfg = readConfigFromFile();
+    if (!Array.isArray(cfg?.bindings)) return;
+    const before = cfg.bindings.length;
+    cfg.bindings = cfg.bindings.filter((b: any) => b?.match?.channel !== channelId);
+    if (cfg.bindings.length !== before) {
+      writeConfigAtomic(cfg);
+    }
+  } catch { /* best effort */ }
+}
+
+/**
+ * Append the saved bindings back to cfg.bindings, rewriting `match.channel`
+ * from `fromCh` to `toCh`. Dedupes by (agentId, accountId) — if cfg already has
+ * a binding with the same key, the saved one is dropped (existing wins).
+ *
+ * Returns the count of bindings actually appended (after dedupe).
+ */
+export function restoreBindingsToFile(
+  saved: any[],
+  fromCh: string,
+  toCh: string,
+): number {
+  if (!saved.length) return 0;
+  const cfg = readConfigFromFile();
+  if (!cfg) return 0;
+  if (!Array.isArray(cfg.bindings)) cfg.bindings = [];
+
+  // Bindings shape: agentId is top-level; match holds {channel, accountId}.
+  const keyOf = (b: any) =>
+    `${b?.agentId ?? ""}:${b?.match?.accountId ?? ""}`;
+  const existingKeys = new Set<string>(
+    cfg.bindings
+      .filter((b: any) => b?.match?.channel === toCh)
+      .map(keyOf),
+  );
+
+  let appended = 0;
+  for (const b of saved) {
+    if (b?.match?.channel !== fromCh) continue; // safety
+    const rewritten = structuredClone(b);
+    rewritten.match.channel = toCh;
+    if (existingKeys.has(keyOf(rewritten))) continue;
+    cfg.bindings.push(rewritten);
+    existingKeys.add(keyOf(rewritten));
+    appended++;
+  }
+
+  if (appended > 0) {
+    const configPath = getConfigFilePathSafe();
+    copyFileSync(configPath, configPath + ".bak");
+    writeConfigAtomic(cfg);
+  }
+  return appended;
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: workspace dir migration
+// ---------------------------------------------------------------------------
+
+/**
+ * Move ~/.openclaw/workspace/<fromChannel>/ → ~/.openclaw/workspace/<toChannel>/.
+ * Best-effort: returns true on success (or no-op when source doesn't exist),
+ * false if the rename fails.
+ *
+ * Called as a post-step after install verification succeeds. Failure here only
+ * means the user loses cached workspace artifacts (regenerable), not bot config.
+ */
+export function migrateWorkspaceDir(fromChannel: string, toChannel: string): boolean {
+  const wsRoot = getConfigFilePathSafe().replace(/openclaw\.json$/, "workspace");
+  const fromDir = resolve(wsRoot, fromChannel);
+  const toDir = resolve(wsRoot, toChannel);
+
+  if (!existsSync(fromDir)) return true; // nothing to migrate
+  if (existsSync(toDir)) {
+    // Destination already populated by fresh install; leave both intact.
+    // Caller decides whether to merge manually.
+    return true;
+  }
+
+  try {
+    if (!existsSync(wsRoot)) mkdirSync(wsRoot, { recursive: true });
+    renameSync(fromDir, toDir);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remove ~/.openclaw/workspace/<channelId>/ if it's empty.
+ * Used after a successful migration to tidy up the legacy workspace root.
+ */
+export function cleanupStaleWorkspaceIfEmpty(channelId: string): void {
+  const wsRoot = getConfigFilePathSafe().replace(/openclaw\.json$/, "workspace");
+  const dir = resolve(wsRoot, channelId);
+  if (!existsSync(dir)) return;
+  try {
+    const entries = readdirSync(dir);
+    if (entries.length === 0) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } catch { /* best effort */ }
+}
+
+// ---------------------------------------------------------------------------
+// Phase B: legacy artifact predicates
+// ---------------------------------------------------------------------------
+
+/**
+ * True if the very-legacy plugin id "dmwork" has any presence —
+ * extension dir, plugins.entries, plugins.installs, or plugins.allow.
+ *
+ * Predates `openclaw-channel-dmwork`. Detection takes priority over rebrand.
+ */
+export function hasVeryLegacyPluginArtifacts(cfg: Record<string, any> | null): boolean {
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const hasDir = existsSync(resolve(extDir, VERY_LEGACY_PLUGIN_ID));
+  const hasEntry = Boolean(cfg?.plugins?.entries?.[VERY_LEGACY_PLUGIN_ID]);
+  const hasInstall = Boolean(cfg?.plugins?.installs?.[VERY_LEGACY_PLUGIN_ID]);
+  const inAllow = Array.isArray(cfg?.plugins?.allow) &&
+    cfg.plugins.allow.includes(VERY_LEGACY_PLUGIN_ID);
+  return hasDir || hasEntry || hasInstall || inAllow;
+}
+
+/**
+ * True if the intermediate plugin id "openclaw-channel-dmwork" has any
+ * presence — covers full installs as well as residual config-only state.
+ *
+ * Triggers the rebrand migration path.
+ */
+export function hasLegacyPluginArtifacts(cfg: Record<string, any> | null): boolean {
+  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+  const hasDir = existsSync(resolve(extDir, LEGACY_PLUGIN_ID));
+  const hasEntry = Boolean(cfg?.plugins?.entries?.[LEGACY_PLUGIN_ID]);
+  const hasInstall = Boolean(cfg?.plugins?.installs?.[LEGACY_PLUGIN_ID]);
+  const inAllow = Array.isArray(cfg?.plugins?.allow) &&
+    cfg.plugins.allow.includes(LEGACY_PLUGIN_ID);
+  const hasChannel = Boolean(cfg?.channels?.[LEGACY_CHANNEL_ID]);
+  const hasBindings = Array.isArray(cfg?.bindings) &&
+    (cfg.bindings as any[]).some((b: any) => b?.match?.channel === LEGACY_CHANNEL_ID);
+  return hasDir || hasEntry || hasInstall || inAllow || hasChannel || hasBindings;
 }

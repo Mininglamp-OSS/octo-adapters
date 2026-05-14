@@ -5,6 +5,8 @@ dist/
 *.d.ts
 !vitest.config.ts
 !bin/**
+!shim-stub/bin/**
+!scripts/**
 .claude/
 CLAUDE.md
 *.bak

@@ -1,2 +1,3 @@
 #!/usr/bin/env node
-import "../dist/cli/index.js";
+import { main } from "../dist/cli/index.js";
+main();

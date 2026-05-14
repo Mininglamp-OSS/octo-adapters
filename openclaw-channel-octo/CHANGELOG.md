@@ -27,11 +27,27 @@ and renamed to align with the Octo product brand.
   `getChannelConfig` / `ensureChannelConfigObject` helpers used by the rest of
   the codebase to avoid hardcoded `dmwork` / `octo` strings.
 - `cli/utils.ts`: `channelConfigPath()` for `configGet/configSet` paths.
-- New install scenario `legacy-warn`: when a residual
-  `openclaw-channel-dmwork` install or `channels.dmwork` config is detected,
-  install logs a deprecation warning and otherwise behaves as a fresh install
-  (legacy plugin and config are left intact). Full automatic migration is
-  scheduled for a follow-up release.
+- **Automatic migration from `openclaw-channel-dmwork`**:
+  `install` detects a legacy `openclaw-channel-dmwork` plugin (or
+  `channels.dmwork` / bindings(channel=dmwork) residue) and runs a
+  command-driven migration — disable legacy → install octo → enable octo →
+  rewrite channels.dmwork to channels.octo → rewrite bindings'
+  `match.channel` to "octo" (deduped by `(agentId, accountId)`) → uninstall
+  legacy → migrate workspace dir. The flow is transactional: any failure in
+  the install/restore phase rolls back to the pre-migration `.bak` and
+  re-enables the legacy plugin if it was enabled.
+- **Automatic migration from very-legacy `dmwork` plugin id**:
+  takes priority over the `openclaw-channel-dmwork` rebrand; flat
+  `channels.dmwork.botToken` shape is normalized to nested
+  `channels.octo.accounts.default`.
+- **Companion shim package `openclaw-channel-dmwork`**: published in lockstep
+  with this package; depends on `openclaw-channel-octo` at the same exact
+  version and forwards `npx -y openclaw-channel-dmwork ...` invocations to
+  the canonical CLI entry. Existing BotFather scripts continue to work without
+  changes.
+- **`exports["./cli"]` subpath export**: the shim package consumes the CLI
+  via `await import("openclaw-channel-octo/cli")`. The CLI's `main()` is now
+  exported explicitly instead of running on import.
 
 ### Backwards compatibility (legacy aliases kept for one release cycle)
 
@@ -48,11 +64,10 @@ These aliases are scheduled for removal in a future minor release.
 
 ### Removed
 
-- Phase A drops the active `legacy` migration scenario from the install
-  switch (it now warns rather than migrating). The migration helpers
-  themselves remain in `cli/install.ts` as `LEGACY-MIGRATION`-tagged dead
-  code, ready for the follow-up that re-wires them as a proper
-  `dmwork → octo` rebrand path.
+- The Phase-A `legacy-warn` scenario (warned but did not migrate). It is
+  superseded by the active `rebrand` and `legacy-to-octo` scenarios above.
+  Existing `legacy` and `legacy-warn` strings still resolve to the new
+  migration paths for backward compatibility.
 
 ---
 
