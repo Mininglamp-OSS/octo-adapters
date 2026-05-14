@@ -1,0 +1,146 @@
+/** Octo Bot API types (legacy DMWorkGroupConfig type name kept for internal use) */
+
+export interface BotRegisterReq {
+  name?: string;
+}
+
+export interface BotRegisterResp {
+  robot_id: string;
+  im_token: string;
+  ws_url: string;
+  api_url: string;
+  owner_uid: string;
+  owner_channel_id: string;
+}
+
+export interface BotSendMessageReq {
+  channel_id: string;
+  channel_type: ChannelType;
+  stream_no?: string;
+  payload: MessagePayload;
+}
+
+export interface BotTypingReq {
+  channel_id: string;
+  channel_type: ChannelType;
+}
+
+export interface BotReadReceiptReq {
+  channel_id: string;
+  channel_type: ChannelType;
+}
+
+export interface BotEventsReq {
+  event_id: number;
+  limit?: number;
+}
+
+
+
+export interface BotMessage {
+  message_id: string;
+  message_seq: number;
+  from_uid: string;
+  channel_id?: string;
+  channel_type?: ChannelType;
+  timestamp: number;
+  payload: MessagePayload;
+}
+
+/**
+ * 单个 mention 的精确位置描述。
+ * offset/length 的单位为 UTF-16 code units（与 JS string.length 一致）。
+ */
+export interface MentionEntity {
+  /** 被 @ 用户的唯一标识符 */
+  uid: string;
+  /** @name 在 content 中的起始位置（包括 @ 符号） */
+  offset: number;
+  /** @name 的完整长度（包括 @ 符号） */
+  length: number;
+}
+
+export interface MentionPayload {
+  uids?: string[];
+  entities?: MentionEntity[];
+  all?: boolean | number; // true or 1 = @all (API returns either depending on version)
+}
+
+export interface ReplyPayload {
+  payload?: MessagePayload;
+  from_uid?: string;
+  from_name?: string;
+}
+
+export interface MessagePayload {
+  type: MessageType;
+  content?: string;
+  url?: string;
+  name?: string;
+  mention?: MentionPayload;
+  reply?: ReplyPayload;
+  event?: {
+    type: string;       // "group_md_updated" | "group_md_deleted" | "thread_md_updated" | "thread_md_deleted"
+    version?: number;
+    updated_by?: string;
+    group_no?: string;   // thread_md_* events only
+    short_id?: string;   // thread_md_* events only
+  };
+  [key: string]: unknown;
+}
+
+export interface BotStreamStartReq {
+  channel_id: string;
+  channel_type: ChannelType;
+  payload: string; // base64 encoded
+}
+
+export interface BotStreamStartResp {
+  stream_no: string;
+}
+
+export interface BotStreamEndReq {
+  stream_no: string;
+  channel_id: string;
+  channel_type: ChannelType;
+}
+
+export interface SendMessageResult {
+  message_id: string;  // string due to int64 protection in postJson
+  client_msg_no: string;
+  message_seq: number;
+}
+
+/** Channel types */
+export enum ChannelType {
+  DM = 1,
+  Group = 2,
+  CommunityTopic = 5, // Thread/子区
+}
+
+/** Message content types */
+export enum MessageType {
+  Text = 1,
+  Image = 2,
+  GIF = 3,
+  Voice = 4,
+  Video = 5,
+  Location = 6,
+  Card = 7,
+  File = 8,
+  MultipleForward = 11,
+}
+
+/** Plugin config */
+export interface DMWorkGroupConfig {
+  requireMention?: boolean;
+  enabled?: boolean;
+}
+
+/** Minimal logger interface used across modules. */
+export type LogSink = {
+  info?: (msg: string) => void;
+  error?: (msg: string) => void;
+  warn?: (msg: string) => void;
+  debug?: (msg: string) => void;
+};

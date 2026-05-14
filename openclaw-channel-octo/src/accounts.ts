@@ -1,0 +1,95 @@
+import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import { DEFAULT_ACCOUNT_ID } from "./sdk-compat.js";
+import type { DmworkConfig } from "./config-schema.js";
+import { getChannelConfig } from "./constants.js";
+
+export type DmworkAccountConfig = DmworkConfig & {
+  accounts?: Record<string, DmworkConfig | undefined>;
+};
+
+export type ResolvedDmworkAccount = {
+  accountId: string;
+  name?: string;
+  enabled: boolean;
+  configured: boolean;
+  config: {
+    botToken?: string;
+    apiUrl: string;
+    wsUrl?: string;
+    cdnUrl?: string;  // CDN base URL for media files (public-read, no auth)
+    pollIntervalMs: number;
+    heartbeatIntervalMs: number;
+    requireMention?: boolean;
+    ignoreMentionAll?: boolean;
+    historyLimit?: number;  // 群聊历史消息条数限制
+    historyPromptTemplate?: string;  // Template for group history context injection
+  };
+};
+
+const DEFAULT_API_URL = "http://localhost:8090";
+const DEFAULT_POLL_INTERVAL_MS = 2000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 30000;
+
+export function listDmworkAccountIds(cfg: OpenClawConfig): string[] {
+  const channel = getChannelConfig<DmworkAccountConfig>(cfg);
+  const accountIds = Object.keys(channel.accounts ?? {});
+  if (accountIds.length > 0) {
+    return accountIds;
+  }
+  return [DEFAULT_ACCOUNT_ID];
+}
+
+export function resolveDefaultDmworkAccountId(cfg: OpenClawConfig): string | null {
+  const channel = getChannelConfig<DmworkAccountConfig>(cfg);
+  const accountIds = Object.keys(channel.accounts ?? {});
+  // Single account or legacy config (no accounts map): safe to default
+  if (accountIds.length <= 1) {
+    return accountIds[0] ?? DEFAULT_ACCOUNT_ID;
+  }
+  // Multiple accounts: cannot guess, caller must specify
+  return null;
+}
+
+export function resolveDmworkAccount(params: {
+  cfg: OpenClawConfig;
+  accountId?: string | null;
+}): ResolvedDmworkAccount {
+  const accountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
+  const channel = getChannelConfig<DmworkAccountConfig>(params.cfg);
+  const accountConfig = channel.accounts?.[accountId] ?? channel;
+
+  const botToken = accountConfig.botToken ?? channel.botToken;
+  const apiUrl = accountConfig.apiUrl ?? channel.apiUrl ?? DEFAULT_API_URL;
+  const wsUrl = accountConfig.wsUrl ?? channel.wsUrl;
+  const cdnUrl = accountConfig.cdnUrl ?? channel.cdnUrl;
+  const pollIntervalMs =
+    accountConfig.pollIntervalMs ??
+    channel.pollIntervalMs ??
+    DEFAULT_POLL_INTERVAL_MS;
+  const heartbeatIntervalMs =
+    accountConfig.heartbeatIntervalMs ??
+    channel.heartbeatIntervalMs ??
+    DEFAULT_HEARTBEAT_INTERVAL_MS;
+
+  const enabled = accountConfig.enabled ?? channel.enabled ?? true;
+  const configured = Boolean(botToken?.trim());
+
+  return {
+    accountId,
+    name: accountConfig.name ?? channel.name,
+    enabled,
+    configured,
+    config: {
+      botToken,
+      apiUrl,
+      wsUrl,
+      cdnUrl,
+      pollIntervalMs,
+      heartbeatIntervalMs,
+      requireMention: accountConfig.requireMention ?? channel.requireMention,
+      ignoreMentionAll: accountConfig.ignoreMentionAll ?? channel.ignoreMentionAll,
+      historyLimit: accountConfig.historyLimit ?? channel.historyLimit ?? 20,
+      historyPromptTemplate: accountConfig.historyPromptTemplate ?? channel.historyPromptTemplate,
+    },
+  };
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.js
+*.js.map
+*.d.ts
+!vitest.config.ts
+!bin/**
+.claude/
+CLAUDE.md
+*.bak
+*.bak2
+openclaw-channel-octo-*.tgz
