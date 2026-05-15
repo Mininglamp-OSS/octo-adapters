@@ -4,7 +4,12 @@ on:
   pull_request_target:
     types: [opened, closed, reopened, ready_for_review, review_requested]
 
-permissions: {}  # GITHUB_TOKEN not used; lock down to minimum
+# Minimum permissions: the @v1 reusable workflow checks out
+# Mininglamp-OSS/.github scripts via actions/checkout, which needs
+# contents:read. (The prior SHA-pinned version used inline Python
+# and needed no token at all — see PR #21 review.)
+permissions:
+  contents: read
 
 jobs:
   notify:
