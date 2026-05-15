@@ -19,7 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        package: [openclaw-channel-dmwork, openclaw-channel-octo]
+        include:
+          - package: openclaw-channel-dmwork
+            install_cmd: npm install
+          - package: openclaw-channel-octo
+            install_cmd: npm ci
     defaults:
       run:
         working-directory: ${{ matrix.package }}
@@ -31,7 +35,7 @@ jobs:
           node-version: '22'
 
       - name: Install dependencies
-        run: npm ci
+        run: ${{ matrix.install_cmd }}
 
       - name: Type-check
         run: npm run type-check
