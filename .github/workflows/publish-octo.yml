@@ -161,7 +161,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "[publish_shim] version=$VERSION dist-tag=$DIST_TAG dry_run='$DRY'"
       - name: type-check
-        working-directory: ${{ env.PKG_DIR }}
+        working-directory: openclaw-channel-dmwork
         run: npm ci --ignore-scripts && npm run type-check
       - name: build shim
         env:
