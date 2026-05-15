@@ -121,26 +121,26 @@ export async function runDoctorChecks(params: {
 
     const cfg = readConfigFromFile();
     if (cfg) {
-      const hasDmworkChannel = Boolean(getChannelConfig(cfg));
+      const hasOctoChannel = Boolean(getChannelConfig(cfg));
 
-      // Orphaned dmwork bindings
+      // Orphaned octo bindings
       const bindings = cfg.bindings as Array<{ agentId: string; match?: { channel?: string; accountId?: string } }> | undefined;
-      const dmworkBindings = bindings?.filter((b) => b.match?.channel === CHANNEL_ID) ?? [];
+      const octoBindings = bindings?.filter((b) => b.match?.channel === CHANNEL_ID) ?? [];
       const configuredAccounts = getChannelConfig<any>(cfg).accounts
         ? Object.keys(getChannelConfig<any>(cfg).accounts)
         : [];
 
-      if (dmworkBindings.length > 0 && !hasDmworkChannel) {
-        // All dmwork bindings are orphaned — no channel config at all
+      if (octoBindings.length > 0 && !hasOctoChannel) {
+        // All octo bindings are orphaned — no channel config at all
         removeOrphanedBindingsFromFile(CHANNEL_ID);
         checks.push({
           name: "Orphaned bindings",
           status: "FIXED",
-          detail: `Removed ${dmworkBindings.length} orphaned dmwork binding(s)`,
+          detail: `Removed ${octoBindings.length} orphaned octo binding(s)`,
         });
-      } else if (dmworkBindings.length > 0 && configuredAccounts.length > 0) {
+      } else if (octoBindings.length > 0 && configuredAccounts.length > 0) {
         // Check for bindings referencing non-existent accounts
-        const orphaned = dmworkBindings.filter(
+        const orphaned = octoBindings.filter(
           (b) => b.match?.accountId && !configuredAccounts.includes(b.match.accountId),
         );
         if (orphaned.length > 0) {

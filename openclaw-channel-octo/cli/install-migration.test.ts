@@ -808,3 +808,103 @@ describe("runInstall — legacy-to-octo scenario (very-legacy 'dmwork' → octo)
     expect(state.cfg.plugins.entries["openclaw-channel-dmwork"]).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// deadlock scenario (channels.octo exists but plugin not installed)
+// ---------------------------------------------------------------------------
+
+describe("runInstall — deadlock scenario (channels.octo without plugin)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("removes channel + bindings before pluginsInstall, restores after enable", async () => {
+    // Reviewer-flagged regression (Jerry-Xin, round 4): runDeadlockRepair
+    // must remove bindings(channel=octo) before pluginsInstall, otherwise
+    // an OpenClaw config validator that rejects bindings referencing an
+    // unregistered channel id can re-trap the user in the same deadlock.
+    // Symmetric with runMigration step 4 (channel + bindings removed
+    // before install, restored after enable).
+    const state = setupFs({
+      cfg: {
+        // No plugin installed (no entries / installs / extension dir)
+        plugins: { entries: {}, installs: {}, allow: [] },
+        channels: {
+          // channels.octo exists in config — that's the deadlock
+          octo: { accounts: { mybot: { botToken: "bf_xxx" } } },
+        },
+        bindings: [
+          // Binding on channel=octo predates plugin installation
+          { agentId: "agent1", match: { channel: "octo", accountId: "mybot" } },
+        ],
+      },
+      extDirs: [],
+    });
+    await applyFsMocks(state);
+
+    const inspectMap: Record<string, any> = {};
+    mockExecFileSync.mockImplementation((cmd: any, args: any) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.5.7\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        const id = a[2];
+        const r = inspectMap[id];
+        if (!r) { const e: any = new Error("not found"); e.stderr = "not found"; throw e; }
+        return JSON.stringify(r);
+      }
+      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
+        // Side effect: at this point, channels.octo and bindings(channel=octo)
+        // must ALREADY be removed (asserted below). pluginsInstall populates
+        // plugin records.
+        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
+        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("openclaw-channel-octo");
+        inspectMap["openclaw-channel-octo"] = { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } };
+        return "";
+      }
+      if (a[0] === "plugins" && (a[1] === "enable" || a[1] === "disable")) return "";
+      if (a[0] === "gateway") return "";
+      if (cmd === "npm" && a[0] === "view") return "1.0.0\n";
+      return "";
+    });
+
+    // Capture cfg state at the moment pluginsInstall is invoked, so we can
+    // assert that channels + bindings were removed first.
+    const stateAtInstall: { hadChannel: boolean; hadBinding: boolean } = {
+      hadChannel: true,
+      hadBinding: true,
+    };
+    const origImpl = mockExecFileSync.getMockImplementation();
+    mockExecFileSync.mockImplementation((cmd: any, args: any) => {
+      const a = args as string[];
+      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
+        // At install time, neither channels.octo nor bindings(channel=octo)
+        // should be in cfg yet — they were temporarily removed.
+        stateAtInstall.hadChannel = Boolean(state.cfg.channels?.octo);
+        stateAtInstall.hadBinding = Array.isArray(state.cfg.bindings) &&
+          state.cfg.bindings.some((b: any) => b?.match?.channel === "octo");
+      }
+      return origImpl!(cmd, args, undefined as any) as any;
+    });
+
+    const { runInstall } = await loadInstall();
+    await runInstall({ force: false, dev: false });
+
+    // Assertion 1: channel + bindings were removed BEFORE pluginsInstall
+    expect(stateAtInstall.hadChannel).toBe(false);
+    expect(stateAtInstall.hadBinding).toBe(false);
+
+    // Assertion 2: after the full repair, channel + binding are back
+    expect(state.cfg.channels?.octo?.accounts?.mybot?.botToken).toBe("bf_xxx");
+    const restoredBindings = (state.cfg.bindings as any[]).filter(
+      (b) => b?.match?.channel === "octo",
+    );
+    expect(restoredBindings).toHaveLength(1);
+    expect(restoredBindings[0].agentId).toBe("agent1");
+    expect(restoredBindings[0].match.accountId).toBe("mybot");
+
+    // Assertion 3: plugin is now installed and enabled
+    expect(state.cfg.plugins.entries["openclaw-channel-octo"]?.enabled).toBe(true);
+  });
+});

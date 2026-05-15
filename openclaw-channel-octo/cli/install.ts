@@ -523,6 +523,16 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
     console.log(`  Temporarily removed channels.${CHANNEL_ID}.`);
   }
 
+  // Symmetric with runMigration step 4: also remove bindings on the channel
+  // before pluginsInstall. Some OpenClaw versions reject loading a config
+  // that has bindings referencing an unregistered channel id; without this,
+  // the deadlock-repair install itself can fail and re-trap the user in the
+  // same deadlock. We restore the bindings (deduped) after enable.
+  if (savedBindings.length > 0) {
+    removeBindingsFromFile(CHANNEL_ID);
+    console.log(`  Temporarily removed ${savedBindings.length} bindings on channel=${CHANNEL_ID}.`);
+  }
+
   try {
     console.log(`  Installing ${PLUGIN_ID}...`);
     pluginsInstall(spec, quiet);
@@ -546,11 +556,11 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
     throw new Error("Deadlock repair failed: post-install verification did not pass");
   }
 
-  // Wrap the post-install enable + channel restore in the same try/catch
-  // shape as runMigration's steps 6-9: an unexpected throw from
-  // ensurePluginsAllow / pluginsEnable / restoreChannelConfigToFile would
-  // otherwise leave the user with channels.<id> removed (step above) but
-  // never restored. Restore from backup on any failure.
+  // Wrap the post-install enable + channel/binding restore in the same
+  // try/catch shape as runMigration's steps 6-9: an unexpected throw from
+  // ensurePluginsAllow / pluginsEnable / restoreChannelConfigToFile /
+  // restoreBindingsToFile would otherwise leave the user with channels.<id>
+  // and bindings removed but never restored. Restore from backup on failure.
   let restoredCfg: any;
   let restoredOk = false;
   try {
@@ -559,6 +569,10 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
 
     if (savedChannelConfig) {
       restoreChannelConfigToFile(savedChannelConfig, CHANNEL_ID);
+    }
+
+    if (savedBindings.length > 0) {
+      restoreBindingsToFile(savedBindings, CHANNEL_ID, CHANNEL_ID);
     }
 
     restoredCfg = readConfigFromFile();
@@ -576,21 +590,6 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
     console.log("  Deadlock repaired!");
   } else {
     throw new Error(`Deadlock repair incomplete: plugin installed but channels.${CHANNEL_ID} could not be restored. Backup kept at ${backupPath}`);
-  }
-
-  // Re-add bindings (should still be there; this is just defensive)
-  if (savedBindings.length > 0 && Array.isArray(restoredCfg?.bindings)) {
-    const haveKeys = new Set(
-      restoredCfg.bindings
-        .filter((b: any) => b?.match?.channel === CHANNEL_ID)
-        .map((b: any) => `${b?.agentId ?? ""}:${b?.match?.accountId ?? ""}`),
-    );
-    const missing = savedBindings.filter(
-      (b) => !haveKeys.has(`${b?.agentId ?? ""}:${b?.match?.accountId ?? ""}`),
-    );
-    if (missing.length > 0) {
-      restoreBindingsToFile(missing, CHANNEL_ID, CHANNEL_ID);
-    }
   }
 }
 
