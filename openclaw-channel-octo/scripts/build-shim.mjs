@@ -18,9 +18,9 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, "..");
-const stubDir = resolve(repoRoot, "shim-stub");
-const canonicalPkgPath = resolve(repoRoot, "package.json");
+const pkgRoot = resolve(here, "..");
+const stubDir = resolve(pkgRoot, "shim-stub");
+const canonicalPkgPath = resolve(pkgRoot, "package.json");
 
 const outDir = resolve(process.argv[2] ?? "/tmp/shim-build");
 

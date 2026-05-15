@@ -114,7 +114,10 @@ jobs:
       - name: npm version
         # Must run BEFORE build: prebuild script writes package.json.version
         # into src/version.ts, which is bundled into the published tarball.
-        run: npm version "${{ steps.version.outputs.VERSION }}" --no-git-tag-version
+        # --allow-same-version: when the tag matches the checked-in
+        # package.json version (the normal case for rc/stable cuts),
+        # `npm version` would otherwise exit with EBADCHANGE.
+        run: npm version "${{ steps.version.outputs.VERSION }}" --no-git-tag-version --allow-same-version
       - name: build
         run: npm run build
       - name: npm publish

@@ -15,8 +15,8 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = resolve(fileURLToPath(import.meta.url), "..");
-const repoRoot = resolve(here, "..");
-const buildScript = resolve(repoRoot, "scripts/build-shim.mjs");
+const pkgRoot = resolve(here, "..");
+const buildScript = resolve(pkgRoot, "scripts/build-shim.mjs");
 
 const tmp = mkdtempSync(join(tmpdir(), "shim-test-"));
 

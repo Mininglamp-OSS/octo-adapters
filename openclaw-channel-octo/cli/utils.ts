@@ -55,7 +55,14 @@ export function channelConfigPathFor(channelId: string, ...parts: string[]): str
 // Version helpers
 // ---------------------------------------------------------------------------
 
-/** Compare two semver-like version strings. Returns -1, 0, or 1. */
+/**
+ * Compare two semver-like version strings. Returns -1, 0, or 1.
+ *
+ * Intentionally date-only: assumes inputs of the shape `2026.4.15` (matching
+ * OpenClaw's `YYYY.M.PATCH` versioning). Prerelease suffixes (`2026.4.15-rc.1`)
+ * would Number()-cast to NaN and break ordering. If MIN_OPENCLAW_VERSION ever
+ * needs prerelease handling, switch this to `semver.compare`.
+ */
 function compareVersions(a: string, b: string): number {
   const pa = a.split(".").map(Number);
   const pb = b.split(".").map(Number);

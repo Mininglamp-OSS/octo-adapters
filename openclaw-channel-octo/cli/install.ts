@@ -245,7 +245,16 @@ function runMigration(ctx: MigrationContext): void {
   console.log(`  Backed up config to ${backupPath}.`);
 
   // -------------------------------------------------------------------------
-  // Rollback closure — invoked on any unrecoverable error in steps 2-9
+  // Rollback closure — invoked on any unrecoverable error in steps 2-9.
+  //
+  // Restores cfg + plugin enabled state but does NOT restart the gateway.
+  // If pluginsDisable already took effect against a running gateway, the
+  // live process keeps the legacy plugin disabled until the next restart.
+  // The user is told the migration aborted and instructed to re-run; the
+  // next runInstall (or any explicit `openclaw gateway restart`) reconciles
+  // live state. We intentionally don't restart here to keep rollback quick
+  // and side-effect-minimal — adding a gateway restart could itself fail
+  // and the rollback then has nothing to fall back to.
   // -------------------------------------------------------------------------
   const rollback = (reason: string): never => {
     console.error(`  Migration failed (${reason}). Rolling back...`);
@@ -537,16 +546,31 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
     throw new Error("Deadlock repair failed: post-install verification did not pass");
   }
 
-  ensurePluginsAllow(PLUGIN_ID);
-  pluginsEnable(PLUGIN_ID);
+  // Wrap the post-install enable + channel restore in the same try/catch
+  // shape as runMigration's steps 6-9: an unexpected throw from
+  // ensurePluginsAllow / pluginsEnable / restoreChannelConfigToFile would
+  // otherwise leave the user with channels.<id> removed (step above) but
+  // never restored. Restore from backup on any failure.
+  let restoredCfg: any;
+  let restoredOk = false;
+  try {
+    ensurePluginsAllow(PLUGIN_ID);
+    pluginsEnable(PLUGIN_ID);
 
-  if (savedChannelConfig) {
-    restoreChannelConfigToFile(savedChannelConfig, CHANNEL_ID);
+    if (savedChannelConfig) {
+      restoreChannelConfigToFile(savedChannelConfig, CHANNEL_ID);
+    }
+
+    restoredCfg = readConfigFromFile();
+    restoredOk = !hadChannelBefore || Boolean(restoredCfg?.channels?.[CHANNEL_ID]);
+  } catch (err) {
+    console.error(`  Deadlock repair post-install steps failed: ${(err as Error).message}. Restoring config...`);
+    try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
+    try { cleanupBrokenInstall(PLUGIN_ID); } catch { /* best effort */ }
+    try { rmSync(backupPath, { force: true }); } catch { /* best effort */ }
+    throw err;
   }
 
-  const restoredCfg = readConfigFromFile();
-  const restoredOk =
-    !hadChannelBefore || Boolean(restoredCfg?.channels?.[CHANNEL_ID]);
   if (restoredOk) {
     try { rmSync(backupPath, { force: true }); } catch { /* best effort */ }
     console.log("  Deadlock repaired!");

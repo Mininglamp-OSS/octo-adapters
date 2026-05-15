@@ -5,7 +5,7 @@
  */
 
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { CHANNEL_ID, PLUGIN_ID, LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID } from "../src/constants.js";
@@ -1446,7 +1446,8 @@ export function migrateWorkspaceDir(
   }
 
   try {
-    if (!existsSync(wsRoot)) mkdirSync(wsRoot, { recursive: true });
+    // wsRoot necessarily exists when fromDir does (it's a parent), so no
+    // mkdirSync needed before rename.
     renameSync(fromDir, toDir);
     return "renamed";
   } catch {

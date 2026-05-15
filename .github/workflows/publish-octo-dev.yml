@@ -84,7 +84,10 @@ jobs:
       - name: npm version
         # Must run BEFORE build: prebuild writes package.json.version into
         # src/version.ts, so the published tarball reports the correct version.
-        run: npm version "${{ steps.version.outputs.VERSION }}" --no-git-tag-version
+        # --allow-same-version: defensive — dev versions carry a per-sha suffix
+        # so they normally differ from package.json, but the flag costs nothing
+        # and matches the equivalent step in publish-octo.yml.
+        run: npm version "${{ steps.version.outputs.VERSION }}" --no-git-tag-version --allow-same-version
       - run: npm run build
       - name: npm publish
         env:
