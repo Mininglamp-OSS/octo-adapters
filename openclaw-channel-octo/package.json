@@ -1,6 +1,6 @@
 {
   "name": "openclaw-channel-octo",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0",
   "description": "Octo channel plugin for OpenClaw via WuKongIM WebSocket",
   "main": "dist/index.js",
   "bin": {
