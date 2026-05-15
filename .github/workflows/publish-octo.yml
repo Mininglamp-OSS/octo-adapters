@@ -1,0 +1,186 @@
+name: Publish Octo
+
+# Triggered on package-scoped tag pushes:
+#   openclaw-channel-octo/v1.0.0
+#   openclaw-channel-octo/v1.0.0-rc.1
+#   openclaw-channel-octo/v1.0.0-beta.2
+#
+# The slash prefix is intentional — it scopes the tag to this package so that
+# future packages in the same repo (e.g. dmwork patches in
+# openclaw-channel-dmwork/, or other adapters) can each define their own
+# `<package>/v*` workflows without collision.
+#
+# Also supports manual dispatch with a custom tag for dry-runs.
+#
+# Tag → npm dist-tag mapping:
+#   openclaw-channel-octo/v1.0.0       → @latest      (matches /^v\d+\.\d+\.\d+$/)
+#   openclaw-channel-octo/v1.0.0-rc.1  → @next        (any tag containing "-")
+#   openclaw-channel-octo/v1.0.0-beta  → @next
+#
+# Sequence:
+#   1. test          — npm ci + type-check + build + test
+#   2. publish_octo  — npm publish openclaw-channel-octo
+#   3. publish_shim  — needs: publish_octo; build shim + npm publish openclaw-channel-dmwork
+#
+# Old dmwork v0.x.y tags do NOT trigger this workflow path (they live in the
+# dmwork-adapters GitLab repo, which keeps its existing CI for legacy patches).
+
+on:
+  push:
+    tags:
+      # Package-scoped tags so other future packages in this repo (e.g.
+      # openclaw-channel-dmwork patches, hermes-channel-octo) don't trigger
+      # this workflow. Push as: openclaw-channel-octo/v1.0.0-rc.1
+      - 'openclaw-channel-octo/v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version to publish (without leading v), e.g. 1.0.0-rc.1"
+        required: true
+        type: string
+      dry_run:
+        description: "Run npm publish with --dry-run (no actual upload)"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: publish-octo-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PKG_DIR: openclaw-channel-octo
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.PKG_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: npm ci
+        run: npm ci --ignore-scripts
+      - name: type-check
+        run: npx tsc --noEmit
+      - name: test
+        run: npm test
+      - name: build
+        run: npm run build
+
+  publish_octo:
+    name: publish openclaw-channel-octo
+    needs: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.PKG_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+      - name: resolve version
+        id: version
+        # Strip prefix `openclaw-channel-octo/v` from a push tag, or use the
+        # workflow_dispatch `tag` input directly.
+        # Output: VERSION (no prefix), DIST_TAG (next | latest), DRY_RUN (--dry-run | "")
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.tag }}"
+            DRY="${{ inputs.dry_run && '--dry-run' || '' }}"
+          else
+            VERSION="${GITHUB_REF_NAME#openclaw-channel-octo/v}"
+            DRY=""
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            DIST_TAG="next"
+          else
+            DIST_TAG="latest"
+          fi
+          {
+            echo "VERSION=$VERSION"
+            echo "DIST_TAG=$DIST_TAG"
+            echo "DRY_RUN=$DRY"
+          } >> "$GITHUB_OUTPUT"
+          echo "[publish_octo] version=$VERSION dist-tag=$DIST_TAG dry_run='$DRY'"
+      - name: npm ci
+        run: npm ci --ignore-scripts
+      - name: npm version
+        # Must run BEFORE build: prebuild script writes package.json.version
+        # into src/version.ts, which is bundled into the published tarball.
+        # --allow-same-version: when the tag matches the checked-in
+        # package.json version (the normal case for rc/stable cuts),
+        # `npm version` would otherwise exit with EBADCHANGE.
+        run: npm version "${{ steps.version.outputs.VERSION }}" --no-git-tag-version --allow-same-version
+      - name: build
+        run: npm run build
+      - name: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --access public \
+            --tag "${{ steps.version.outputs.DIST_TAG }}" \
+            ${{ steps.version.outputs.DRY_RUN }}
+
+  publish_shim:
+    name: publish openclaw-channel-dmwork (shim)
+    needs: publish_octo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+      - name: resolve version
+        id: version
+        # Same logic as publish_octo — keeps shim version in lockstep.
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.tag }}"
+            DRY="${{ inputs.dry_run && '--dry-run' || '' }}"
+          else
+            VERSION="${GITHUB_REF_NAME#openclaw-channel-octo/v}"
+            DRY=""
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            DIST_TAG="next"
+          else
+            DIST_TAG="latest"
+          fi
+          {
+            echo "VERSION=$VERSION"
+            echo "DIST_TAG=$DIST_TAG"
+            echo "DRY_RUN=$DRY"
+          } >> "$GITHUB_OUTPUT"
+          echo "[publish_shim] version=$VERSION dist-tag=$DIST_TAG dry_run='$DRY'"
+      - name: build shim
+        env:
+          CI_COMMIT_TAG: v${{ steps.version.outputs.VERSION }}
+        run: node ${{ env.PKG_DIR }}/scripts/build-shim.mjs /tmp/shim-build
+      - name: npm publish (shim)
+        working-directory: /tmp/shim-build
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --access public \
+            --tag "${{ steps.version.outputs.DIST_TAG }}" \
+            ${{ steps.version.outputs.DRY_RUN }}
+      - name: npm deprecate (shim, post-publish)
+        # The shim is intentionally published deprecated. `npm deprecate` is
+        # the canonical mechanism: it surfaces the warning on every
+        # `npm install` / `npm view` of the package. (A `deprecated` field in
+        # package.json is silently ignored by npm.) Skipped on dry-run.
+        if: ${{ steps.version.outputs.DRY_RUN == '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          npm deprecate "openclaw-channel-dmwork@${VERSION}" \
+            "This package has been renamed to openclaw-channel-octo. CLI invocations are forwarded automatically; please update your scripts to use openclaw-channel-octo directly."

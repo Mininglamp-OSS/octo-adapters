@@ -1,0 +1,19 @@
+{
+  "name": "openclaw-channel-dmwork",
+  "version": "{{VERSION}}",
+  "description": "DEPRECATED: renamed to openclaw-channel-octo. This package forwards CLI invocations to openclaw-channel-octo. Please switch to that package directly.",
+  "type": "module",
+  "bin": {
+    "openclaw-channel-dmwork": "bin/dmwork.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "dependencies": {
+    "openclaw-channel-octo": "{{VERSION}}"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
