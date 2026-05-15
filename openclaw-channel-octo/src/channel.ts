@@ -812,13 +812,13 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       // 4. Group history map — persists across auto-restarts (module-level)
       const groupHistories = getOrCreateHistoryMap(account.accountId);
-      
+
       // 4b. Member name->uid map — for resolving @mentions in replies
       const memberMap = getOrCreateMemberMap(account.accountId);
-      
+
       // 4c. Reverse map uid->name — for showing display names in replies
       const uidToNameMap = getOrCreateUidToNameMap(account.accountId);
-      
+
       // 4d. Group cache timestamps — track when each group's members were last fetched
       const groupCacheTimestamps = getOrCreateGroupCacheTimestamps(account.accountId);
 

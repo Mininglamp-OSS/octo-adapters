@@ -132,4 +132,3 @@ export async function runBind(opts: BindOptions): Promise<void> {
 
   console.log("\nBind complete! Please send a message to the bot in Octo to verify the connection.");
 }
-

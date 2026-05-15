@@ -58,7 +58,7 @@ program
     console.log(`${b}openclaw-channel-octo:${r} ${g}${installedVersion}${r}`);
     console.log(`${b}plugin package:${r} ${g}${PLUGIN_ID}${r}`);
     console.log();
-    console.log(`${b}环境信息：${r}`);
+    console.log(`${b}Environment:${r}`);
     console.log(`${b}OS:${r} ${g}${process.platform} ${process.arch}${r}`);
     console.log(`${b}Node.js:${r} ${g}${process.version}${r}`);
     console.log(`${b}Shell:${r} ${g}${process.env.SHELL ?? "unknown"}${r}`);

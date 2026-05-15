@@ -587,10 +587,77 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     const { runInstall } = await loadInstall();
     await runInstall({ force: false, dev: false });
 
-    // Final state: dmwork.enabled set to false via fallback edit, octo enabled
-    expect(state.cfg.plugins.entries["openclaw-channel-dmwork"]?.enabled).toBe(false);
+    // Final state: dmwork is fully gone (uninstall fallback removes
+    // entries/installs/dir, not just sets enabled=false). octo is enabled.
+    expect(state.cfg.plugins.entries["openclaw-channel-dmwork"]).toBeUndefined();
+    expect(state.cfg.plugins.installs?.["openclaw-channel-dmwork"]).toBeUndefined();
+    expect(state.extDirs.has("openclaw-channel-dmwork")).toBe(false);
     expect(state.cfg.plugins.entries["openclaw-channel-octo"]?.enabled).toBe(true);
     expect(state.cfg.channels?.octo?.accounts?.b1?.botToken).toBe("bf_b1");
+  });
+
+  it("rollback on step 6-9 failure: pluginsEnable throws → cfg restored, legacy re-enabled", async () => {
+    // Reviewer-requested regression: prior to the fix, an exception in step
+    // 6-8 (pluginsEnable / restoreChannelConfigToFile / restoreBindingsToFile)
+    // would bypass step 9's rollback() calls and leave the user with
+    // channels.dmwork removed but channels.octo not yet written.
+    const state = setupFs({
+      cfg: {
+        plugins: {
+          entries: { "openclaw-channel-dmwork": { enabled: true } },
+          installs: { "openclaw-channel-dmwork": { source: "npm", version: "0.6.4" } },
+        },
+        channels: { dmwork: { accounts: { b1: { botToken: "bf_b1" } } } },
+        bindings: [{ agentId: "a1", match: { channel: "dmwork", accountId: "b1" } }],
+      },
+      extDirs: ["openclaw-channel-dmwork"],
+    });
+    await applyFsMocks(state);
+
+    const inspectMap: Record<string, any> = {
+      "openclaw-channel-dmwork": { plugin: { id: "openclaw-channel-dmwork", version: "0.6.4", enabled: true } },
+    };
+    mockExecFileSync.mockImplementation((cmd: any, args: any) => {
+      const a = args as string[];
+      const op = a.join(" ");
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.5.7\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        const id = a[2];
+        const r = inspectMap[id];
+        if (!r) { const e: any = new Error("not found"); e.stderr = "not found"; throw e; }
+        return JSON.stringify(r);
+      }
+      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
+        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
+        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("openclaw-channel-octo");
+        inspectMap["openclaw-channel-octo"] = { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } };
+        return "";
+      }
+      // pluginsEnable(octo) throws an UNEXPECTED error (not unknown-command,
+      // not not-installed) — should propagate and trigger rollback.
+      if (op === "plugins enable openclaw-channel-octo") {
+        const e: any = new Error("permission denied");
+        e.stderr = "permission denied";
+        throw e;
+      }
+      if (a[0] === "plugins" && (a[1] === "enable" || a[1] === "disable" || a[1] === "uninstall")) return "";
+      if (a[0] === "gateway") return "";
+      if (cmd === "npm" && a[0] === "view") return "1.0.0\n";
+      return "";
+    });
+
+    const { runInstall } = await loadInstall();
+    await expect(runInstall({ force: false, dev: false })).rejects.toThrow(/Migration aborted: steps 6-9/);
+
+    // Sequence: pluginsEnable(legacy) was called by rollback() to re-enable
+    // dmwork (since it was enabled before)
+    const ops = calledOps();
+    const enableLegacyAfterRollback = ops.some(
+      (o) => o === "plugins enable openclaw-channel-dmwork",
+    );
+    expect(enableLegacyAfterRollback).toBe(true);
   });
 });
 

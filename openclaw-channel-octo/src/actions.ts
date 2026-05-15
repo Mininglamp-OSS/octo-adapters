@@ -818,4 +818,3 @@ async function handleGroupMdUpdate(params: {
     return { ok: false, error: `Failed to update GROUP.md: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
-

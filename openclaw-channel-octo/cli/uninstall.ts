@@ -52,4 +52,3 @@ export async function runUninstall(opts: UninstallOptions): Promise<void> {
 
   console.log("Octo plugin uninstalled.");
 }
-

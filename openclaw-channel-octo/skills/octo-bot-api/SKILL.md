@@ -964,4 +964,3 @@ curl -X PUT <apiUrl>/v1/user/bots/mybot_bot \
 curl -X DELETE <apiUrl>/v1/user/bots/mybot_bot \
   -H "Authorization: Bearer uk_YOUR_API_KEY"
 ```
-

@@ -816,11 +816,11 @@ function findUidByName(name: string, memberMap: Map<string, string>): string | u
   // First try exact match
   const exact = memberMap.get(name);
   if (exact) return exact;
-  
+
   // Then try matching by stripping emoji from both sides
   const strippedName = stripEmoji(name);
   if (!strippedName) return undefined;
-  
+
   for (const [displayName, uid] of memberMap.entries()) {
     if (stripEmoji(displayName) === strippedName) {
       return uid;
@@ -1335,7 +1335,7 @@ export async function handleInboundMessage(params: {
     log?.error?.(`octo: routing methods: ${core?.channel?.routing ? Object.keys(core.channel.routing).join(",") : "N/A"}`);
     return;
   }
-  
+
   const config = core.config.loadConfig() as OpenClawConfig;
 
   let route;

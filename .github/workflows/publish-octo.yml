@@ -169,3 +169,15 @@ jobs:
           npm publish --access public \
             --tag "${{ steps.version.outputs.DIST_TAG }}" \
             ${{ steps.version.outputs.DRY_RUN }}
+      - name: npm deprecate (shim, post-publish)
+        # The shim is intentionally published deprecated. `npm deprecate` is
+        # the canonical mechanism: it surfaces the warning on every
+        # `npm install` / `npm view` of the package. (A `deprecated` field in
+        # package.json is silently ignored by npm.) Skipped on dry-run.
+        if: ${{ steps.version.outputs.DRY_RUN == '' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          npm deprecate "openclaw-channel-dmwork@${VERSION}" \
+            "This package has been renamed to openclaw-channel-octo. CLI invocations are forwarded automatically; please update your scripts to use openclaw-channel-octo directly."

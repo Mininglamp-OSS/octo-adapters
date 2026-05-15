@@ -370,7 +370,60 @@ export function pluginsUpdate(id: string, quiet?: boolean): void {
 export function pluginsUninstall(id: string, yes?: boolean): void {
   const args = ["plugins", "uninstall", id];
   if (yes) args.push("--force");
-  runOpenclaw(args, { stdio: "inherit" });
+  // Always pipe stdio: with `inherit`, Node doesn't attach the child's
+  // stderr to the error object, so isUnknownCommandError() may fail to
+  // detect "unknown command" on environments where the openclaw CLI
+  // writes the message there. Pipe + manual replay matches the pattern
+  // used by pluginsInstall.
+  try {
+    const result = runOpenclaw(args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+    if (result) process.stdout.write(result);
+    return;
+  } catch (err) {
+    // 4.20 (and earlier) lacks `plugins uninstall`. Without a fallback the
+    // legacy plugin's entries/installs/dir survive, detectScenario keeps
+    // returning `rebrand` on every install run, and the user sees an endless
+    // "Detected rebrand. Starting migration..." loop.
+    if (!isUnknownCommandError(err)) {
+      // Replay captured output for visibility, then propagate.
+      const stdout = (err as any)?.stdout?.toString?.();
+      const stderr = (err as any)?.stderr?.toString?.();
+      if (stdout) process.stdout.write(stdout);
+      if (stderr) process.stderr.write(stderr);
+      throw err;
+    }
+  }
+  // 4.20 fallback: tear down config records + extension dir manually.
+  try {
+    const cfg = readConfigFromFile();
+    let cfgChanged = false;
+    if (cfg) {
+      if (cfg.plugins?.entries?.[id]) {
+        delete cfg.plugins.entries[id];
+        cfgChanged = true;
+      }
+      if (cfg.plugins?.installs?.[id]) {
+        delete cfg.plugins.installs[id];
+        cfgChanged = true;
+      }
+      if (Array.isArray(cfg.plugins?.allow)) {
+        const idx = cfg.plugins.allow.indexOf(id);
+        if (idx >= 0) {
+          cfg.plugins.allow.splice(idx, 1);
+          cfgChanged = true;
+        }
+      }
+      if (cfgChanged) writeConfigAtomic(cfg);
+    }
+    const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
+    const pluginDir = resolve(extDir, id);
+    if (existsSync(pluginDir)) {
+      rmSync(pluginDir, { recursive: true, force: true });
+    }
+  } catch { /* best effort */ }
 }
 
 export interface PluginInspectResult {
@@ -1359,34 +1412,45 @@ export function restoreBindingsToFile(
 
 // ---------------------------------------------------------------------------
 // Phase B: workspace dir migration
+//
+// Move ~/.openclaw/workspace/<fromChannel>/ → ~/.openclaw/workspace/<toChannel>/.
+// Best-effort: called as a post-step after install verification succeeds.
+// Failure here only means the user loses cached workspace artifacts
+// (regenerable), not bot config.
 // ---------------------------------------------------------------------------
 
 /**
- * Move ~/.openclaw/workspace/<fromChannel>/ → ~/.openclaw/workspace/<toChannel>/.
- * Best-effort: returns true on success (or no-op when source doesn't exist),
- * false if the rename fails.
- *
- * Called as a post-step after install verification succeeds. Failure here only
- * means the user loses cached workspace artifacts (regenerable), not bot config.
+ * Outcome of a workspace migration attempt. The caller logs distinct messages
+ * per case so users aren't told "migrated" when nothing actually moved.
  */
-export function migrateWorkspaceDir(fromChannel: string, toChannel: string): boolean {
+export type WorkspaceMigrateOutcome =
+  | "renamed"                    // src existed, moved successfully
+  | "skipped-no-source"          // src didn't exist (e.g. 4.20 doesn't use channel subdirs)
+  | "skipped-destination-exists" // both src and dst exist; left intact for manual merge
+  | "failed";                    // rename threw
+
+export function migrateWorkspaceDir(
+  fromChannel: string,
+  toChannel: string,
+): WorkspaceMigrateOutcome {
   const wsRoot = getConfigFilePathSafe().replace(/openclaw\.json$/, "workspace");
   const fromDir = resolve(wsRoot, fromChannel);
   const toDir = resolve(wsRoot, toChannel);
 
-  if (!existsSync(fromDir)) return true; // nothing to migrate
+  if (!existsSync(fromDir)) return "skipped-no-source";
   if (existsSync(toDir)) {
-    // Destination already populated by fresh install; leave both intact.
-    // Caller decides whether to merge manually.
-    return true;
+    // Destination already populated (e.g. by a fresh octo install or a prior
+    // partial migration). Leave both intact; the caller surfaces a warning so
+    // the user can manually inspect / merge.
+    return "skipped-destination-exists";
   }
 
   try {
     if (!existsSync(wsRoot)) mkdirSync(wsRoot, { recursive: true });
     renameSync(fromDir, toDir);
-    return true;
+    return "renamed";
   } catch {
-    return false;
+    return "failed";
   }
 }
 

@@ -43,6 +43,10 @@ describe("build-shim", () => {
     expect(pkg.name).toBe("openclaw-channel-dmwork");
     expect(pkg.type).toBe("module");
     expect(pkg.bin).toEqual({ "openclaw-channel-dmwork": "bin/dmwork.js" });
+    // The non-standard `deprecated` field in package.json is intentionally
+    // omitted — npm ignores it. We use `npm deprecate <pkg>@<ver> "..."` as
+    // a post-publish step in the workflow instead.
+    expect(pkg.deprecated).toBeUndefined();
   });
 
   it("bin entry forwards to openclaw-channel-octo/cli main()", () => {

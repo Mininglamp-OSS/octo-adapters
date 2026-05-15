@@ -15,6 +15,5 @@
   },
   "engines": {
     "node": ">=18"
-  },
-  "deprecated": "This package has been renamed to openclaw-channel-octo. CLI invocations are forwarded automatically; please update your scripts to use openclaw-channel-octo directly."
+  }
 }
