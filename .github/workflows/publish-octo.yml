@@ -59,8 +59,8 @@ jobs:
       run:
         working-directory: ${{ env.PKG_DIR }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
       - name: npm ci
@@ -80,8 +80,8 @@ jobs:
       run:
         working-directory: ${{ env.PKG_DIR }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
@@ -133,8 +133,8 @@ jobs:
     needs: publish_octo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
@@ -160,6 +160,9 @@ jobs:
             echo "DRY_RUN=$DRY"
           } >> "$GITHUB_OUTPUT"
           echo "[publish_shim] version=$VERSION dist-tag=$DIST_TAG dry_run='$DRY'"
+      - name: type-check
+        working-directory: ${{ env.PKG_DIR }}
+        run: npm ci --ignore-scripts && npm run type-check
       - name: build shim
         env:
           CI_COMMIT_TAG: v${{ steps.version.outputs.VERSION }}
