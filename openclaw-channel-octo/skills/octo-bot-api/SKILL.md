@@ -1,6 +1,6 @@
 ---
 name: octo-bot-api
-version: 1.0.0-rc.1
+version: 1.0.0
 description: Octo Bot API 文档。消息发送、群管理、Thread、文件上传、User API 等接口。API 基础地址从 OpenClaw 配置 channels.octo.accounts.<id>.apiUrl 获取。
 metadata: {"octo":{"category":"messaging","api_base":"<apiUrl>"}}
 ---

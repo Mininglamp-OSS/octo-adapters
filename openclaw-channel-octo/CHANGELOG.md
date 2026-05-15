@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.0-rc.1] - 2026-05-14
+## [1.0.0] - 2026-05-15
 
 Initial product-rebranded release. Forked from `openclaw-channel-dmwork@0.6.x`
 and renamed to align with the Octo product brand.
