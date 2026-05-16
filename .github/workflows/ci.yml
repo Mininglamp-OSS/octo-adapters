@@ -21,7 +21,7 @@ jobs:
       matrix:
         include:
           - package: openclaw-channel-dmwork
-            install_cmd: npm install
+            install_cmd: npm ci
           - package: openclaw-channel-octo
             install_cmd: npm ci
     defaults:
