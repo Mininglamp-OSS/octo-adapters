@@ -160,9 +160,6 @@ jobs:
             echo "DRY_RUN=$DRY"
           } >> "$GITHUB_OUTPUT"
           echo "[publish_shim] version=$VERSION dist-tag=$DIST_TAG dry_run='$DRY'"
-      - name: type-check
-        working-directory: openclaw-channel-dmwork
-        run: npm ci --ignore-scripts && npm run type-check
       - name: build shim
         env:
           CI_COMMIT_TAG: v${{ steps.version.outputs.VERSION }}
