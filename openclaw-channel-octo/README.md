@@ -2,10 +2,9 @@
 
 Octo channel plugin for OpenClaw. Connects via WuKongIM WebSocket for real-time messaging.
 
-> **v1.0.0+**: This package was renamed from `openclaw-channel-dmwork`. Old
-> users still on `openclaw-channel-dmwork@0.6.x` will get an automatic
-> migration path in a follow-up release. New users should use
-> `openclaw-channel-octo` directly.
+> **v1.0.0+**: This package was renamed from `openclaw-channel-dmwork`.
+> Users on the legacy plugin should run `npx -y openclaw-channel-octo install`,
+> which detects and migrates existing dmwork configuration automatically.
 
 Repository: https://github.com/Mininglamp-OSS/octo-adapters
 

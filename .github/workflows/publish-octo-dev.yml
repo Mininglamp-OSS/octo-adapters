@@ -7,8 +7,8 @@ name: Publish Octo Dev
 # Example: package.json `1.0.0-rc.1` + sha abc1234 → `1.0.0-rc.1-dev.abc1234`
 #
 # Each merge produces a unique version (sha differs), so re-publish conflicts
-# are impossible. The shim package is NOT republished on dev — only canonical
-# openclaw-channel-octo. (Stable/rc releases use publish-octo.yml.)
+# are impossible. Dev publishes only openclaw-channel-octo.
+# (Stable/rc releases use publish-octo.yml.)
 #
 # Users install dev with:
 #   npx -y openclaw-channel-octo@dev install --dev
