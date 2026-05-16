@@ -2,6 +2,8 @@ node_modules/
 package-lock.json
 # Track lockfile for openclaw-channel-octo so publish workflows' `npm ci` works.
 !openclaw-channel-octo/package-lock.json
+# Track lockfile for openclaw-channel-dmwork so publish workflows' `npm ci` works.
+!openclaw-channel-dmwork/package-lock.json
 dist/
 src/**/*.js
 src/**/*.js.map
