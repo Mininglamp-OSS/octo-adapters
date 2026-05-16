@@ -15,20 +15,27 @@ concurrency:
 
 jobs:
   build:
-    name: Build & Type-check
+    name: Build & Type-check (${{ matrix.package }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - package: openclaw-channel-dmwork
+            install_cmd: npm ci
+          - package: openclaw-channel-octo
+            install_cmd: npm ci
     defaults:
       run:
-        working-directory: openclaw-channel-dmwork
+        working-directory: ${{ matrix.package }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install dependencies
-        run: npm install
+        run: ${{ matrix.install_cmd }}
 
       - name: Type-check
         run: npm run type-check
