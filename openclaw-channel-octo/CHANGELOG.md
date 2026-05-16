@@ -40,14 +40,13 @@ and renamed to align with the Octo product brand.
   takes priority over the `openclaw-channel-dmwork` rebrand; flat
   `channels.dmwork.botToken` shape is normalized to nested
   `channels.octo.accounts.default`.
-- **Companion shim package `openclaw-channel-dmwork`**: published in lockstep
-  with this package; depends on `openclaw-channel-octo` at the same exact
-  version and forwards `npx -y openclaw-channel-dmwork ...` invocations to
-  the canonical CLI entry. Existing BotFather scripts continue to work without
-  changes.
-- **`exports["./cli"]` subpath export**: the shim package consumes the CLI
-  via `await import("openclaw-channel-octo/cli")`. The CLI's `main()` is now
-  exported explicitly instead of running on import.
+- **`exports["./cli"]` subpath export**: the CLI's `main()` is now
+  exported explicitly via `exports["./cli"]` instead of running on
+  import; enables programmatic use and third-party tooling.
+- **No shim package**: `openclaw-channel-dmwork` is not republished as
+  a forwarding shim. Users on the legacy plugin should explicitly run
+  `npx -y openclaw-channel-octo install`; the install command detects
+  and migrates any existing dmwork configuration automatically.
 
 ### Backwards compatibility (legacy aliases kept for one release cycle)
 

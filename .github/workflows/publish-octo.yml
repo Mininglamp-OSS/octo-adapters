@@ -20,10 +20,11 @@ name: Publish Octo
 # Sequence:
 #   1. test          — npm ci + type-check + build + test
 #   2. publish_octo  — npm publish openclaw-channel-octo
-#   3. publish_shim  — needs: publish_octo; build shim + npm publish openclaw-channel-dmwork
 #
-# Old dmwork v0.x.y tags do NOT trigger this workflow path (they live in the
-# dmwork-adapters GitLab repo, which keeps its existing CI for legacy patches).
+# Note: no shim publish. openclaw-channel-dmwork is not republished as a
+# forwarder. Users migrating from dmwork should run:
+#   npx -y openclaw-channel-octo install
+# which handles legacy config migration automatically.
 
 on:
   push:
