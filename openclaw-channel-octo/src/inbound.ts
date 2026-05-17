@@ -6,7 +6,6 @@ import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
 import { getDmworkRuntime } from "./runtime.js";
-import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import { CHANNEL_ID } from "./constants.js";
 import {
   extractMentionMatches,
@@ -18,7 +17,7 @@ import {
   convertStructuredMentions,
   buildEntitiesFromFallback,
 } from "./mention-utils.js";
-import type { MentionPayload, MentionEntity } from "./types.js";
+import type { MentionPayload, MentionEntity, SendMessageResult } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
 import { isOwner } from "./owner-registry.js";
 import { createWriteStream } from "node:fs";
@@ -68,7 +67,7 @@ export async function uploadAndSendMedia(params: {
   channelId: string;
   channelType: ChannelType;
   log?: ChannelLogSink;
-}): Promise<void> {
+}): Promise<SendMessageResult | undefined> {
   const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
 
   const { createReadStream: fsCreateReadStream, statSync: fsStatSync, createWriteStream: fsCreateWriteStream } = await import("node:fs");
@@ -163,7 +162,7 @@ export async function uploadAndSendMedia(params: {
     log?.info?.(`octo: uploaded media as ${isImage ? "image" : "file"}: ${filename}${width ? ` (${width}x${height})` : ""}`);
 
     // Send via sendMessage
-    await sendMediaMessage({
+    const result = await sendMediaMessage({
       apiUrl,
       botToken,
       channelId,
@@ -175,6 +174,7 @@ export async function uploadAndSendMedia(params: {
       width,
       height,
     });
+    return result;
   } finally {
     if (tempPath) await fsUnlink(tempPath).catch(() => {});
   }
@@ -929,11 +929,31 @@ export function resolveCommandAuthorized(isGroup: boolean, isOwnerUser: boolean,
   return !isGroup || (isOwnerUser && isExplicitBotMention);
 }
 
+export function segmentHistoryEntries(params: {
+  entries: Array<{ message_id?: string; message_seq?: number; [key: string]: any }>;
+  cutoffSeq: number;
+  currentMsgId?: string;
+}): { answered: typeof params.entries; new: typeof params.entries } {
+  const filtered = params.currentMsgId
+    ? params.entries.filter(e => e.message_id !== params.currentMsgId)
+    : params.entries;
+
+  if (params.cutoffSeq <= 0) {
+    return { answered: [], new: filtered };
+  }
+
+  return {
+    answered: filtered.filter(e => (e.message_seq ?? 0) <= params.cutoffSeq),
+    new: filtered.filter(e => (e.message_seq ?? 0) > params.cutoffSeq),
+  };
+}
+
 export async function handleInboundMessage(params: {
   account: ResolvedDmworkAccount;
   message: BotMessage;
   botUid: string;
   groupHistories: Map<string, any[]>;
+  lastBotReplySeqMap: Map<string, number>;
   memberMap: Map<string, string>;  // displayName -> uid mapping
   uidToNameMap: Map<string, string>;  // uid -> displayName mapping (reverse)
   groupCacheTimestamps: Map<string, number>;  // groupId -> lastFetchedAt
@@ -941,7 +961,7 @@ export async function handleInboundMessage(params: {
   log?: ChannelLogSink;
   statusSink?: DmworkStatusSink;
 }) {
-  const { account, message, botUid, groupHistories, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
+  const { account, message, botUid, groupHistories, lastBotReplySeqMap, memberMap, uidToNameMap, groupCacheTimestamps, groupMdCache, log, statusSink } = params;
 
   // Detect GROUP.md update/delete notification — refresh both memory + disk cache, do NOT pass to LLM
   const earlyEventType = (message.payload as any)?.event?.type;
@@ -1226,6 +1246,8 @@ export async function handleInboundMessage(params: {
         mediaUrl: inboundMediaUrl,
         msgType: message.payload?.type,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
+        message_id: message.message_id,
+        message_seq: message.message_seq,
       });
       const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
       while (entries.length > historyLimit) {
@@ -1263,8 +1285,30 @@ export async function handleInboundMessage(params: {
           limit: fetchLimit,
           log,
         });
+
+        // Cold-start: derive initial cutoff from bot replies in API backfill
+        if ((lastBotReplySeqMap.get(sessionId) ?? 0) === 0 && apiMessages.length > 0) {
+          let inferredCutoff = 0;
+          for (const m of apiMessages) {
+            if (
+              m.from_uid === botUid &&
+              typeof m.message_seq === "number" &&
+              m.message_seq > inferredCutoff
+            ) {
+              inferredCutoff = m.message_seq;
+            }
+          }
+          if (inferredCutoff > 0) {
+            lastBotReplySeqMap.set(sessionId, inferredCutoff);
+            log?.info?.(
+              `octo: [MENTION] derived initial lastBotReplySeq=${inferredCutoff} from API backfill | session=${sessionId}`,
+            );
+          }
+        }
+
         const filteredApiMsgs = apiMessages
           .filter((m: any) => m.from_uid !== botUid && (m.content || m.type !== 1))
+          .sort((a: any, b: any) => (a.message_seq ?? 0) - (b.message_seq ?? 0))
           .slice(-historyLimit);
         entries = filteredApiMsgs.map((m: any) => {
           let body = m.content || resolveApiMessagePlaceholder(m.type, m.name);
@@ -1278,6 +1322,8 @@ export async function handleInboundMessage(params: {
             mention: m.payload?.mention,
             msgType: m.type,
             timestamp: m.timestamp,
+            message_id: m.message_id,
+            message_seq: m.message_seq,
           };
           // For media message types, resolve the URL directly (storage is public-read)
           const mediaTypes = [MessageType.Image, MessageType.File, MessageType.Voice, MessageType.Video];
@@ -1300,12 +1346,19 @@ export async function handleInboundMessage(params: {
     // History media URLs are kept in the text body only — not passed as MediaUrls
     // to Core (they are remote URLs; only local paths should go through MediaUrls)
     if (entries.length > 0) {
-      const messagesJson = JSON.stringify(entries.map((e: any) => {
-        // Convert @name → @[uid:name] for LLM context
+      const cutoffSeq = lastBotReplySeqMap.get(sessionId) ?? 0;
+      const currentMsgId = message.message_id;
+
+      const { answered: answeredEntries, new: newEntries } = segmentHistoryEntries({
+        entries,
+        cutoffSeq,
+        currentMsgId,
+      });
+
+      const formatEntries = (items: any[]) => JSON.stringify(items.map((e: any) => {
         const bodyForLLM = e.mention
           ? convertContentForLLM(e.body, e.mention, memberMap)
           : e.body;
-        // sender format: displayName(uid)
         const senderLabel = buildSenderPrefix(e.sender, uidToNameMap);
         return {
           sender: senderLabel,
@@ -1313,18 +1366,58 @@ export async function handleInboundMessage(params: {
           ...(e.mediaUrl ? { mediaUrl: e.mediaUrl } : {}),
         };
       }), null, 2);
-      const template = account.config.historyPromptTemplate || DEFAULT_HISTORY_PROMPT_TEMPLATE;
-      historyPrefix = template
-        .replace("{messages}", messagesJson)
-        .replace("{count}", String(entries.length));
-      log?.info?.(`octo: [MENTION] 已注入历史上下文 | ${historyPrefix.length} chars | ${entries.length}条消息`);
+
+      const ANSWERED_HEADER = "[Previous context - already answered, do NOT re-answer]";
+      const NEW_HEADER = "[Chat messages since your last reply - for context only, do NOT re-answer questions from this history]";
+      const CURRENT_HEADER = "[Current message - respond to this ONLY]";
+
+      let historyBlock = "";
+
+      if (answeredEntries.length > 0) {
+        historyBlock += `${ANSWERED_HEADER}\n\`\`\`json\n${formatEntries(answeredEntries)}\n\`\`\`\n\n`;
+      }
+      if (newEntries.length > 0) {
+        historyBlock += `${NEW_HEADER}\n\`\`\`json\n${formatEntries(newEntries)}\n\`\`\`\n\n`;
+      }
+
+      if (historyBlock) {
+        const template = account.config.historyPromptTemplate;
+        if (template) {
+          const hasSegmentedPlaceholders =
+            template.includes("{answered_messages}") ||
+            template.includes("{new_messages}");
+
+          if (hasSegmentedPlaceholders) {
+            historyPrefix = template
+              .replace("{answered_messages}", formatEntries(answeredEntries))
+              .replace("{new_messages}", formatEntries(newEntries))
+              .replace("{answered_count}", String(answeredEntries.length))
+              .replace("{new_count}", String(newEntries.length))
+              .replace("{messages}", formatEntries([...answeredEntries, ...newEntries]))
+              .replace("{count}", String(answeredEntries.length + newEntries.length));
+          } else {
+            const filteredEntries = entries.filter((e: any) => e.message_id !== currentMsgId);
+            const allFormatted = formatEntries(filteredEntries);
+            const legacyPreamble = answeredEntries.length > 0
+              ? `[Note: The first ${answeredEntries.length} message(s) below have already been answered. Do NOT re-answer them.]\n`
+              : "";
+            historyPrefix = legacyPreamble + template
+              .replace("{messages}", allFormatted)
+              .replace("{count}", String(filteredEntries.length));
+          }
+        } else {
+          historyPrefix = historyBlock + `${CURRENT_HEADER}\n\n`;
+        }
+        log?.info?.(`octo: [MENTION] 已注入历史上下文 | ${historyPrefix.length} chars | answered=${answeredEntries.length} new=${newEntries.length}`);
+      } else {
+        log?.info?.(`octo: [MENTION] 历史条目全部被过滤 | answered=${answeredEntries.length} new=${newEntries.length}`);
+      }
     } else {
       log?.info?.(`octo: [MENTION] 无历史上下文可注入`);
     }
 
-    // Sliding window: keep history, don't clear
-    // (entries stay in queue, limited by historyLimit in the caching logic)
-    log?.info?.(`octo: [MENTION] 历史滑动窗口 | session=${sessionId} | 队列保留`);
+    // History retained for context continuity; segmented by lastBotReplySeq at prompt build time
+    log?.info?.(`octo: [MENTION] 历史保留（按 message_seq 分段标注） | session=${sessionId}`);
   }
 
   const core = getDmworkRuntime();
@@ -1520,7 +1613,7 @@ export async function handleInboundMessage(params: {
   const sentMediaUrls = new Set<string>();
 
   // --- Shared helper: resolve mentions and send text ---
-  const resolveAndSendText = async (content: string) => {
+  const resolveAndSendText = async (content: string): Promise<SendMessageResult | undefined> => {
     let replyMentionUids: string[] = [];
     let replyMentionEntities: MentionEntity[] = [];
     let finalContent = content;
@@ -1618,7 +1711,7 @@ export async function handleInboundMessage(params: {
     // Detect @all/@所有人 in final content
     const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
 
-    await sendMessage({
+    const result = await sendMessage({
       apiUrl: account.config.apiUrl,
       botToken: account.config.botToken ?? "",
       channelId: replyChannelId,
@@ -1629,7 +1722,10 @@ export async function handleInboundMessage(params: {
       mentionAll: hasAtAll || undefined,
     });
     statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+    return result;
   };
+
+  let replySucceeded = false;
 
   try {
     await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
@@ -1654,7 +1750,7 @@ export async function handleInboundMessage(params: {
           for (const mediaUrl of outboundMediaUrls) {
             if (sentMediaUrls.has(mediaUrl)) continue;
             try {
-              await uploadAndSendMedia({
+              const mediaResult = await uploadAndSendMedia({
                 mediaUrl,
                 apiUrl: account.config.apiUrl,
                 botToken: account.config.botToken ?? "",
@@ -1670,8 +1766,9 @@ export async function handleInboundMessage(params: {
 
           // --- Text handling based on kind ---
           const content = payload.text?.trim() ?? "";
-          if (!content && outboundMediaUrls.length > 0) {
+          if (!content && sentMediaUrls.size > 0) {
             statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+            replySucceeded = true;
             return;
           }
           if (!content) return;
@@ -1679,6 +1776,7 @@ export async function handleInboundMessage(params: {
           if (kind === "tool") {
             // Verbose tool call output: send immediately
             await resolveAndSendText(content);
+            replySucceeded = true;
             log?.info?.(`octo: [deliver] tool text sent (${content.length} chars)`);
             return;
           }
@@ -1713,6 +1811,7 @@ export async function handleInboundMessage(params: {
       deliverBuffer.textSent = true;
       try {
         await resolveAndSendText(deliverBuffer.lastText);
+        replySucceeded = true;
         log?.info?.(`octo: [deliver-buffer] fallback text sent (${deliverBuffer.lastText.length} chars)`);
       } catch (finalSendErr) {
         log?.error?.(`octo: [deliver-buffer] final text send failed: ${String(finalSendErr)}`);
@@ -1721,5 +1820,19 @@ export async function handleInboundMessage(params: {
     clearInterval(typingInterval);
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
+
+    // Record last answered inbound message_seq for history segmentation (don't clear history).
+    // We use the inbound @mention message's message_seq (from WebSocket frame) rather than
+    // sendMessage's returned message_seq, because the API always returns message_seq=0.
+    if (isGroup && replySucceeded) {
+      const seq = message.message_seq;
+      if (typeof seq === "number" && seq > 0) {
+        const existing = lastBotReplySeqMap.get(sessionId) ?? 0;
+        if (seq > existing) {
+          lastBotReplySeqMap.set(sessionId, seq);
+          log?.info?.(`octo: [HISTORY] Bot reply done, recorded lastAnsweredSeq=${seq} | session=${sessionId}`);
+        }
+      }
+    }
   }
 }

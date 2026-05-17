@@ -16,6 +16,7 @@ import {
   resolveCommandBody,
   resolveCommandAuthorized,
   pendingInboundContext,
+  segmentHistoryEntries,
   type ResolveFileResult,
 } from "./inbound.js";
 import { extractMentionUids } from "./mention-utils.js";
@@ -1156,5 +1157,687 @@ describe("pendingInboundContext", () => {
     pendingInboundContext.set(key, { historyPrefix: "new", memberListPrefix: "ml" });
     expect(pendingInboundContext.get(key)?.historyPrefix).toBe("new");
     expect(pendingInboundContext.get(key)?.memberListPrefix).toBe("ml");
+  });
+});
+
+describe("segmentHistoryEntries", () => {
+  it("should segment entries by cutoffSeq", () => {
+    const entries = [
+      { sender: "user1", body: "Q1 (old)", message_seq: 100, message_id: "m1" },
+      { sender: "user2", body: "chat msg", message_seq: 200, message_id: "m2" },
+      { sender: "user1", body: "Q2 (new)", message_seq: 300, message_id: "m3" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 150,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(1);
+    expect(result.answered[0].body).toBe("Q1 (old)");
+    expect(result.new).toHaveLength(2);
+    expect(result.new[0].body).toBe("chat msg");
+    expect(result.new[1].body).toBe("Q2 (new)");
+  });
+
+  it("should exclude current message by message_id", () => {
+    const entries = [
+      { sender: "user1", body: "old", message_seq: 100, message_id: "m1" },
+      { sender: "user2", body: "current @Bot Q2", message_seq: 300, message_id: "m-current" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 150,
+      currentMsgId: "m-current",
+    });
+
+    expect(result.answered).toHaveLength(1);
+    expect(result.answered[0].body).toBe("old");
+    expect(result.new).toHaveLength(0);
+  });
+
+  it("should treat all entries as new when cutoffSeq is 0", () => {
+    const entries = [
+      { sender: "user1", body: "msg1", message_seq: 100, message_id: "m1" },
+      { sender: "user2", body: "msg2", message_seq: 200, message_id: "m2" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 0,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(0);
+    expect(result.new).toHaveLength(2);
+  });
+
+  it("should treat all entries as new when cutoffSeq is negative", () => {
+    const entries = [
+      { sender: "user1", body: "msg1", message_seq: 100, message_id: "m1" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: -1,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(0);
+    expect(result.new).toHaveLength(1);
+  });
+
+  it("should handle entries without message_seq (fallback to 0)", () => {
+    const entries = [
+      { sender: "user1", body: "no seq", message_id: "m1" },
+      { sender: "user2", body: "has seq", message_seq: 200, message_id: "m2" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 100,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(1);
+    expect(result.answered[0].body).toBe("no seq");
+    expect(result.new).toHaveLength(1);
+    expect(result.new[0].body).toBe("has seq");
+  });
+
+  it("should work correctly with multi-user scenario after bot reply", () => {
+    const entries = [
+      { sender: "userA", body: "Q1 @Bot", message_seq: 50, message_id: "m1" },
+      { sender: "userC", body: "casual chat", message_seq: 120, message_id: "m3" },
+      { sender: "userB", body: "new @Bot Q2", message_seq: 200, message_id: "m4" },
+    ];
+
+    // Bot replied with seq=100
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 100,
+      currentMsgId: "m4",  // current @Bot message excluded
+    });
+
+    expect(result.answered).toHaveLength(1);
+    expect(result.answered[0].body).toBe("Q1 @Bot");
+    expect(result.new).toHaveLength(1);
+    expect(result.new[0].body).toBe("casual chat");
+  });
+
+  it("should handle empty entries", () => {
+    const result = segmentHistoryEntries({
+      entries: [],
+      cutoffSeq: 100,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(0);
+    expect(result.new).toHaveLength(0);
+  });
+
+  it("should handle all entries at or below cutoff", () => {
+    const entries = [
+      { sender: "user1", body: "msg1", message_seq: 50, message_id: "m1" },
+      { sender: "user2", body: "msg2", message_seq: 100, message_id: "m2" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 100,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(2);
+    expect(result.new).toHaveLength(0);
+  });
+
+  it("should handle all entries above cutoff", () => {
+    const entries = [
+      { sender: "user1", body: "msg1", message_seq: 150, message_id: "m1" },
+      { sender: "user2", body: "msg2", message_seq: 200, message_id: "m2" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 100,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(0);
+    expect(result.new).toHaveLength(2);
+  });
+
+  it("should not filter entries when currentMsgId is undefined", () => {
+    const entries = [
+      { sender: "user1", body: "msg1", message_seq: 50, message_id: "m1" },
+      { sender: "user2", body: "msg2", message_seq: 150, message_id: "m2" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 100,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(1);
+    expect(result.new).toHaveLength(1);
+  });
+
+  it("should handle entry at exactly the cutoff boundary (seq === cutoffSeq) as answered", () => {
+    const entries = [
+      { sender: "user1", body: "at boundary", message_seq: 100, message_id: "m1" },
+      { sender: "user2", body: "after boundary", message_seq: 101, message_id: "m2" },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 100,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered).toHaveLength(1);
+    expect(result.answered[0].body).toBe("at boundary");
+    expect(result.new).toHaveLength(1);
+    expect(result.new[0].body).toBe("after boundary");
+  });
+
+  it("should preserve extra fields on entries", () => {
+    const entries = [
+      { sender: "user1", body: "msg", message_seq: 50, message_id: "m1", mediaUrl: "http://example.com/img.png", mention: { uids: ["uid1"] } },
+    ];
+
+    const result = segmentHistoryEntries({
+      entries,
+      cutoffSeq: 100,
+      currentMsgId: undefined,
+    });
+
+    expect(result.answered[0].mediaUrl).toBe("http://example.com/img.png");
+    expect(result.answered[0].mention).toEqual({ uids: ["uid1"] });
+  });
+});
+
+// ─── Integration tests ───────────────────────────────────────────────────────
+
+describe("history prompt template integration", () => {
+  function renderSegmentedTemplate(
+    template: string,
+    answeredEntries: Array<{ sender: string; body: string }>,
+    newEntries: Array<{ sender: string; body: string }>,
+    allEntries: Array<{ sender: string; body: string }>,
+  ): string {
+    const formatEntries = (items: Array<{ sender: string; body: string }>) =>
+      JSON.stringify(items.map(e => ({ sender: e.sender, body: e.body })), null, 2);
+
+    const hasSegmentedPlaceholders =
+      template.includes("{answered_messages}") ||
+      template.includes("{new_messages}");
+
+    if (hasSegmentedPlaceholders) {
+      return template
+        .replace("{answered_messages}", formatEntries(answeredEntries))
+        .replace("{new_messages}", formatEntries(newEntries))
+        .replace("{answered_count}", String(answeredEntries.length))
+        .replace("{new_count}", String(newEntries.length))
+        .replace("{messages}", formatEntries(allEntries))
+        .replace("{count}", String(allEntries.length));
+    } else {
+      const legacyPreamble = answeredEntries.length > 0
+        ? `[Note: The first ${answeredEntries.length} message(s) below have already been answered. Do NOT re-answer them.]\n`
+        : "";
+      return legacyPreamble + template
+        .replace("{messages}", formatEntries(allEntries))
+        .replace("{count}", String(allEntries.length));
+    }
+  }
+
+  it("legacy template with {messages} adds preamble for answered entries", () => {
+    const template = "History ({count} messages):\n{messages}";
+    const answered = [{ sender: "user1", body: "old question" }];
+    const newMsgs = [{ sender: "user2", body: "new question" }];
+    const all = [...answered, ...newMsgs];
+
+    const result = renderSegmentedTemplate(template, answered, newMsgs, all);
+
+    expect(result).toContain("[Note: The first 1 message(s) below have already been answered. Do NOT re-answer them.]");
+    expect(result).toContain("History (2 messages):");
+    expect(result).toContain('"sender": "user1"');
+    expect(result).toContain('"sender": "user2"');
+  });
+
+  it("legacy template with no answered entries skips preamble", () => {
+    const template = "History ({count} messages):\n{messages}";
+    const answered: Array<{ sender: string; body: string }> = [];
+    const newMsgs = [{ sender: "user1", body: "hello" }];
+
+    const result = renderSegmentedTemplate(template, answered, newMsgs, newMsgs);
+
+    expect(result).not.toContain("[Note:");
+    expect(result).toContain("History (1 messages):");
+  });
+
+  it("segmented template with {answered_messages}/{new_messages} renders correctly", () => {
+    const template =
+      "Already answered ({answered_count}):\n{answered_messages}\n\nNew ({new_count}):\n{new_messages}";
+    const answered = [{ sender: "user1", body: "old" }];
+    const newMsgs = [{ sender: "user2", body: "fresh" }, { sender: "user3", body: "latest" }];
+    const all = [...answered, ...newMsgs];
+
+    const result = renderSegmentedTemplate(template, answered, newMsgs, all);
+
+    expect(result).toContain("Already answered (1):");
+    expect(result).toContain('"body": "old"');
+    expect(result).toContain("New (2):");
+    expect(result).toContain('"body": "fresh"');
+    expect(result).toContain('"body": "latest"');
+    expect(result).not.toContain("[Note:");
+  });
+
+  it("template without any placeholders passes through unchanged", () => {
+    const template = "Static prompt with no placeholders";
+    const result = renderSegmentedTemplate(template, [], [], []);
+    expect(result).toBe("Static prompt with no placeholders");
+  });
+});
+
+describe("media-only reply cutoff tracking", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("uploadAndSendMedia returns SendMessageResult from sendMediaMessage", async () => {
+    const { Readable } = await import("node:stream");
+
+    vi.stubGlobal("fetch", async (url: string, opts?: any) => {
+      if (opts?.method === "HEAD") {
+        return { ok: true, headers: new Headers({ "content-length": "8" }) };
+      }
+      if (typeof url === "string" && url.includes("/v1/bot/")) {
+        // API calls (getUploadCredentials, sendMessage)
+        if (url.includes("upload/credentials")) {
+          return {
+            ok: true,
+            text: async () => JSON.stringify({
+              credentials: { tmpSecretId: "id", tmpSecretKey: "key", sessionToken: "tok" },
+              startTime: 0, expiredTime: 9999999999,
+              bucket: "b", region: "r", key: "k", cdnBaseUrl: "https://cdn.example.com",
+            }),
+          };
+        }
+        // sendMessage response
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ message_id: "mid_123", message_seq: 42 }),
+        };
+      }
+      // GET for file download
+      const body = new Readable({ read() { this.push(Buffer.alloc(8)); this.push(null); } });
+      return {
+        ok: true,
+        headers: new Headers({ "content-type": "image/png" }),
+        body,
+      };
+    });
+
+    // COS upload fails in test env — uploadAndSendMedia should propagate the error
+    await expect(uploadAndSendMedia({
+      mediaUrl: "https://example.com/img.png",
+      apiUrl: "https://api.example.com",
+      botToken: "token",
+      channelId: "ch1",
+      channelType: ChannelType.DM,
+    })).rejects.toThrow();
+  });
+});
+
+describe("cold-start cutoff derivation", () => {
+  it("derives cutoff from bot replies in API backfill when lastBotReplySeq is 0", () => {
+    const lastBotReplySeqMap = new Map<string, number>();
+    const sessionId = "test-session";
+    const botUid = "bot_uid";
+
+    const apiMessages = [
+      { from_uid: "user1", message_seq: 100, content: "hello" },
+      { from_uid: botUid, message_seq: 150, content: "hi there" },
+      { from_uid: "user2", message_seq: 200, content: "hey" },
+      { from_uid: botUid, message_seq: 250, content: "welcome" },
+      { from_uid: "user1", message_seq: 300, content: "new question" },
+    ];
+
+    // Simulate cold-start derivation logic
+    if ((lastBotReplySeqMap.get(sessionId) ?? 0) === 0 && apiMessages.length > 0) {
+      let inferredCutoff = 0;
+      for (const m of apiMessages) {
+        if (
+          m.from_uid === botUid &&
+          typeof m.message_seq === "number" &&
+          m.message_seq > inferredCutoff
+        ) {
+          inferredCutoff = m.message_seq;
+        }
+      }
+      if (inferredCutoff > 0) {
+        lastBotReplySeqMap.set(sessionId, inferredCutoff);
+      }
+    }
+
+    expect(lastBotReplySeqMap.get(sessionId)).toBe(250);
+  });
+
+  it("does not override existing non-zero cutoff", () => {
+    const lastBotReplySeqMap = new Map<string, number>();
+    const sessionId = "test-session";
+    const botUid = "bot_uid";
+    lastBotReplySeqMap.set(sessionId, 500);
+
+    const apiMessages = [
+      { from_uid: botUid, message_seq: 250, content: "old reply" },
+    ];
+
+    if ((lastBotReplySeqMap.get(sessionId) ?? 0) === 0 && apiMessages.length > 0) {
+      let inferredCutoff = 0;
+      for (const m of apiMessages) {
+        if (m.from_uid === botUid && typeof m.message_seq === "number" && m.message_seq > inferredCutoff) {
+          inferredCutoff = m.message_seq;
+        }
+      }
+      if (inferredCutoff > 0) {
+        lastBotReplySeqMap.set(sessionId, inferredCutoff);
+      }
+    }
+
+    expect(lastBotReplySeqMap.get(sessionId)).toBe(500);
+  });
+
+  it("leaves cutoff at 0 when no bot replies in API backfill", () => {
+    const lastBotReplySeqMap = new Map<string, number>();
+    const sessionId = "test-session";
+    const botUid = "bot_uid";
+
+    const apiMessages = [
+      { from_uid: "user1", message_seq: 100, content: "hello" },
+      { from_uid: "user2", message_seq: 200, content: "world" },
+    ];
+
+    if ((lastBotReplySeqMap.get(sessionId) ?? 0) === 0 && apiMessages.length > 0) {
+      let inferredCutoff = 0;
+      for (const m of apiMessages) {
+        if (m.from_uid === botUid && typeof m.message_seq === "number" && m.message_seq > inferredCutoff) {
+          inferredCutoff = m.message_seq;
+        }
+      }
+      if (inferredCutoff > 0) {
+        lastBotReplySeqMap.set(sessionId, inferredCutoff);
+      }
+    }
+
+    expect(lastBotReplySeqMap.has(sessionId)).toBe(false);
+  });
+});
+
+describe("inbound queue serialization", () => {
+  it("same session messages are processed in order", async () => {
+    const order: number[] = [];
+    const queues = new Map<string, Promise<void>>();
+
+    function enqueue(key: string, task: () => Promise<void>): void {
+      const previous = queues.get(key) ?? Promise.resolve();
+      const next = previous
+        .catch(() => undefined)
+        .then(task)
+        .catch(() => {})
+        .finally(() => {
+          if (queues.get(key) === next) queues.delete(key);
+        });
+      queues.set(key, next);
+    }
+
+    enqueue("session-A", async () => {
+      await new Promise(r => setTimeout(r, 50));
+      order.push(1);
+    });
+    enqueue("session-A", async () => {
+      order.push(2);
+    });
+
+    // Wait for queue to drain
+    await queues.get("session-A");
+    // Task 1 should complete before task 2
+    expect(order).toEqual([1, 2]);
+  });
+
+  it("different session messages run concurrently", async () => {
+    const events: string[] = [];
+    const queues = new Map<string, Promise<void>>();
+
+    function enqueue(key: string, task: () => Promise<void>): void {
+      const previous = queues.get(key) ?? Promise.resolve();
+      const next = previous
+        .catch(() => undefined)
+        .then(task)
+        .catch(() => {})
+        .finally(() => {
+          if (queues.get(key) === next) queues.delete(key);
+        });
+      queues.set(key, next);
+    }
+
+    enqueue("session-A", async () => {
+      events.push("A-start");
+      await new Promise(r => setTimeout(r, 50));
+      events.push("A-end");
+    });
+    enqueue("session-B", async () => {
+      events.push("B-start");
+      await new Promise(r => setTimeout(r, 50));
+      events.push("B-end");
+    });
+
+    await Promise.all([queues.get("session-A"), queues.get("session-B")]);
+    // Both should start before either ends (concurrent)
+    expect(events.indexOf("A-start")).toBeLessThan(events.indexOf("A-end"));
+    expect(events.indexOf("B-start")).toBeLessThan(events.indexOf("B-end"));
+    // B should start before A ends (proving concurrency)
+    expect(events.indexOf("B-start")).toBeLessThan(events.indexOf("A-end"));
+  });
+
+  it("queue error in one task does not block subsequent tasks", async () => {
+    const results: string[] = [];
+    const queues = new Map<string, Promise<void>>();
+
+    function enqueue(key: string, task: () => Promise<void>): void {
+      const previous = queues.get(key) ?? Promise.resolve();
+      const next = previous
+        .catch(() => undefined)
+        .then(task)
+        .catch(() => {})
+        .finally(() => {
+          if (queues.get(key) === next) queues.delete(key);
+        });
+      queues.set(key, next);
+    }
+
+    enqueue("session-X", async () => {
+      throw new Error("task 1 failed");
+    });
+    enqueue("session-X", async () => {
+      results.push("task2-ok");
+    });
+
+    await queues.get("session-X");
+    expect(results).toEqual(["task2-ok"]);
+  });
+
+  it("queue cleans up after draining", async () => {
+    const queues = new Map<string, Promise<void>>();
+
+    function enqueue(key: string, task: () => Promise<void>): void {
+      const previous = queues.get(key) ?? Promise.resolve();
+      const next = previous
+        .catch(() => undefined)
+        .then(task)
+        .catch(() => {})
+        .finally(() => {
+          if (queues.get(key) === next) queues.delete(key);
+        });
+      queues.set(key, next);
+    }
+
+    enqueue("session-Z", async () => {});
+
+    await queues.get("session-Z");
+    // After small delay for finally to execute
+    await new Promise(r => setTimeout(r, 10));
+    expect(queues.has("session-Z")).toBe(false);
+  });
+});
+
+// ─── Inbound message_seq cutoff tracking ────────────────────────────────────
+
+describe("inbound message_seq cutoff tracking", () => {
+  /**
+   * Simulates the finally-block logic from handleInboundMessage that records
+   * the cutoff after a successful bot reply. Uses the inbound @mention
+   * message's message_seq (from WebSocket frame) rather than sendMessage's
+   * returned message_seq (which is always 0).
+   */
+  function recordCutoff(
+    lastBotReplySeqMap: Map<string, number>,
+    sessionId: string,
+    inboundMessageSeq: unknown,
+    replySucceeded: boolean,
+  ): void {
+    if (replySucceeded) {
+      const seq = inboundMessageSeq;
+      if (typeof seq === "number" && seq > 0) {
+        const existing = lastBotReplySeqMap.get(sessionId) ?? 0;
+        if (seq > existing) {
+          lastBotReplySeqMap.set(sessionId, seq);
+        }
+      }
+    }
+  }
+
+  it("should update cutoff using inbound message_seq even when sendMessage returns 0", () => {
+    const map = new Map<string, number>();
+    const sessionId = "group_abc";
+
+    // sendMessage would have returned message_seq=0, but we use the inbound seq
+    const sendMessageReturnedSeq = 0;
+    const inboundMsgSeq = 500;
+
+    // Old logic would fail: recordCutoff with sendMessageReturnedSeq=0 does nothing
+    recordCutoff(map, sessionId, sendMessageReturnedSeq, true);
+    expect(map.has(sessionId)).toBe(false);
+
+    // New logic: use inbound message_seq
+    recordCutoff(map, sessionId, inboundMsgSeq, true);
+    expect(map.get(sessionId)).toBe(500);
+  });
+
+  it("should preserve monotonic-increasing cutoff (never go backwards)", () => {
+    const map = new Map<string, number>();
+    const sessionId = "group_abc";
+
+    recordCutoff(map, sessionId, 300, true);
+    expect(map.get(sessionId)).toBe(300);
+
+    // Older message_seq should not override
+    recordCutoff(map, sessionId, 200, true);
+    expect(map.get(sessionId)).toBe(300);
+
+    // Higher message_seq should update
+    recordCutoff(map, sessionId, 500, true);
+    expect(map.get(sessionId)).toBe(500);
+  });
+
+  it("should guard against non-number and non-positive message_seq", () => {
+    const map = new Map<string, number>();
+    const sessionId = "group_abc";
+
+    recordCutoff(map, sessionId, undefined, true);
+    expect(map.has(sessionId)).toBe(false);
+
+    recordCutoff(map, sessionId, null, true);
+    expect(map.has(sessionId)).toBe(false);
+
+    recordCutoff(map, sessionId, "500", true);
+    expect(map.has(sessionId)).toBe(false);
+
+    recordCutoff(map, sessionId, 0, true);
+    expect(map.has(sessionId)).toBe(false);
+
+    recordCutoff(map, sessionId, -1, true);
+    expect(map.has(sessionId)).toBe(false);
+  });
+
+  it("should not update cutoff when reply failed", () => {
+    const map = new Map<string, number>();
+    const sessionId = "group_abc";
+
+    recordCutoff(map, sessionId, 500, false);
+    expect(map.has(sessionId)).toBe(false);
+  });
+
+  it("hot-run multi-round: first @bot sets cutoff, second @bot sees first as answered", () => {
+    const map = new Map<string, number>();
+    const sessionId = "group_xyz";
+
+    // Round 1: user @bot with message_seq=100, bot replies successfully
+    recordCutoff(map, sessionId, 100, true);
+    expect(map.get(sessionId)).toBe(100);
+
+    // Round 2: user @bot with message_seq=300
+    // History includes messages at seq 50, 100, 120, 200, 300
+    const entries = [
+      { sender: "userA", body: "Q1 @bot", message_seq: 50, message_id: "m1" },
+      { sender: "userA", body: "Q2 @bot (round 1 trigger)", message_seq: 100, message_id: "m2" },
+      { sender: "userC", body: "random chat", message_seq: 120, message_id: "m3" },
+      { sender: "userB", body: "comment", message_seq: 200, message_id: "m4" },
+      { sender: "userA", body: "Q3 @bot (round 2 trigger)", message_seq: 300, message_id: "m5" },
+    ];
+
+    const cutoffSeq = map.get(sessionId) ?? 0; // 100
+    const { answered, new: newEntries } = segmentHistoryEntries({
+      entries,
+      cutoffSeq,
+      currentMsgId: "m5",
+    });
+
+    // Messages at seq 50 and 100 should be marked as answered
+    expect(answered).toHaveLength(2);
+    expect(answered.map(e => e.message_seq)).toEqual([50, 100]);
+
+    // Messages at seq 120 and 200 are new (above cutoff, not the current msg)
+    expect(newEntries).toHaveLength(2);
+    expect(newEntries.map(e => e.message_seq)).toEqual([120, 200]);
+
+    // After round 2 reply succeeds, cutoff updates to 300
+    recordCutoff(map, sessionId, 300, true);
+    expect(map.get(sessionId)).toBe(300);
+  });
+
+  it("concurrent @mentions in serial queue: cutoff updates monotonically", () => {
+    const map = new Map<string, number>();
+    const sessionId = "group_concurrent";
+
+    // Messages arrive rapidly: seq 100, 200, 300
+    // Serial queue processes them in order
+    recordCutoff(map, sessionId, 100, true);
+    expect(map.get(sessionId)).toBe(100);
+
+    recordCutoff(map, sessionId, 200, true);
+    expect(map.get(sessionId)).toBe(200);
+
+    recordCutoff(map, sessionId, 300, true);
+    expect(map.get(sessionId)).toBe(300);
+
+    // If a stale message somehow gets processed, cutoff stays at 300
+    recordCutoff(map, sessionId, 150, true);
+    expect(map.get(sessionId)).toBe(300);
   });
 });

@@ -15,6 +15,19 @@ const DEFAULT_HEADERS = {
   "Content-Type": "application/json",
 };
 
+/**
+ * Parse JSON with int64 message_id protection.
+ * Converts 16+ digit numeric message_id values to strings before JSON.parse
+ * to prevent JavaScript precision loss for IDs exceeding Number.MAX_SAFE_INTEGER.
+ */
+function parseOctoJson<T>(text: string): T {
+  const safeText = text.replace(
+    /"message_id"\s*:\s*(\d{16,})/g,
+    '"message_id":"$1"',
+  );
+  return JSON.parse(safeText) as T;
+}
+
 export async function postJson<T>(
   apiUrl: string,
   botToken: string,
@@ -41,11 +54,7 @@ export async function postJson<T>(
   const text = await response.text();
   if (!text) return undefined;
   try {
-    // Protect int64 message_id from JSON.parse precision loss.
-    // Applied globally in postJson since only "message_id" fields are matched;
-    // the regex is conservative (16+ digits) to avoid any precision edge cases.
-    const safeText = text.replace(/"message_id"\s*:\s*(\d{16,})/g, '"message_id":"$1"');
-    return JSON.parse(safeText) as T;
+    return parseOctoJson<T>(text);
   } catch {
     throw new Error(`Octo API ${path} returned invalid JSON: ${text.slice(0, 200)}`);
   }
@@ -69,7 +78,7 @@ export async function sendMediaMessage(params: {
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
   signal?: AbortSignal;
-}): Promise<void> {
+}): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
     type: params.type,
     url: params.url,
@@ -99,7 +108,7 @@ export async function sendMediaMessage(params: {
     }
     payload.mention = mention;
   }
-  await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+  return await postJson<SendMessageResult>(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
@@ -625,6 +634,18 @@ export async function deleteVoiceContext(params: {
   });
 }
 
+/** Decoded payload from base64 message content */
+interface SyncMessagePayload {
+  type?: number;
+  content?: string;
+  url?: string;
+  name?: string;
+  mention?: {
+    all?: boolean;
+    uids?: string[];
+  };
+}
+
 /**
  * 获取频道历史消息（用于注入上下文）
  * @param params.log - Optional logger for consistent logging with OpenClaw log system
@@ -639,7 +660,7 @@ export async function getChannelMessages(params: {
   endMessageSeq?: number;
   signal?: AbortSignal;
   log?: { info?: (msg: string) => void; error?: (msg: string) => void };
-}): Promise<Array<{ from_uid: string; content: string; timestamp: number; type?: number; url?: string; name?: string }>> {
+}): Promise<Array<{ from_uid: string; content: string; timestamp: number; message_id?: string; message_seq?: number; type?: number; url?: string; name?: string; payload?: SyncMessagePayload }>> {
   try {
     const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/messages/sync`;
     const limit = params.limit ?? 20;
@@ -665,11 +686,14 @@ export async function getChannelMessages(params: {
       return [];
     }
 
-    const data = await response.json();
+    const text = await response.text();
+    const data = text
+      ? parseOctoJson<{ messages?: any[] }>(text)
+      : {};
     const messages = data.messages ?? [];
     return messages.map((m: any) => {
       // payload is base64-encoded JSON string
-      let payload: any = {};
+      let payload: SyncMessagePayload = {};
       if (m.payload) {
         try {
           const decoded = Buffer.from(m.payload, "base64").toString("utf-8");
@@ -682,6 +706,8 @@ export async function getChannelMessages(params: {
       }
       return {
         from_uid: m.from_uid ?? "unknown",
+        message_id: m.message_id ?? undefined,
+        message_seq: m.message_seq ?? undefined,
         type: payload.type ?? undefined,
         url: payload.url ?? undefined,
         name: payload.name ?? undefined,
