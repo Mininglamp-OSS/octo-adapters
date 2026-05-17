@@ -1,5 +1,6 @@
 # Default owners
-* @Mininglamp-OSS/core-team
+* @Mininglamp-OSS/maintainers
 
 # Adapter implementations
-/adapters/ @Mininglamp-OSS/core-team
+/openclaw-channel-octo/ @Mininglamp-OSS/maintainers
+/openclaw-channel-dmwork/ @Mininglamp-OSS/maintainers
