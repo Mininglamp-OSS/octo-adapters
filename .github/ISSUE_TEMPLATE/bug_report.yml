@@ -20,7 +20,7 @@ body:
       label: Steps to Reproduce
       description: List the steps to reproduce
       placeholder: |
-        1. Configure dmwork channel plugin
+        1. Configure octo channel plugin
         2. Run `openclaw gateway restart`
         3. Observe logs: WebSocket disconnects every 30s
     validations:

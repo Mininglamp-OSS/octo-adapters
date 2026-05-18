@@ -1,6 +1,6 @@
 version: 2
 updates:
   - package-ecosystem: "npm"
-    directory: "/openclaw-channel-dmwork"
+    directory: "/openclaw-channel-octo"
     schedule:
       interval: "weekly"
