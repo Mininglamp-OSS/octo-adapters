@@ -931,6 +931,39 @@ export function resolveCommandAuthorized(isGroup: boolean, isOwnerUser: boolean,
   return !isGroup || (isOwnerUser && isExplicitBotMention);
 }
 
+/**
+ * Resolve the reply target channelId for an inbound message.
+ *
+ * For group messages, replies always go to the group channel.
+ * For DM messages, replies normally go back to the sender (`from_uid`).
+ *
+ * OBO (On-Behalf-Of) fan-out copy case:
+ *   When the server fans out an OBO message to the agent (e.g. James acting
+ *   on-behalf-of admin in admin↔bob DM), it sets `from_uid` to the grantor
+ *   (admin) for invisibility — see octo-server's `buildFanoutCopyReq`. The
+ *   real conversation peer is stashed in `payload.obo_origin_from_uid` (e.g.
+ *   "u_bob"). Replying to `from_uid=admin` would target the grantor itself
+ *   (admin→admin self-send, which the server rejects). We must reply to the
+ *   real peer instead.
+ *
+ * Falls back to `fromUid` when no OBO marker is present (backward compat).
+ */
+export function resolveReplyChannelId(params: {
+  isGroup: boolean;
+  channelId?: string;
+  fromUid: string;
+  payload?: BotMessage["payload"];
+}): string {
+  if (params.isGroup) {
+    return params.channelId!;
+  }
+  const oboOriginFromUid = params.payload?.obo_origin_from_uid;
+  if (typeof oboOriginFromUid === "string" && oboOriginFromUid.length > 0) {
+    return oboOriginFromUid;
+  }
+  return params.fromUid;
+}
+
 export function segmentHistoryEntries(params: {
   entries: Array<{ message_id?: string; message_seq?: number; [key: string]: any }>;
   cutoffSeq: number;
@@ -1585,7 +1618,16 @@ export async function handleInboundMessage(params: {
 
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
 
-  const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
+  // For OBO fan-out copies, the server sets from_uid to the grantor (e.g. admin)
+  // for invisibility, while the real conversation peer lives in
+  // payload.obo_origin_from_uid (e.g. u_bob). Replying to from_uid would target
+  // the grantor (self-send), so we must use the OBO origin when present.
+  const replyChannelId = resolveReplyChannelId({
+    isGroup,
+    channelId: message.channel_id,
+    fromUid: message.from_uid,
+    payload: message.payload,
+  });
   const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
 
   // 已读回执 + 正在输入 — fire-and-forget
