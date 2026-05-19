@@ -434,6 +434,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         threadId: ctx.toolContext?.threadId ?? ctx.params?.threadId ?? undefined,
         requesterSenderId: ctx.requesterSenderId ?? undefined,
         accountId,
+        onBehalfOf: account.config.onBehalfOf,
         log: ctx.log,
       });
     },
@@ -550,6 +551,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         ...(mentionUids.length > 0 ? { mentionUids } : {}),
         ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
         mentionAll: hasAtAll || undefined,
+        ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
       });
 
       return { channel: CHANNEL_ID, to: ctx.to, messageId: "" };
@@ -687,6 +689,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             height: dims?.height,
             name: filename,
             size: fileSize,
+            ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
           });
         } else {
           await sendMediaMessage({
@@ -698,6 +701,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
             url: cdnUrl,
             name: filename,
             size: fileSize,
+            ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
           });
         }
       } finally {

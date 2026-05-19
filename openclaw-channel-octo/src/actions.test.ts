@@ -1973,3 +1973,92 @@ describe("extractInlineMentionUids", () => {
     expect(extractInlineMentionUids("group:grp1@uid1,,uid2,")).toEqual(["uid1", "uid2"]);
   });
 });
+
+// ─── handleDmworkMessageAction("send") — onBehalfOf passthrough ────────────
+// Regression for PR #35 review (lml2468 option 1): the structural change adds
+// `onBehalfOf?: string` to handleDmworkMessageAction params, threaded down to
+// handleSend → sendMessage and handleSend → uploadAndSendMedia. Pins that
+// the LLM `message(action=send)` tool path carries `on_behalf_of` in the
+// outbound HTTP body.
+
+describe("handleDmworkMessageAction send — onBehalfOf passthrough", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    _clearOwnerRegistry();
+    _clearMemberCache();
+    _resetGroupMd();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("forwards onBehalfOf to /v1/bot/sendMessage as on_behalf_of (text)", async () => {
+    let sentPayload: any = null;
+    globalThis.fetch = mockFetch({
+      "/v1/bot/sendMessage": async (_url, init) => {
+        sentPayload = JSON.parse(init?.body as string);
+        return jsonResponse({ message_id: 1, message_seq: 1 });
+      },
+    });
+
+    const { handleDmworkMessageAction } = await import("./actions.js");
+    const result = await handleDmworkMessageAction({
+      action: "send",
+      args: { target: "group:chan123", message: "hi" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      onBehalfOf: "yu_uid",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sentPayload).not.toBeNull();
+    expect(sentPayload.on_behalf_of).toBe("yu_uid");
+  });
+
+  it("omits on_behalf_of when onBehalfOf is unset (backward compat)", async () => {
+    let sentPayload: any = null;
+    globalThis.fetch = mockFetch({
+      "/v1/bot/sendMessage": async (_url, init) => {
+        sentPayload = JSON.parse(init?.body as string);
+        return jsonResponse({ message_id: 1, message_seq: 1 });
+      },
+    });
+
+    const { handleDmworkMessageAction } = await import("./actions.js");
+    const result = await handleDmworkMessageAction({
+      action: "send",
+      args: { target: "group:chan123", message: "hi" },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(sentPayload).not.toBeNull();
+    expect(sentPayload).not.toHaveProperty("on_behalf_of");
+  });
+
+  it("forwards onBehalfOf to uploadAndSendMedia for media-only sends", async () => {
+    // uploadAndSendMedia is mocked at the top of this file; just verify it
+    // received onBehalfOf in its params.
+    const inbound = await import("./inbound.js");
+    (inbound.uploadAndSendMedia as any).mockClear();
+
+    const { handleDmworkMessageAction } = await import("./actions.js");
+    const result = await handleDmworkMessageAction({
+      action: "send",
+      args: {
+        target: "group:chan123",
+        mediaUrl: "https://cdn.example/x.png",
+      },
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      onBehalfOf: "yu_uid",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(inbound.uploadAndSendMedia).toHaveBeenCalledTimes(1);
+    const call = (inbound.uploadAndSendMedia as any).mock.calls[0][0];
+    expect(call.onBehalfOf).toBe("yu_uid");
+  });
+});

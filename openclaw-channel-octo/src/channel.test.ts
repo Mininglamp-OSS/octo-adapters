@@ -713,3 +713,170 @@ describe("outbound sendText/sendMedia — accountId correction threads through t
     expect(call.botToken).toBe("tok-bot-b");
   });
 });
+
+// ─── outbound onBehalfOf passthrough (Persona Clone / OBO) ─────────────────
+// Regression for PR #35 review (Jerry-Xin / lml2468): the original wiring
+// only threaded `account.config.onBehalfOf` through the inbound reply paths.
+// Framework-driven outbound sends (skills, scheduled pushes) and the LLM
+// `message(action=send)` tool path were silently dropping it, breaking the
+// documented contract that every outbound message carries `on_behalf_of`.
+// These tests pin down that:
+//   1. outbound.sendText forwards account.config.onBehalfOf
+//   2. outbound.sendMedia (image + file) forwards it
+//   3. handleDmworkMessageAction("send") forwards it (text + media)
+//   4. Unset / empty onBehalfOf still produces a payload WITHOUT the field
+//      (backward compatibility — no `on_behalf_of: undefined` leaking)
+
+describe("outbound.sendText — onBehalfOf passthrough", () => {
+  const cfgWithObo = {
+    channels: {
+      octo: {
+        apiUrl: "https://api.example",
+        accounts: {
+          default: {
+            botToken: "bf_test",
+            apiUrl: "https://api.example",
+            onBehalfOf: "yu_uid",
+          },
+        },
+      },
+    },
+  };
+
+  const cfgWithoutObo = {
+    channels: {
+      octo: {
+        apiUrl: "https://api.example",
+        accounts: {
+          default: { botToken: "bf_test", apiUrl: "https://api.example" },
+        },
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    const apiFetch = await import("./api-fetch.js");
+    (apiFetch.sendMessage as any).mockClear();
+  });
+
+  it("forwards account.config.onBehalfOf to sendMessage", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg: cfgWithObo,
+      to: "group:grp_obo_test",
+      text: "scheduled push",
+      accountId: "default",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call.onBehalfOf).toBe("yu_uid");
+  });
+
+  it("omits onBehalfOf when not configured (backward compat)", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendText!({
+      cfg: cfgWithoutObo,
+      to: "group:grp_obo_test",
+      text: "scheduled push",
+      accountId: "default",
+    } as any);
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMessage as any).mock.calls[0][0];
+    expect(call).not.toHaveProperty("onBehalfOf");
+  });
+});
+
+describe("outbound.sendMedia — onBehalfOf passthrough", () => {
+  const cfgWithObo = {
+    channels: {
+      octo: {
+        apiUrl: "https://api.example",
+        accounts: {
+          default: {
+            botToken: "bf_test",
+            apiUrl: "https://api.example",
+            onBehalfOf: "yu_uid",
+          },
+        },
+      },
+    },
+  };
+
+  const cfgWithoutObo = {
+    channels: {
+      octo: {
+        apiUrl: "https://api.example",
+        accounts: {
+          default: { botToken: "bf_test", apiUrl: "https://api.example" },
+        },
+      },
+    },
+  };
+
+  beforeEach(async () => {
+    const apiFetch = await import("./api-fetch.js");
+    (apiFetch.sendMediaMessage as any).mockClear();
+    (apiFetch.getUploadCredentials as any).mockClear();
+    (apiFetch.uploadFileToCOS as any).mockClear();
+  });
+
+  it("forwards onBehalfOf for file/text media uploads", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg: cfgWithObo,
+      to: "group:grp_obo_test",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "default",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    expect(call.onBehalfOf).toBe("yu_uid");
+  });
+
+  it("forwards onBehalfOf for image media uploads", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    // 1x1 transparent PNG — exercises the image branch (msgType === Image)
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg: cfgWithObo,
+      to: "group:grp_obo_test",
+      text: "",
+      mediaUrl: `data:image/png;base64,${pngBase64}`,
+      accountId: "default",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    expect(call.onBehalfOf).toBe("yu_uid");
+  });
+
+  it("omits onBehalfOf when not configured (backward compat)", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const { sendMediaMessage } = await import("./api-fetch.js");
+
+    await dmworkPlugin.outbound!.sendMedia!({
+      cfg: cfgWithoutObo,
+      to: "group:grp_obo_test",
+      text: "",
+      mediaUrl: "data:text/plain;base64,aGVsbG8=",
+      accountId: "default",
+    } as any);
+
+    expect(sendMediaMessage).toHaveBeenCalledTimes(1);
+    const call = (sendMediaMessage as any).mock.calls[0][0];
+    expect(call).not.toHaveProperty("onBehalfOf");
+  });
+});
