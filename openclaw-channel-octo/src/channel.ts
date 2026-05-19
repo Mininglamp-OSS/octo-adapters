@@ -296,12 +296,19 @@ async function checkForUpdates(
     if (resp.ok) {
       const data = await resp.json() as { package?: { latestVersion?: string } };
       const latest = data?.package?.latestVersion;
-      if (latest && latest !== localVersion) {
+      // Sanitize remote value before interpolating into a log line: a hostile
+      // or corrupted ClawHub response could inject newlines / terminal escape
+      // sequences. Only accept a SemVer-like string before logging
+      // (P2 security_sensitive, PR #37 review).
+      const isSemverLike = typeof latest === "string" && /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(latest);
+      if (isSemverLike && latest !== localVersion) {
         log?.info?.(
           `octo: new version available: ${latest} (current: ${localVersion}). ` +
           `Run: openclaw plugins install clawhub:octo --force ` +
           `(or upgrade via: npx openclaw-channel-octo install)`,
         );
+      } else if (latest && !isSemverLike) {
+        log?.debug?.(`octo: ClawHub returned unexpected latest version format; ignoring`);
       }
     } else if (resp.status === 404) {
       log?.debug?.(`octo: ClawHub returned 404 for octo (not published yet)`);

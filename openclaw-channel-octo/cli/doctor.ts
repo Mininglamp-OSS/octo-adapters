@@ -238,7 +238,7 @@ export async function runDoctorChecks(params: {
           name: "Plugin enabled",
           status: "FAIL",
           detail:
-            "No (auto-fix failed; run `openclaw plugins enable ${PLUGIN_ID}`)",
+            `No (auto-fix failed; run \`openclaw plugins enable ${PLUGIN_ID}\`)`,
         });
       }
     } else {
@@ -247,7 +247,7 @@ export async function runDoctorChecks(params: {
         status: "WARN",
         detail:
           "No — installed but disabled. Run `openclaw-channel-octo doctor --fix` " +
-          "or `openclaw plugins enable ${PLUGIN_ID}`.",
+          `or \`openclaw plugins enable ${PLUGIN_ID}\`.`,
       });
     }
   }

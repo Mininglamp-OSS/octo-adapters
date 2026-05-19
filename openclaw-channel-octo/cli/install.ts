@@ -144,7 +144,10 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   // v2.0.0+ installs via ClawHub (`clawhub:octo`) instead of npm.
   // --dev / --next: ClawHub dist-tag semantics differ from npm; not supported
   // in v2.0.0. Use --from with a local tarball for pre-release testing.
-  if (opts.dev || opts.next) {
+  // Gate the warning on !opts.from — when --from overrides the spec, --dev/--next
+  // are silently ignored per the doc comment on InstallOptions.next, so warning
+  // about them adds noise without action (P2, PR #37 review).
+  if ((opts.dev || opts.next) && !opts.from) {
     console.warn(
       "Warning: --dev / --next are not supported in v2.0.0+ " +
       "(ClawHub installs use a different release model). " +
@@ -658,7 +661,10 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
 
   try {
     console.log(`  Installing ${PLUGIN_ID}...`);
-    pluginsInstall(spec, quiet);
+    // P2 (PR #37): pass force=true to be consistent with other recovery paths
+    // (broken / cleanup) — deadlock repair may leave a partial extension dir
+    // from a previous crashed attempt that bare install would refuse to overwrite.
+    pluginsInstall(spec, quiet, true);
   } catch (err) {
     console.error("  Install failed! Restoring config...");
     try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }
