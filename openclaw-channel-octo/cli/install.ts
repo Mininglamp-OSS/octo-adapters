@@ -260,9 +260,21 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   //   - ClawHub install OK but uninstall fails → throw (loud), because leaving
   //     both plugins live causes duplicate channel "octo" registration. User
   //     must manually clean up: `openclaw plugins uninstall <NPM_PACKAGE_NAME>`.
+  //
+  // P0-2 (PR #37 review): `openclaw plugins uninstall` ALSO removes
+  // `channels.<channelId>` config as a side effect (see cli/uninstall.ts:2-4
+  // and cli/openclaw-cli.ts:647-650). Since both the legacy npm plugin and the
+  // new ClawHub plugin own `channel.id = "octo"`, uninstalling the legacy npm
+  // plugin will wipe `channels.octo` along with it — including any bot accounts
+  // the user just migrated. We save channels.octo + bindings(channel=octo)
+  // before uninstall and restore them after, mirroring the runMigration pattern.
   // ---------------------------------------------------------------------------
   if (oldNpmSnapshot.installed) {
     if (isHealthyInstall(PLUGIN_ID)) {
+      // SAVE channels.octo + bindings BEFORE uninstall (uninstall removes them)
+      const savedChannelConfig = saveChannelConfigFromFile(CHANNEL_ID);
+      const savedBindings = saveBindingsFromFile(CHANNEL_ID);
+
       if (oldNpmSnapshot.enabled === true) {
         try {
           pluginsDisable(NPM_PACKAGE_NAME);
@@ -270,6 +282,17 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       }
       try {
         pluginsUninstall(NPM_PACKAGE_NAME, true);
+
+        // RESTORE channels.octo + bindings (openclaw uninstall removed them as
+        // a side effect; we kept a snapshot above)
+        if (savedChannelConfig) {
+          restoreChannelConfigToFile(savedChannelConfig, CHANNEL_ID);
+          console.log(`  Preserved channels.${CHANNEL_ID} config across legacy uninstall.`);
+        }
+        if (savedBindings.length > 0) {
+          restoreBindingsToFile(savedBindings, CHANNEL_ID, CHANNEL_ID);
+          console.log(`  Preserved ${savedBindings.length} bindings(channel=${CHANNEL_ID}) across legacy uninstall.`);
+        }
         console.log(`Uninstalled legacy ${NPM_PACKAGE_NAME} (replaced by ClawHub octo).`);
         didChange = true;
       } catch (err) {

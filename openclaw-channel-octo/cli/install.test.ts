@@ -481,4 +481,95 @@ describe("runInstall — update scenario", () => {
     // Gateway must have been restarted (didChange = true via cleanup)
     expect(didCallGatewayRestart(calls)).toBe(true);
   });
+
+  it("legacy npm cleanup preserves channels.octo + bindings(channel=octo) (P0-2 regression)", async () => {
+    // PR #37 review P0-2: `openclaw plugins uninstall openclaw-channel-octo`
+    // ALSO removes channels.octo as a side effect (both plugins own channel
+    // id "octo"). Without save/restore, user bot accounts vanish after the
+    // supposedly-successful migration.
+    //
+    // This test simulates that side effect: the uninstall mock writes a cfg
+    // with channels.octo removed. The fix saves channels.octo + bindings(octo)
+    // before uninstall and restores them after, so the final cfg must still
+    // contain the user's bot account + binding.
+    const fs = await import("node:fs");
+    const mockReadFileSync = vi.mocked(fs.readFileSync);
+    const mockWriteFileSync = vi.mocked(fs.writeFileSync);
+    const mockExistsSync = vi.mocked(fs.existsSync);
+
+    // Stateful cfg so save→uninstall(removes channels.octo)→restore round-trips.
+    const state: any = {
+      plugins: {
+        entries: {
+          "openclaw-channel-octo": { enabled: true },
+          octo: { enabled: true },
+        },
+        installs: {
+          "openclaw-channel-octo": { source: "npm", version: "1.0.0" },
+          octo: { source: "clawhub", version: "1.0.7" },
+        },
+        allow: ["openclaw-channel-octo", "octo"],
+      },
+      channels: {
+        octo: {
+          accounts: {
+            mybot: { botToken: "bf_user_secret", apiUrl: "https://im.example/api", name: "mybot" },
+          },
+        },
+      },
+      bindings: [
+        { agentId: "agent1", match: { channel: "octo", accountId: "mybot" } },
+      ],
+    };
+    mockReadFileSync.mockImplementation((path) => {
+      if (String(path).endsWith("openclaw.json")) return JSON.stringify(state);
+      return "{}";
+    });
+    mockWriteFileSync.mockImplementation((path: any, data: any) => {
+      const p = String(path);
+      if (p.endsWith("openclaw.json.tmp") || p.endsWith("openclaw.json")) {
+        try { Object.assign(state, JSON.parse(String(data))); } catch { /* ignore */ }
+      }
+    });
+    mockExistsSync.mockImplementation((path) => String(path).endsWith("extensions/octo"));
+
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.5.7\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        const id = a[2];
+        if (id === "openclaw-channel-octo") {
+          return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } });
+        }
+        return inspectDispatch(a, {
+          id: "octo", version: "1.0.7", latestVersion: "1.0.7", enabled: true,
+        });
+      }
+      // Simulate OpenClaw's side effect: uninstall removes channels.<channelId>.
+      // This is the bug that P0-2 protects against; the save/restore code in
+      // runInstall should keep the user's bot account alive across this.
+      if (a[0] === "plugins" && a[1] === "uninstall" && a[2] === "openclaw-channel-octo") {
+        delete state.channels?.octo;
+        state.bindings = (state.bindings ?? []).filter((b: any) => b?.match?.channel !== "octo");
+        return "";
+      }
+      if (a[0] === "plugins" && a[1] === "disable") return "";
+      if (a[0] === "gateway" && a[1] === "restart") return "";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    // P0-2 assertion: user's bot account survived the migration
+    expect(state.channels?.octo?.accounts?.mybot?.botToken).toBe("bf_user_secret");
+    expect(state.channels?.octo?.accounts?.mybot?.apiUrl).toBe("https://im.example/api");
+    // Binding also survived
+    expect(state.bindings).toHaveLength(1);
+    expect(state.bindings[0].match.channel).toBe("octo");
+    expect(state.bindings[0].match.accountId).toBe("mybot");
+    expect(state.bindings[0].agentId).toBe("agent1");
+  });
 });
