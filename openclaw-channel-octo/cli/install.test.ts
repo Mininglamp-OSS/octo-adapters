@@ -1,3 +1,23 @@
+/**
+ * runInstall — non-migration scenarios:
+ *   - update (already healthy, compare via openclaw plugins inspect --json)
+ *   - --force, --from, --dev / --next (deprecated warn + latest fallback)
+ *   - 4.20 hardening (plugins.allow self-heal)
+ *
+ * v2.0.0 changes vs v1.x:
+ *   - Plugin id is now "octo" (ClawHub plugin id), not "openclaw-channel-octo"
+ *   - Install spec is "clawhub:octo", not "openclaw-channel-octo"
+ *   - latest-version source: `openclaw plugins inspect octo --json` (via
+ *     OpenClaw's built-in ClawHub client) instead of `npm view ...@<tag>`
+ *   - --dev / --next are no-ops that warn + fall back to ClawHub @latest
+ *   - Entry-point cleanup of legacy npm `openclaw-channel-octo` plugin (deferred
+ *     until ClawHub install verifies healthy)
+ *
+ * Plugin id dispatch in mocks: `inspect openclaw-channel-octo` returns
+ * not-found by default so the legacy npm cleanup path no-ops; tests that
+ * exercise the cleanup path override this explicitly.
+ */
+
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { execFileSync } from "node:child_process";
 
@@ -20,24 +40,21 @@ vi.mock("node:fs", async (importOriginal) => {
 
 const mockExecFileSync = vi.mocked(execFileSync);
 
-// Helpers to mock module internals via execFileSync dispatch
-function mockOpenClawVersion(version: string) {
-  // openclaw --version returns version string
-  return version;
-}
-
 async function loadInstall() {
   vi.resetModules();
   return await import("./install.js");
 }
 
-// We test by observing which commands are executed via execFileSync
 function getCalledArgs(): string[][] {
   return mockExecFileSync.mock.calls.map((c) => c[1] as string[]);
 }
 
 function didCallPluginsInstall(calls: string[][]): boolean {
   return calls.some((args) => args[0] === "plugins" && args[1] === "install");
+}
+
+function didCallPluginsUpdate(calls: string[][]): boolean {
+  return calls.some((args) => args[0] === "plugins" && args[1] === "update");
 }
 
 function didCallGatewayRestart(calls: string[][]): boolean {
@@ -47,6 +64,20 @@ function didCallGatewayRestart(calls: string[][]): boolean {
 function pluginsInstallSpec(calls: string[][]): string | undefined {
   const call = calls.find((args) => args[0] === "plugins" && args[1] === "install");
   return call?.[2];
+}
+
+/**
+ * Default dispatch for `plugins inspect`. Returns octo plugin metadata when
+ * args[2] === "octo"; returns not-found for the legacy npm name so the entry
+ * cleanup path no-ops. Override per-test for cleanup-path scenarios.
+ */
+function inspectDispatch(args: string[], octoData: object): string {
+  const id = args[2];
+  if (id === "openclaw-channel-octo") {
+    throw new Error("Plugin not found: openclaw-channel-octo");
+  }
+  // Default (id === "octo" or empty): return octo metadata
+  return JSON.stringify({ plugin: octoData });
 }
 
 describe("runInstall — update scenario", () => {
@@ -59,16 +90,18 @@ describe("runInstall — update scenario", () => {
 
     mockExecFileSync.mockImplementation((_cmd, args) => {
       const a = args as string[];
-      // openclaw config file
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
-      // openclaw --version
       if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
-      // plugins inspect
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "0.6.0", enabled: true } });
+        // getLatestClawHubVersion (id=octo, --json) returns plugin.latestVersion;
+        // detectScenario inspect (id=octo) returns current plugin metadata.
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.6.0",
+          latestVersion: "0.6.0",
+          enabled: true,
+        });
       }
-      // npm view (targetVersion)
-      if (a[0] === "view") return "0.6.0\n";
       return "";
     });
 
@@ -79,7 +112,7 @@ describe("runInstall — update scenario", () => {
     expect(didCallGatewayRestart(calls)).toBe(false);
   });
 
-  it("--force: installs without checking version, then restarts", async () => {
+  it("--force: installs with ClawHub spec, then restarts", async () => {
     const { runInstall } = await loadInstall();
 
     mockExecFileSync.mockImplementation((_cmd, args) => {
@@ -87,13 +120,14 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "0.6.0", enabled: true } });
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.6.0",
+          latestVersion: "0.6.0",
+          enabled: true,
+        });
       }
-      // npm view should NOT be called for --force
-      if (a[0] === "view") throw new Error("npm view should not be called with --force");
-      // gateway restart
       if (a[0] === "gateway" && a[1] === "restart") return "";
-      // plugins install
       if (a[0] === "plugins" && a[1] === "install") return "";
       return "";
     });
@@ -102,11 +136,15 @@ describe("runInstall — update scenario", () => {
 
     const calls = getCalledArgs();
     expect(didCallPluginsInstall(calls)).toBe(true);
-    expect(pluginsInstallSpec(calls)).toBe("openclaw-channel-octo");
+    expect(pluginsInstallSpec(calls)).toBe("clawhub:octo");
     expect(didCallGatewayRestart(calls)).toBe(true);
   });
 
-  it("npm view fails: no install, no restart", async () => {
+  it("no latestVersion locally: delegates to `openclaw plugins update`", async () => {
+    // v2.0.0+: when inspect doesn't report latestVersion (e.g. older OpenClaw
+    // doesn't track ClawHub upstream), fall back to `openclaw plugins update`
+    // which queries ClawHub via OpenClaw's built-in client. If already latest,
+    // it's a no-op and we skip the gateway restart.
     const { runInstall } = await loadInstall();
 
     mockExecFileSync.mockImplementation((_cmd, args) => {
@@ -114,20 +152,32 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "0.6.0", enabled: true } });
+        // No latestVersion field → triggers the pluginsUpdate fallback path.
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.6.0",
+          enabled: true,
+        });
       }
-      if (a[0] === "view") throw new Error("ENOTFOUND registry.npmjs.org");
+      if (a[0] === "plugins" && a[1] === "update") return "";
       return "";
     });
 
     await runInstall({ force: false, dev: false });
 
     const calls = getCalledArgs();
+    // Delegated to plugins update, not plugins install
     expect(didCallPluginsInstall(calls)).toBe(false);
+    expect(didCallPluginsUpdate(calls)).toBe(true);
+    // No change → no restart
     expect(didCallGatewayRestart(calls)).toBe(false);
   });
 
-  it("--dev: uses openclaw-channel-octo@dev spec", async () => {
+  it("--dev: warns then falls back to ClawHub @latest spec", async () => {
+    // v2.0.0+: --dev / --next are no-op flags that warn the user. ClawHub's
+    // release model differs from npm dist-tags; for pre-release testing use
+    // --from <tarball>.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { /* noop */ });
     const { runInstall } = await loadInstall();
 
     mockExecFileSync.mockImplementation((_cmd, args) => {
@@ -135,10 +185,13 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "0.6.0", enabled: true } });
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.5.21",
+          latestVersion: "0.6.0",
+          enabled: true,
+        });
       }
-      // npm view openclaw-channel-octo@dev
-      if (a[0] === "view" && a[1]?.includes("@dev")) return "0.6.0-dev.abc123\n";
       if (a[0] === "plugins" && a[1] === "install") return "";
       if (a[0] === "gateway" && a[1] === "restart") return "";
       return "";
@@ -146,16 +199,18 @@ describe("runInstall — update scenario", () => {
 
     await runInstall({ force: false, dev: true });
 
+    expect(warnSpy.mock.calls.some((c) => String(c[0]).includes("--dev / --next"))).toBe(true);
+
     const calls = getCalledArgs();
     expect(didCallPluginsInstall(calls)).toBe(true);
-    expect(pluginsInstallSpec(calls)).toBe("openclaw-channel-octo@dev");
+    expect(pluginsInstallSpec(calls)).toBe("clawhub:octo");
     expect(didCallGatewayRestart(calls)).toBe(true);
+
+    warnSpy.mockRestore();
   });
 
-  it("--next: uses openclaw-channel-octo@next spec and queries @next dist-tag", async () => {
-    // Regression: without --next, `npx -y openclaw-channel-octo@next install`
-    // would have OpenClaw fetch @latest (defeating the smoke test). --next
-    // forces both the npm view query and the pluginsInstall spec to @next.
+  it("--next: warns then falls back to ClawHub @latest spec", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { /* noop */ });
     const { runInstall } = await loadInstall();
 
     mockExecFileSync.mockImplementation((_cmd, args) => {
@@ -163,12 +218,12 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.5.7\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "1.0.0-rc.0", enabled: true } });
-      }
-      // npm view openclaw-channel-octo@next — must be queried (not @latest)
-      if (a[0] === "view" && a[1] === "openclaw-channel-octo@next") return "1.0.0-rc.1\n";
-      if (a[0] === "view" && a[1] === "openclaw-channel-octo@latest") {
-        throw new Error("must not query @latest when --next is set");
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "1.0.0-rc.0",
+          latestVersion: "1.0.0",
+          enabled: true,
+        });
       }
       if (a[0] === "plugins" && a[1] === "install") return "";
       if (a[0] === "gateway" && a[1] === "restart") return "";
@@ -177,17 +232,17 @@ describe("runInstall — update scenario", () => {
 
     await runInstall({ force: false, dev: false, next: true });
 
+    expect(warnSpy.mock.calls.some((c) => String(c[0]).includes("--dev / --next"))).toBe(true);
+
     const calls = getCalledArgs();
     expect(didCallPluginsInstall(calls)).toBe(true);
-    // pluginsInstall must use @next spec, not bare
-    expect(pluginsInstallSpec(calls)).toBe("openclaw-channel-octo@next");
-    // npm view must query @next
-    const viewCalls = calls.filter((c) => c[0] === "view");
-    expect(viewCalls.some((c) => c[1] === "openclaw-channel-octo@next")).toBe(true);
+    expect(pluginsInstallSpec(calls)).toBe("clawhub:octo");
     expect(didCallGatewayRestart(calls)).toBe(true);
+
+    warnSpy.mockRestore();
   });
 
-  it("new version available: installs and restarts", async () => {
+  it("new version available: installs ClawHub spec and restarts", async () => {
     const { runInstall } = await loadInstall();
 
     mockExecFileSync.mockImplementation((_cmd, args) => {
@@ -195,9 +250,13 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "0.5.21", enabled: true } });
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.5.21",
+          latestVersion: "0.6.0",
+          enabled: true,
+        });
       }
-      if (a[0] === "view") return "0.6.0\n";
       if (a[0] === "plugins" && a[1] === "install") return "";
       if (a[0] === "gateway" && a[1] === "restart") return "";
       return "";
@@ -207,7 +266,7 @@ describe("runInstall — update scenario", () => {
 
     const calls = getCalledArgs();
     expect(didCallPluginsInstall(calls)).toBe(true);
-    expect(pluginsInstallSpec(calls)).toBe("openclaw-channel-octo");
+    expect(pluginsInstallSpec(calls)).toBe("clawhub:octo");
     expect(didCallGatewayRestart(calls)).toBe(true);
   });
 
@@ -223,9 +282,9 @@ describe("runInstall — update scenario", () => {
       if (String(path).endsWith("openclaw.json")) {
         return JSON.stringify({
           plugins: {
-            entries: { "openclaw-channel-octo": { enabled: false } },
+            entries: { octo: { enabled: false } },
             installs: {
-              "openclaw-channel-octo": { source: "npm", version: "0.6.0" },
+              octo: { source: "clawhub", version: "0.6.0" },
             },
           },
         });
@@ -240,9 +299,13 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "0.6.0", enabled: false } });
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.6.0",
+          latestVersion: "0.6.0",
+          enabled: false,
+        });
       }
-      if (a[0] === "view") return "0.6.0\n";
       return "";
     });
 
@@ -258,11 +321,11 @@ describe("runInstall — update scenario", () => {
     expect(enabledWrite).toBeDefined();
   });
 
-  it("--from <spec>: pluginsInstall uses the override spec, npm view is skipped", async () => {
+  it("--from <spec>: pluginsInstall uses the override spec, version check is skipped", async () => {
     // Pre-publish local testing affordance: --from ./tarball.tgz makes the
-    // pluginsInstall step receive the tarball path instead of the bare npm
-    // name (which would 404 before publish). Update-scenario version
-    // comparison is also bypassed (tarball install is unconditional).
+    // pluginsInstall step receive the tarball path instead of the bare
+    // ClawHub spec. Update-scenario version comparison is also bypassed
+    // (tarball install is unconditional).
     const { runInstall } = await loadInstall();
 
     mockExecFileSync.mockImplementation((_cmd, args) => {
@@ -270,22 +333,23 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.5.7\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "1.0.0-rc.0", enabled: true } });
-      }
-      // npm view must NOT be called when --from overrides the spec
-      if (a[0] === "view") {
-        throw new Error("npm view must not run when --from is set");
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "1.0.0-rc.0",
+          latestVersion: "1.0.0-rc.0",
+          enabled: true,
+        });
       }
       if (a[0] === "plugins" && a[1] === "install") return "";
       if (a[0] === "gateway" && a[1] === "restart") return "";
       return "";
     });
 
-    await runInstall({ from: "./openclaw-channel-octo-1.0.0-rc.1.tgz" });
+    await runInstall({ from: "./openclaw-channel-octo-2.0.0-rc.1.tgz" });
 
     const calls = getCalledArgs();
     expect(didCallPluginsInstall(calls)).toBe(true);
-    expect(pluginsInstallSpec(calls)).toBe("./openclaw-channel-octo-1.0.0-rc.1.tgz");
+    expect(pluginsInstallSpec(calls)).toBe("./openclaw-channel-octo-2.0.0-rc.1.tgz");
     expect(didCallGatewayRestart(calls)).toBe(true);
   });
 
@@ -293,7 +357,7 @@ describe("runInstall — update scenario", () => {
     // OpenClaw 4.20 default config has no plugins.allow field at all.
     // Phase B's ensurePluginsAllow used to bail when the array was missing,
     // leaving 4.20 users with the "plugins.allow is empty" warn on every
-    // gateway restart. Now we create the array and add PLUGIN_ID.
+    // gateway restart. Now we create the array and add PLUGIN_ID (="octo").
     const fs = await import("node:fs");
     const mockReadFileSync = vi.mocked(fs.readFileSync);
     const mockWriteFileSync = vi.mocked(fs.writeFileSync);
@@ -301,9 +365,9 @@ describe("runInstall — update scenario", () => {
     // Track current state so writes are visible to subsequent reads.
     const state = {
       plugins: {
-        entries: { "openclaw-channel-octo": { enabled: true } },
+        entries: { octo: { enabled: true } },
         installs: {
-          "openclaw-channel-octo": { source: "npm", version: "0.6.0" },
+          octo: { source: "clawhub", version: "0.6.0" },
         },
         // NOTE: no `allow` field — simulating fresh 4.20 cfg
       },
@@ -326,9 +390,13 @@ describe("runInstall — update scenario", () => {
       if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
       if (a[0] === "--version") return "OpenClaw 2026.4.20\n";
       if (a[0] === "plugins" && a[1] === "inspect") {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "0.6.0", enabled: true } });
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.6.0",
+          latestVersion: "0.6.0",
+          enabled: true,
+        });
       }
-      if (a[0] === "view") return "0.6.0\n"; // already at target → no install
       return "";
     });
 
@@ -337,6 +405,80 @@ describe("runInstall — update scenario", () => {
     // Final state must contain plugins.allow with octo in it
     const finalCfg = state as any;
     expect(Array.isArray(finalCfg.plugins.allow)).toBe(true);
-    expect(finalCfg.plugins.allow).toContain("openclaw-channel-octo");
+    expect(finalCfg.plugins.allow).toContain("octo");
+  });
+
+  it("legacy npm openclaw-channel-octo installed: cleanup after ClawHub install verifies healthy", async () => {
+    // v2.0.0 transactional cleanup: when entry-point detects the legacy npm
+    // `openclaw-channel-octo` plugin, defer uninstall until AFTER the ClawHub
+    // install completes + isHealthyInstall("octo") returns true. Prevents a
+    // broken state if ClawHub install fails midway.
+    const fs = await import("node:fs");
+    const mockReadFileSync = vi.mocked(fs.readFileSync);
+    const mockExistsSync = vi.mocked(fs.existsSync);
+
+    // Pretend the user has the legacy npm plugin: entries + installs both
+    // record "openclaw-channel-octo" + the ClawHub octo plugin is also healthy
+    // (extension dir + entries.octo + installs.octo all present).
+    mockReadFileSync.mockImplementation((path) => {
+      if (String(path).endsWith("openclaw.json")) {
+        return JSON.stringify({
+          plugins: {
+            entries: {
+              "openclaw-channel-octo": { enabled: true },
+              octo: { enabled: true },
+            },
+            installs: {
+              "openclaw-channel-octo": { source: "npm", version: "1.0.0" },
+              octo: { source: "clawhub", version: "1.0.7" },
+            },
+            allow: ["openclaw-channel-octo", "octo"],
+          },
+        });
+      }
+      return "{}";
+    });
+    mockExistsSync.mockImplementation((path) => {
+      // pretend extensions/octo exists so isHealthyInstall("octo") returns true
+      return String(path).endsWith("extensions/octo");
+    });
+
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.5.7\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        const id = a[2];
+        if (id === "openclaw-channel-octo") {
+          // Legacy npm plugin IS installed (this is the cleanup-path scenario)
+          return JSON.stringify({
+            plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true },
+          });
+        }
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "1.0.7",
+          latestVersion: "1.0.7",
+          enabled: true,
+        });
+      }
+      if (a[0] === "plugins" && a[1] === "uninstall") return "";
+      if (a[0] === "plugins" && a[1] === "disable") return "";
+      if (a[0] === "gateway" && a[1] === "restart") return "";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    const calls = getCalledArgs();
+    // Cleanup: legacy npm openclaw-channel-octo must be uninstalled
+    const uninstallCalls = calls.filter(
+      (a) => a[0] === "plugins" && a[1] === "uninstall" && a[2] === "openclaw-channel-octo",
+    );
+    expect(uninstallCalls.length).toBeGreaterThan(0);
+    // Gateway must have been restarted (didChange = true via cleanup)
+    expect(didCallGatewayRestart(calls)).toBe(true);
   });
 });
