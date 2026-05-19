@@ -16,6 +16,7 @@ import {
   resolveCommandBody,
   resolveCommandAuthorized,
   resolveReplyChannelId,
+  isOBOFanoutMessage,
   pendingInboundContext,
   segmentHistoryEntries,
   type ResolveFileResult,
@@ -1943,5 +1944,99 @@ describe("resolveReplyChannelId", () => {
       payload: { type: MessageType.Text, content: "hello" },
     });
     expect(result).toBe("g_team_chat");
+  });
+});
+
+/**
+ * Tests for OBO fan-out detection (PR-B).
+ *
+ * In an OBO fan-out copy, the server stashes the original sender's uid in
+ * `payload.obo_origin_from_uid`. The bot is, by design, NOT friends with that
+ * sender, so the server's friend gate rejects cosmetic side-channel signals
+ * (readReceipt / typing) — and those endpoints don't support the
+ * `on_behalf_of` bypass. Callers use `isOBOFanoutMessage` to skip those
+ * signals while still letting `sendMessage` (which does pass on_behalf_of)
+ * proceed normally.
+ */
+describe("isOBOFanoutMessage", () => {
+  it("returns true for an OBO fan-out copy (obo_origin_from_uid present)", () => {
+    expect(
+      isOBOFanoutMessage({
+        type: MessageType.Text,
+        content: "hello",
+        obo_origin_from_uid: "u_bob",
+        obo_origin_channel_id: "admin",
+        obo_grantor_uid: "admin",
+      }),
+    ).toBe(true);
+  });
+
+  it("returns false for a normal DM (no OBO marker)", () => {
+    expect(
+      isOBOFanoutMessage({ type: MessageType.Text, content: "hello" }),
+    ).toBe(false);
+  });
+
+  it("returns false when obo_origin_from_uid is an empty string", () => {
+    expect(
+      isOBOFanoutMessage({
+        type: MessageType.Text,
+        content: "hello",
+        obo_origin_from_uid: "",
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when obo_origin_from_uid is not a string", () => {
+    expect(
+      isOBOFanoutMessage({
+        type: MessageType.Text,
+        content: "hello",
+        // Defensive: server should always send a string, but guard anyway
+        obo_origin_from_uid: 12345 as unknown as string,
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false for undefined payload", () => {
+    expect(isOBOFanoutMessage(undefined)).toBe(false);
+  });
+});
+
+/**
+ * Behavioral guarantee for the readReceipt/typing skip in handleInboundMessage
+ * (see src/inbound.ts: `if (!isOBOFanout) { sendReadReceipt + sendTyping }`).
+ *
+ * The skip gate is `isOBOFanoutMessage(message.payload)`. These tests assert
+ * the gate produces the correct skip/no-skip decision for the exact message
+ * shapes the OBO fan-out and normal-DM paths produce, so a regression on the
+ * gate would be caught here without needing to spin up the full runtime.
+ */
+describe("readReceipt/typing skip gate (PR-B behavioral)", () => {
+  it("OBO fan-out copy → gate fires → readReceipt/typing skipped", () => {
+    // Shape produced by octo-server's buildFanoutCopyReq:
+    //   from_uid = grantor (admin), payload.obo_origin_from_uid = real sender
+    const fanoutCopyPayload = {
+      type: MessageType.Text,
+      content: "hello bot",
+      obo_origin_from_uid: "u_bob",
+      obo_origin_channel_id: "admin",
+      obo_grantor_uid: "admin",
+    };
+    expect(isOBOFanoutMessage(fanoutCopyPayload)).toBe(true);
+  });
+
+  it("normal DM → gate does not fire → readReceipt/typing still sent (backward compat)", () => {
+    const normalDmPayload = { type: MessageType.Text, content: "hi" };
+    expect(isOBOFanoutMessage(normalDmPayload)).toBe(false);
+  });
+
+  it("group message → gate does not fire (group never carries OBO marker)", () => {
+    // Even if some upstream accidentally set obo_origin_from_uid on a group
+    // payload, replyChannelId is resolved from channel_id for groups (not from
+    // obo_origin_from_uid), and the bot IS a group member, so the friend gate
+    // does not reject — gating only matters for DM fan-out copies.
+    const groupPayload = { type: MessageType.Text, content: "hi everyone" };
+    expect(isOBOFanoutMessage(groupPayload)).toBe(false);
   });
 });

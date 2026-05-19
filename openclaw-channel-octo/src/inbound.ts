@@ -964,6 +964,23 @@ export function resolveReplyChannelId(params: {
   return params.fromUid;
 }
 
+/**
+ * Detect OBO fan-out copies delivered to the acting agent.
+ *
+ * When octo-server fans out an OBO message (e.g. James acting on-behalf-of
+ * admin in admin↔bob DM), the copy delivered to the bot stashes the original
+ * sender's uid in `payload.obo_origin_from_uid` (e.g. "u_bob"). In this mode
+ * the bot is, by design, NOT a friend of the original sender, so cosmetic
+ * side-channel signals (readReceipt / typing) cannot succeed: the server's
+ * friend gate rejects them and those endpoints do not accept the
+ * `on_behalf_of` bypass. Callers should skip those signals when this returns
+ * true. The sendMessage path is unaffected — it passes `on_behalf_of`.
+ */
+export function isOBOFanoutMessage(payload?: BotMessage["payload"]): boolean {
+  const origin = payload?.obo_origin_from_uid;
+  return typeof origin === "string" && origin.length > 0;
+}
+
 export function segmentHistoryEntries(params: {
   entries: Array<{ message_id?: string; message_seq?: number; [key: string]: any }>;
   cutoffSeq: number;
@@ -1630,23 +1647,38 @@ export async function handleInboundMessage(params: {
   });
   const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
 
-  // 已读回执 + 正在输入 — fire-and-forget
-  log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
-  const messageIds = message.message_id ? [message.message_id] : [];
-  sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
-    .then(() => log?.info?.("octo: readReceipt sent OK"))
-    .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
-  sendTyping({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType })
-    .then(() => log?.info?.("octo: typing sent OK"))
-    .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  // Detect OBO fan-out copies: the server stashes the original sender's uid in
+  // `payload.obo_origin_from_uid` (e.g. u_bob) while setting `from_uid` to the
+  // grantor (e.g. admin) for invisibility. In this mode the bot is, by design,
+  // NOT a friend of the original sender, so the server's friend gate rejects
+  // readReceipt/typing — those endpoints don't accept `on_behalf_of`. The
+  // sendMessage path is unaffected because it does pass `on_behalf_of`.
+  // These side-channel signals are cosmetic only, so we skip them.
+  const isOBOFanout = isOBOFanoutMessage(message.payload);
 
   const apiUrl = account.config.apiUrl;
   const botToken = account.config.botToken ?? "";
 
-  // Keep sending typing indicator while AI is processing
-  const typingInterval = setInterval(() => {
-    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
-  }, 5000);
+  // 已读回执 + 正在输入 — fire-and-forget (skip for OBO fan-out copies)
+  if (!isOBOFanout) {
+    log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
+    const messageIds = message.message_id ? [message.message_id] : [];
+    sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
+      .then(() => log?.info?.("octo: readReceipt sent OK"))
+      .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
+    sendTyping({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType })
+      .then(() => log?.info?.("octo: typing sent OK"))
+      .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  } else {
+    log?.info?.(`octo: skipping readReceipt+typing for OBO fan-out copy (bot not friend of original sender by design) channel=${replyChannelId}`);
+  }
+
+  // Keep sending typing indicator while AI is processing (skip for OBO fan-out)
+  const typingInterval = isOBOFanout
+    ? (null as ReturnType<typeof setInterval> | null)
+    : setInterval(() => {
+        sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
+      }, 5000);
 
   // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
   // Media is sent immediately (no edit problem); text is buffered (each call overwrites).
@@ -1832,7 +1864,7 @@ export async function handleInboundMessage(params: {
           log?.debug?.(`octo: [deliver-buffer] ${kind} text buffered (${content.length} chars)`);
         },
         onError: async (err: unknown, info: { kind: string }) => {
-          clearInterval(typingInterval);
+          if (typingInterval) clearInterval(typingInterval);
           log?.error?.(`octo ${info.kind} reply failed: ${String(err)}`);
           // Prevent finally block from sending stale buffered text after error
           deliverBuffer.lastText = null;
@@ -1864,7 +1896,7 @@ export async function handleInboundMessage(params: {
         log?.error?.(`octo: [deliver-buffer] final text send failed: ${String(finalSendErr)}`);
       }
     }
-    clearInterval(typingInterval);
+    if (typingInterval) clearInterval(typingInterval);
     // Safety net: clean up pending inbound context in case the hook didn't fire
     pendingInboundContext.delete(route.sessionKey);
 
