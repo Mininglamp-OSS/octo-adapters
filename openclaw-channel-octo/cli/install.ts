@@ -168,7 +168,8 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       break;
     case "rebrand":
     case "legacy-warn":
-      // Phase B: full migration from openclaw-channel-dmwork to openclaw-channel-octo.
+      // Phase B: full migration from openclaw-channel-dmwork to the ClawHub
+      // octo plugin (plugin id = "octo", installed to ~/.openclaw/extensions/octo/).
       runRebrandMigration(spec, quiet, opts.force);
       didChange = true;
       break;
@@ -300,11 +301,12 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
 // ---------------------------------------------------------------------------
 // Phase B: unified migration
 //
-// Both rebrand (openclaw-channel-dmwork → openclaw-channel-octo) and
-// legacy-to-octo (very-legacy "dmwork" → openclaw-channel-octo) go through
-// runMigration() with a different `legacyPluginId` parameter. Channel config
-// and bindings always live under the same legacy channel id ("dmwork"), so
-// data migration is identical.
+// Both rebrand (openclaw-channel-dmwork → ClawHub octo) and legacy-to-octo
+// (very-legacy "dmwork" → ClawHub octo) go through runMigration() with a
+// different `legacyPluginId` parameter. The target install spec is always
+// `CLAWHUB_INSTALL_SPEC` (= "clawhub:octo") and the post-install plugin id
+// is `PLUGIN_ID` (= "octo"). Channel config and bindings always live under
+// the same legacy channel id ("dmwork"), so data migration is identical.
 // ---------------------------------------------------------------------------
 
 interface MigrationContext {

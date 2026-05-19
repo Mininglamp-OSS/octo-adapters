@@ -2,12 +2,13 @@
  * Phase B migration tests.
  *
  * Two scenarios share the same runMigration() implementation:
- *   - rebrand:        openclaw-channel-dmwork → openclaw-channel-octo
- *   - legacy-to-octo: very-legacy "dmwork" plugin id → openclaw-channel-octo
+ *   - rebrand:        openclaw-channel-dmwork → ClawHub octo (plugin id "octo")
+ *   - legacy-to-octo: very-legacy "dmwork" plugin id → ClawHub octo
  *
- * Both transform channels.dmwork → channels.octo and rewrite bindings'
- * match.channel from "dmwork" to "octo". Tests assert the command sequence
- * (via execFileSync mock) and final config state (via fs writeFileSync mock).
+ * Both install via CLAWHUB_INSTALL_SPEC ("clawhub:octo"), transform
+ * channels.dmwork → channels.octo, and rewrite bindings' match.channel from
+ * "dmwork" to "octo". Tests assert the command sequence (via execFileSync
+ * mock) and final config state (via fs writeFileSync mock).
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
