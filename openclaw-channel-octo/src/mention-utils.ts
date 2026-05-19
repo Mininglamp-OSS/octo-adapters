@@ -12,6 +12,18 @@
 import type { MentionEntity, MentionPayload } from "./types.js";
 
 /**
+ * Broadcast mention tokens for the three-state mention model (PR-B / octo-server #94).
+ *
+ * Adapter-side convenience constants so the LLM, prompt builders, and any
+ * future outbound formatter share a single source of truth for what the
+ * human-facing tokens look like. The server is still the authoritative
+ * decider for what each token *means* on inbound — these only exist so
+ * outbound code paths don't hardcode the same Chinese string in N places.
+ */
+export const MENTION_HUMANS_TOKEN = "@所有人";
+export const MENTION_AIS_TOKEN = "@所有AI";
+
+/**
  * Regex pattern for matching @mentions in message content.
  *
  * 前置边界（lookbehind）：@ 前面必须是行首或非字母数字字符。

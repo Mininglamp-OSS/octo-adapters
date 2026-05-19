@@ -77,6 +77,90 @@ describe("mention.all detection", () => {
 });
 
 /**
+ * Tests for the three-state mention trigger logic (PR-B / octo-server #94).
+ *
+ * Server is the authoritative decider for `humans` / `ais` semantics. Adapter
+ * only reads the flags and decides whether THIS bot instance wakes up.
+ *
+ * Trigger rule (mirrors inbound.ts):
+ *   isMentioned =
+ *       (aisFlag && !ignoreMentionAll)
+ *     || mentionUids.includes(botUid)
+ *
+ * Where `aisFlag = mention.ais === true || === 1`. `humans` and legacy
+ * `all` do NOT wake the bot — `all` is server outbound double-write of
+ * humans-only broadcast for legacy clients.
+ */
+describe("mention three-state trigger (PR-B)", () => {
+  // Helper that mirrors the inbound.ts decision block verbatim.
+  function computeIsMentioned(
+    mention: MentionPayload | undefined,
+    botUid: string,
+    ignoreMentionAll: boolean,
+  ): boolean {
+    const mentionUids = extractMentionUids(mention);
+    const m = mention ?? {};
+    const hasHumans = m.humans === true || m.humans === 1;
+    const hasAis = m.ais === true || m.ais === 1;
+    const hasAll = m.all === true || m.all === 1;
+    void (hasHumans || hasAll); // humansFlag — does not gate bot
+    const aisFlag = hasAis;
+    return (aisFlag && !ignoreMentionAll) || mentionUids.includes(botUid);
+  }
+
+  const BOT_UID = "bot_uid";
+
+  it("humans=1 only → bot NOT triggered (humansFlag does not gate bot)", () => {
+    const mention: MentionPayload = { humans: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(false);
+  });
+
+  it("ais=1 only → bot triggered", () => {
+    const mention: MentionPayload = { ais: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+  });
+
+  it("humans=1 AND ais=1 → bot triggered (ais wakes the bot)", () => {
+    const mention: MentionPayload = { humans: 1, ais: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+  });
+
+  it("legacy all=1 (server double-write) → bot NOT triggered (hasAll → humans, NOT ais)", () => {
+    const mention: MentionPayload = { all: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(false);
+  });
+
+  it("explicit uid mention → bot triggered (unchanged regression coverage)", () => {
+    const mention: MentionPayload = { uids: [BOT_UID] };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+  });
+
+  it("ais=1 with ignoreMentionAll=true → bot NOT triggered (opt-out reuses single knob)", () => {
+    const mention: MentionPayload = { ais: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, true)).toBe(false);
+  });
+
+  it("legacy all=1 with ignoreMentionAll=true → bot NOT triggered (regression coverage)", () => {
+    const mention: MentionPayload = { all: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, true)).toBe(false);
+  });
+
+  it("ais=true (boolean form) → bot triggered (parity with numeric 1)", () => {
+    const mention: MentionPayload = { ais: true };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+  });
+
+  it("ais=1 + explicit uid mention → bot triggered (ignoreMentionAll does NOT silence explicit @)", () => {
+    const mention: MentionPayload = { ais: 1, uids: [BOT_UID] };
+    expect(computeIsMentioned(mention, BOT_UID, true)).toBe(true);
+  });
+
+  it("empty mention → bot NOT triggered", () => {
+    expect(computeIsMentioned(undefined, BOT_UID, false)).toBe(false);
+  });
+});
+
+/**
  * Tests for historyPromptTemplate configuration.
  *
  * The template supports placeholders:
