@@ -15,6 +15,7 @@ import {
   buildMemberListPrefix,
   resolveCommandBody,
   resolveCommandAuthorized,
+  resolveReplyChannelId,
   pendingInboundContext,
   segmentHistoryEntries,
   type ResolveFileResult,
@@ -1839,5 +1840,108 @@ describe("inbound message_seq cutoff tracking", () => {
     // If a stale message somehow gets processed, cutoff stays at 300
     recordCutoff(map, sessionId, 150, true);
     expect(map.get(sessionId)).toBe(300);
+  });
+});
+
+/**
+ * Tests for resolveReplyChannelId — OBO (On-Behalf-Of) fan-out reply target
+ * resolution.
+ *
+ * Background: when octo-server fans out a DM that was sent on-behalf-of a
+ * grantor, the fan-out copy delivered to the acting agent has `from_uid` set
+ * to the grantor (e.g. admin) for invisibility. The real conversation peer
+ * lives in `payload.obo_origin_from_uid`. Replying to `from_uid` would target
+ * the grantor itself (self-send), so we must reply to the OBO origin when
+ * present. Non-OBO messages fall back to `from_uid` unchanged.
+ */
+describe("resolveReplyChannelId", () => {
+  it("DM with obo_origin_from_uid uses the OBO origin as reply target", () => {
+    const result = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin", // grantor in fan-out copy
+      payload: {
+        type: MessageType.Text,
+        content: "hello",
+        obo_origin_from_uid: "u_bob",
+        obo_origin_channel_id: "admin",
+        obo_grantor_uid: "admin",
+      },
+    });
+    expect(result).toBe("u_bob");
+  });
+
+  it("DM without obo_origin_from_uid falls back to from_uid (backward compat)", () => {
+    const result = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "u_alice",
+      fromUid: "u_alice",
+      payload: { type: MessageType.Text, content: "hello" },
+    });
+    expect(result).toBe("u_alice");
+  });
+
+  it("DM with empty obo_origin_from_uid falls back to from_uid", () => {
+    const result = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "u_alice",
+      fromUid: "u_alice",
+      payload: {
+        type: MessageType.Text,
+        content: "hello",
+        obo_origin_from_uid: "",
+      },
+    });
+    expect(result).toBe("u_alice");
+  });
+
+  it("DM with non-string obo_origin_from_uid falls back to from_uid", () => {
+    const result = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "u_alice",
+      fromUid: "u_alice",
+      payload: {
+        type: MessageType.Text,
+        content: "hello",
+        // Defensive: server should always send a string, but guard anyway
+        obo_origin_from_uid: 12345 as unknown as string,
+      },
+    });
+    expect(result).toBe("u_alice");
+  });
+
+  it("DM with undefined payload falls back to from_uid", () => {
+    const result = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "u_alice",
+      fromUid: "u_alice",
+      payload: undefined,
+    });
+    expect(result).toBe("u_alice");
+  });
+
+  it("group message always uses channel_id, ignoring OBO fields", () => {
+    const result = resolveReplyChannelId({
+      isGroup: true,
+      channelId: "g_team_chat",
+      fromUid: "admin",
+      payload: {
+        type: MessageType.Text,
+        content: "hello",
+        // OBO field present but should be ignored for group replies
+        obo_origin_from_uid: "u_bob",
+      },
+    });
+    expect(result).toBe("g_team_chat");
+  });
+
+  it("group message uses channel_id even without OBO marker", () => {
+    const result = resolveReplyChannelId({
+      isGroup: true,
+      channelId: "g_team_chat",
+      fromUid: "u_alice",
+      payload: { type: MessageType.Text, content: "hello" },
+    });
+    expect(result).toBe("g_team_chat");
   });
 });
