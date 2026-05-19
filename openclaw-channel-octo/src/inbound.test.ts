@@ -16,6 +16,7 @@ import {
   resolveCommandBody,
   resolveCommandAuthorized,
   resolveReplyChannelId,
+  resolveSessionId,
   isOBOFanoutMessage,
   pendingInboundContext,
   segmentHistoryEntries,
@@ -2038,5 +2039,189 @@ describe("readReceipt/typing skip gate (PR-B behavioral)", () => {
     // does not reject — gating only matters for DM fan-out copies.
     const groupPayload = { type: MessageType.Text, content: "hi everyone" };
     expect(isOBOFanoutMessage(groupPayload)).toBe(false);
+  });
+});
+
+/**
+ * Tests for the `hasOnBehalfOfConfig` gate on `isOBOFanoutMessage` and
+ * `resolveReplyChannelId`. The gate hardens detection against spoofed
+ * `payload.obo_origin_from_uid` values on accounts that are NOT actually
+ * OBO-configured (`account.config.onBehalfOf` unset). Default behavior
+ * (flag omitted or `true`) is unchanged for backward compat.
+ */
+describe("OBO fan-out gating on account.config.onBehalfOf", () => {
+  const fanoutPayload = {
+    type: MessageType.Text,
+    content: "hello bot",
+    obo_origin_from_uid: "u_bob",
+    obo_origin_channel_id: "admin",
+    obo_grantor_uid: "admin",
+  };
+
+  it("isOBOFanoutMessage returns false when account has no onBehalfOf config", () => {
+    expect(
+      isOBOFanoutMessage(fanoutPayload, { hasOnBehalfOfConfig: false }),
+    ).toBe(false);
+  });
+
+  it("isOBOFanoutMessage returns true when account IS OBO-configured", () => {
+    expect(
+      isOBOFanoutMessage(fanoutPayload, { hasOnBehalfOfConfig: true }),
+    ).toBe(true);
+  });
+
+  it("isOBOFanoutMessage default (no opts) still honors the marker (backward compat)", () => {
+    expect(isOBOFanoutMessage(fanoutPayload)).toBe(true);
+  });
+
+  it("resolveReplyChannelId ignores obo marker when account is not OBO-configured", () => {
+    const result = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin",
+      payload: fanoutPayload,
+      hasOnBehalfOfConfig: false,
+    });
+    // Spoofed marker must NOT redirect the reply — falls back to from_uid.
+    expect(result).toBe("admin");
+  });
+
+  it("resolveReplyChannelId honors obo marker when account IS OBO-configured", () => {
+    const result = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin",
+      payload: fanoutPayload,
+      hasOnBehalfOfConfig: true,
+    });
+    expect(result).toBe("u_bob");
+  });
+});
+
+/**
+ * Session isolation tests for OBO fan-out copies (the PR-B blocking finding).
+ *
+ * Before the fix, sessionId for DMs was derived from `message.from_uid`. In
+ * an OBO fan-out copy, `from_uid` is the grantor (e.g. admin), so two
+ * different fan-out conversations (bob→admin and charlie→admin) collapsed
+ * onto the same OpenClaw session, leaking context across users.
+ *
+ * After the fix, sessionId is derived from the effective DM peer (the real
+ * conversation counterpart, resolved via `resolveReplyChannelId`). Two
+ * fan-out conversations with the same grantor but different
+ * `payload.obo_origin_from_uid` now produce different sessionIds.
+ */
+describe("resolveSessionId — OBO fan-out session isolation (PR-B)", () => {
+  function makeFanoutPayload(originUid: string) {
+    return {
+      type: MessageType.Text,
+      content: "hi",
+      obo_origin_from_uid: originUid,
+      obo_origin_channel_id: "admin",
+      obo_grantor_uid: "admin",
+    };
+  }
+
+  it("two OBO fan-out messages with same grantor but different origins produce different sessionIds", () => {
+    // Bob → admin fan-out copy delivered to the bot
+    const peerBob = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin",
+      payload: makeFanoutPayload("u_bob"),
+      hasOnBehalfOfConfig: true,
+    });
+    // Charlie → admin fan-out copy delivered to the bot
+    const peerCharlie = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin",
+      payload: makeFanoutPayload("u_charlie"),
+      hasOnBehalfOfConfig: true,
+    });
+
+    const sessionBob = resolveSessionId({
+      isGroup: false,
+      channelId: "admin",
+      effectiveDmPeer: peerBob,
+    });
+    const sessionCharlie = resolveSessionId({
+      isGroup: false,
+      channelId: "admin",
+      effectiveDmPeer: peerCharlie,
+    });
+
+    expect(sessionBob).toBe("u_bob");
+    expect(sessionCharlie).toBe("u_charlie");
+    expect(sessionBob).not.toBe(sessionCharlie);
+  });
+
+  it("non-OBO DM sessionId still uses from_uid (backward compat)", () => {
+    const peer = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "u_alice",
+      fromUid: "u_alice",
+      payload: { type: MessageType.Text, content: "hi" },
+      hasOnBehalfOfConfig: false,
+    });
+    const sessionId = resolveSessionId({
+      isGroup: false,
+      channelId: "u_alice",
+      effectiveDmPeer: peer,
+    });
+    expect(sessionId).toBe("u_alice");
+  });
+
+  it("spaceId is prefixed onto the effective DM peer for Space isolation", () => {
+    const peer = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin",
+      payload: makeFanoutPayload("u_bob"),
+      hasOnBehalfOfConfig: true,
+    });
+    const sessionId = resolveSessionId({
+      isGroup: false,
+      channelId: "admin",
+      spaceId: "abc123",
+      effectiveDmPeer: peer,
+    });
+    expect(sessionId).toBe("abc123:u_bob");
+  });
+
+  it("group messages key sessionId by channel_id, not by effective peer", () => {
+    const sessionId = resolveSessionId({
+      isGroup: true,
+      channelId: "g_team_chat",
+      effectiveDmPeer: "ignored_for_groups",
+    });
+    expect(sessionId).toBe("g_team_chat");
+  });
+
+  it("spoofed obo marker on a non-OBO account does NOT split sessions", () => {
+    // Two messages from the same actual sender admin, both carrying a
+    // spoofed obo_origin_from_uid. On a non-OBO account, the gate ignores
+    // the marker, so both still map to the same admin session — no leak.
+    const peerSpoofA = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin",
+      payload: { type: MessageType.Text, obo_origin_from_uid: "u_attacker_a" },
+      hasOnBehalfOfConfig: false,
+    });
+    const peerSpoofB = resolveReplyChannelId({
+      isGroup: false,
+      channelId: "admin",
+      fromUid: "admin",
+      payload: { type: MessageType.Text, obo_origin_from_uid: "u_attacker_b" },
+      hasOnBehalfOfConfig: false,
+    });
+    expect(peerSpoofA).toBe("admin");
+    expect(peerSpoofB).toBe("admin");
+    expect(
+      resolveSessionId({ isGroup: false, effectiveDmPeer: peerSpoofA }),
+    ).toBe(
+      resolveSessionId({ isGroup: false, effectiveDmPeer: peerSpoofB }),
+    );
   });
 });

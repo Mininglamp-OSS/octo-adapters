@@ -947,19 +947,32 @@ export function resolveCommandAuthorized(isGroup: boolean, isOwnerUser: boolean,
  *   real peer instead.
  *
  * Falls back to `fromUid` when no OBO marker is present (backward compat).
+ *
+ * `hasOnBehalfOfConfig` (optional, default `true`) gates whether the OBO
+ * marker is honored. Set it to `false` for accounts that are NOT OBO-configured
+ * (i.e. `account.config.onBehalfOf` is unset) so a spoofed
+ * `payload.obo_origin_from_uid` from an arbitrary sender cannot redirect
+ * replies / split sessions. When `true` (or omitted) the existing OBO
+ * behavior is preserved.
  */
 export function resolveReplyChannelId(params: {
   isGroup: boolean;
   channelId?: string;
   fromUid: string;
   payload?: BotMessage["payload"];
+  hasOnBehalfOfConfig?: boolean;
 }): string {
   if (params.isGroup) {
     return params.channelId!;
   }
-  const oboOriginFromUid = params.payload?.obo_origin_from_uid;
-  if (typeof oboOriginFromUid === "string" && oboOriginFromUid.length > 0) {
-    return oboOriginFromUid;
+  // Only OBO-configured accounts may honor the fan-out marker. Default true
+  // preserves the existing behavior for callers that don't pass the flag.
+  const obeyObo = params.hasOnBehalfOfConfig !== false;
+  if (obeyObo) {
+    const oboOriginFromUid = params.payload?.obo_origin_from_uid;
+    if (typeof oboOriginFromUid === "string" && oboOriginFromUid.length > 0) {
+      return oboOriginFromUid;
+    }
   }
   return params.fromUid;
 }
@@ -975,10 +988,55 @@ export function resolveReplyChannelId(params: {
  * friend gate rejects them and those endpoints do not accept the
  * `on_behalf_of` bypass. Callers should skip those signals when this returns
  * true. The sendMessage path is unaffected — it passes `on_behalf_of`.
+ *
+ * `opts.hasOnBehalfOfConfig` (optional, default `true`) gates the detection
+ * on the receiving account actually being OBO-configured. When `false`
+ * (account has no `onBehalfOf`), an arbitrary `payload.obo_origin_from_uid`
+ * from an inbound message is treated as untrusted and the function returns
+ * `false`. This prevents spoofed payloads from affecting non-OBO accounts.
  */
-export function isOBOFanoutMessage(payload?: BotMessage["payload"]): boolean {
+export function isOBOFanoutMessage(
+  payload?: BotMessage["payload"],
+  opts?: { hasOnBehalfOfConfig?: boolean },
+): boolean {
   const origin = payload?.obo_origin_from_uid;
-  return typeof origin === "string" && origin.length > 0;
+  if (typeof origin !== "string" || origin.length === 0) {
+    return false;
+  }
+  // Default true preserves existing behavior; only suppress when caller
+  // explicitly says the account is not OBO-configured.
+  if (opts && opts.hasOnBehalfOfConfig === false) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Compute the OpenClaw session id for an inbound message.
+ *
+ * Group messages share a session keyed by `channel_id`. DM messages are keyed
+ * by the effective DM peer (the real conversation counterpart), optionally
+ * prefixed by `spaceId` for per-Space isolation.
+ *
+ * For OBO fan-out copies, the effective peer is the original sender (from
+ * `payload.obo_origin_from_uid`), NOT the grantor in `from_uid`. Using the
+ * grantor would collapse every fan-out conversation onto a single shared
+ * session, leaking context across users. Callers should pre-compute
+ * `effectiveDmPeer` via `resolveReplyChannelId(...)` so reply target and
+ * session identity stay in lockstep.
+ */
+export function resolveSessionId(params: {
+  isGroup: boolean;
+  channelId?: string;
+  spaceId?: string;
+  effectiveDmPeer: string;
+}): string {
+  if (params.isGroup) {
+    return params.channelId!;
+  }
+  return params.spaceId
+    ? `${params.spaceId}:${params.effectiveDmPeer}`
+    : params.effectiveDmPeer;
 }
 
 export function segmentHistoryEntries(params: {
@@ -1134,8 +1192,27 @@ export async function handleInboundMessage(params: {
   // Parse space_id from channel_id (format: s{spaceId}_{peerId})
   // For DM, channel_id is a fake channel: s{spaceId}_{uid1}@s{spaceId}_{uid2}
   // Use LastIndex approach: spaceId is everything between 's' and the last '_' before peerId
+  //
+  // OBO fan-out: for fan-out copies the server sets `from_uid` to the grantor
+  // (e.g. admin) while the real DM peer lives in `payload.obo_origin_from_uid`
+  // (e.g. u_bob). Derive a single "effective DM peer" once and reuse it for
+  // session identity, route peer, fromLabel, senderName resolution, and reply
+  // target — otherwise two different fan-out conversations (same grantor,
+  // different obo_origin_from_uid) would collapse onto the same OpenClaw
+  // session and leak context across users.
+  const hasOnBehalfOfConfig = Boolean(account.config.onBehalfOf);
+  const effectiveDmPeer = isGroup
+    ? message.channel_id!
+    : resolveReplyChannelId({
+        isGroup: false,
+        channelId: message.channel_id,
+        fromUid: message.from_uid,
+        payload: message.payload,
+        hasOnBehalfOfConfig,
+      });
+
   let spaceId = "";
-  const effectiveChannelId = isGroup ? message.channel_id! : message.from_uid;
+  const effectiveChannelId = isGroup ? message.channel_id! : effectiveDmPeer;
   if (effectiveChannelId.startsWith("s")) {
     const lastUnderscore = effectiveChannelId.lastIndexOf("_");
     if (lastUnderscore > 0) {
@@ -1155,10 +1232,15 @@ export async function handleInboundMessage(params: {
     }
   }
 
-  // Session ID: include spaceId for Space isolation (same user in different Spaces = different sessions)
-  const sessionId = isGroup
-    ? message.channel_id!
-    : spaceId ? `${spaceId}:${message.from_uid}` : message.from_uid;
+  // Session ID: include spaceId for Space isolation (same user in different Spaces = different sessions).
+  // For OBO fan-out, sessionId is keyed by the effective peer (real sender)
+  // so each fan-out conversation gets its own isolated OpenClaw session.
+  const sessionId = resolveSessionId({
+    isGroup,
+    channelId: message.channel_id,
+    spaceId,
+    effectiveDmPeer,
+  });
 
   const resolved = resolveContent(message.payload, account.config.apiUrl, log, account.config.cdnUrl);
   let rawBody = resolved.text;
@@ -1531,7 +1613,7 @@ export async function handleInboundMessage(params: {
 
   const fromLabel = isGroup
     ? `group:${message.channel_id}`
-    : spaceId ? `space:${spaceId}:user:${message.from_uid}` : `user:${message.from_uid}`;
+    : spaceId ? `space:${spaceId}:user:${effectiveDmPeer}` : `user:${effectiveDmPeer}`;
 
   const storePath = core.channel.session.resolveStorePath(config.session?.store, {
     agentId: route.agentId,
@@ -1564,25 +1646,30 @@ export async function handleInboundMessage(params: {
   // GROUP.md injection is handled exclusively by the before_prompt_build hook
   // (see index.ts → getGroupMdForPrompt) — no longer set here to avoid duplication.
 
-  // Resolve sender display name — async fallback for DM users not in cache
-  let senderName = resolveSenderName(message.from_uid, uidToNameMap);
+  // Resolve sender display name — async fallback for DM users not in cache.
+  // For OBO fan-out copies, the real sender's uid is `effectiveDmPeer`
+  // (= `payload.obo_origin_from_uid`), not `message.from_uid` (the grantor),
+  // so we resolve the name against the effective peer. Groups always resolve
+  // against the actual `from_uid` (the speaking member).
+  const senderLookupUid = isGroup ? message.from_uid : effectiveDmPeer;
+  let senderName = resolveSenderName(senderLookupUid, uidToNameMap);
   if (!senderName && !isGroup) {
     // DM user not in any group cache — try backend user info API
     // Skip if we already tried and failed (negative cache sentinel "")
-    const cached = uidToNameMap.get(message.from_uid);
+    const cached = uidToNameMap.get(senderLookupUid);
     if (cached === undefined) {
       const userInfo = await fetchUserInfo({
         apiUrl: account.config.apiUrl,
         botToken: account.config.botToken ?? "",
-        uid: message.from_uid,
+        uid: senderLookupUid,
         log,
       });
       if (userInfo?.name) {
         senderName = userInfo.name;
-        uidToNameMap.set(message.from_uid, userInfo.name);
+        uidToNameMap.set(senderLookupUid, userInfo.name);
       } else {
         // Negative cache — prevent repeated API calls for unknown UIDs
-        uidToNameMap.set(message.from_uid, "");
+        uidToNameMap.set(senderLookupUid, "");
       }
     }
   }
@@ -1639,12 +1726,9 @@ export async function handleInboundMessage(params: {
   // for invisibility, while the real conversation peer lives in
   // payload.obo_origin_from_uid (e.g. u_bob). Replying to from_uid would target
   // the grantor (self-send), so we must use the OBO origin when present.
-  const replyChannelId = resolveReplyChannelId({
-    isGroup,
-    channelId: message.channel_id,
-    fromUid: message.from_uid,
-    payload: message.payload,
-  });
+  // `effectiveDmPeer` was computed earlier with the same OBO-config gate, so
+  // reuse it to keep reply target and session identity in lockstep.
+  const replyChannelId = effectiveDmPeer;
   const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
 
   // Detect OBO fan-out copies: the server stashes the original sender's uid in
@@ -1654,7 +1738,9 @@ export async function handleInboundMessage(params: {
   // readReceipt/typing — those endpoints don't accept `on_behalf_of`. The
   // sendMessage path is unaffected because it does pass `on_behalf_of`.
   // These side-channel signals are cosmetic only, so we skip them.
-  const isOBOFanout = isOBOFanoutMessage(message.payload);
+  // Gated on `account.config.onBehalfOf` so a spoofed `obo_origin_from_uid`
+  // on a non-OBO account cannot trip the skip path.
+  const isOBOFanout = isOBOFanoutMessage(message.payload, { hasOnBehalfOfConfig });
 
   const apiUrl = account.config.apiUrl;
   const botToken = account.config.botToken ?? "";
