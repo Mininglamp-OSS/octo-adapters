@@ -9,7 +9,6 @@
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { execFileSync } from "node:child_process";
 import { dmworkPlugin } from "./src/channel.js";
 import { setDmworkRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
@@ -34,11 +33,14 @@ import {
 import {
   PLUGIN_ID,
   CHANNEL_ID,
+  CLAWHUB_INSTALL_SPEC,
+  NPM_PACKAGE_NAME,
   LEGACY_CHANNEL_ID,
   RECOMMENDED_DM_SCOPE,
   validateAccountId,
   channelConfigPath,
 } from "./cli/utils.js";
+import { getLatestClawHubVersion } from "./cli/install.js";
 
 // ---------------------------------------------------------------------------
 // Command handlers (reused by /octo_* main and /dmwork_* legacy aliases)
@@ -60,9 +62,10 @@ async function handleInfo() {
   const installedVersion = inspect?.plugin?.version ?? "not installed";
   return {
     text: [
-      `${PLUGIN_ID}: ${installedVersion}`,
+      `installed plugin id: ${PLUGIN_ID} (ClawHub)`,
+      `installed plugin version: ${installedVersion}`,
       `openclaw: ${openclawVersion}`,
-      `plugin package: ${PLUGIN_ID}`,
+      `npm package: ${NPM_PACKAGE_NAME}`,
     ].join("\n"),
   };
 }
@@ -75,7 +78,8 @@ async function handleInstall(ctx: any) {
     if (inspect?.plugin && !force) {
       return { text: `Octo plugin already installed (v${inspect.plugin.version}). Use --force to reinstall.` };
     }
-    pluginsInstall(PLUGIN_ID, true, force);
+    // v2.0.0+: install via ClawHub (plugin id "octo") rather than npm name.
+    pluginsInstall(CLAWHUB_INSTALL_SPEC, true, force);
     gatewayRestart(true);
     const after = pluginsInspect(PLUGIN_ID);
     return { text: `Octo plugin installed (v${after?.plugin?.version ?? "unknown"}). Gateway restarted.` };
@@ -91,13 +95,16 @@ async function handleUpdate() {
       return { text: "Octo plugin is not installed. Use /octo_install first.", isError: true };
     }
     const currentVersion = inspect.plugin.version;
-    const targetVersion = execFileSync("npm", ["view", `${PLUGIN_ID}@latest`, "version"], {
-      encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    // v2.0.0+: query ClawHub registry (not npmjs) for latest. PLUGIN_ID is the
+    // ClawHub plugin id "octo", NOT an npm package name.
+    const targetVersion = getLatestClawHubVersion();
+    if (!targetVersion) {
+      return { text: `Cannot reach ClawHub registry to check latest version. Current: v${currentVersion}.`, isError: true };
+    }
     if (currentVersion === targetVersion) {
       return { text: `Already up to date (v${currentVersion}).` };
     }
-    pluginsInstall(`${PLUGIN_ID}@latest`, true, true);
+    pluginsInstall(CLAWHUB_INSTALL_SPEC, true, true);
     gatewayRestart(true);
     return { text: `Updated: v${currentVersion} -> v${targetVersion}. Gateway restarted.` };
   } catch (e) {

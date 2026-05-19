@@ -58,7 +58,7 @@ import {
   ensureOpenClawCompat,
 } from "./utils.js";
 
-function getLatestClawHubVersion(): string | null {
+export function getLatestClawHubVersion(): string | null {
   // Try OpenClaw's built-in ClawHub client first (no external `clawhub`
   // binary dependency). Falls back to standalone `clawhub` if available.
   // Returns null on any failure — caller treats null as "skip version check".
