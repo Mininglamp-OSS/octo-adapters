@@ -224,9 +224,10 @@ export async function handleDmworkMessageAction(params: {
   threadId?: string | number | null;
   requesterSenderId?: string;
   accountId?: string;
+  onBehalfOf?: string;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, threadId, requesterSenderId, accountId, log } =
+  const { action, args, apiUrl, botToken, memberMap, uidToNameMap, groupMdCache, currentChannelId, threadId, requesterSenderId, accountId, onBehalfOf, log } =
     params;
 
   if (!botToken) {
@@ -235,7 +236,7 @@ export async function handleDmworkMessageAction(params: {
 
   switch (action) {
     case "send":
-      return handleSend({ args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, threadId, log });
+      return handleSend({ args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, threadId, onBehalfOf, log });
     case "read":
       return handleRead({ args, apiUrl, botToken, uidToNameMap, currentChannelId, requesterSenderId, accountId, log });
     case "search":
@@ -270,9 +271,10 @@ async function handleSend(params: {
   uidToNameMap?: Map<string, string>;
   currentChannelId?: string;
   threadId?: string | number | null;
+  onBehalfOf?: string;
   log?: LogSink;
 }): Promise<MessageActionResult> {
-  const { args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, threadId, log } = params;
+  const { args, apiUrl, botToken, memberMap, uidToNameMap, currentChannelId, threadId, onBehalfOf, log } = params;
 
   const target = args.target as string | undefined;
   if (!target) {
@@ -390,6 +392,7 @@ async function handleSend(params: {
       ...(mentionUids.length > 0 ? { mentionUids } : {}),
       ...(mentionEntities.length > 0 ? { mentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
     });
   }
 
@@ -401,6 +404,7 @@ async function handleSend(params: {
       botToken,
       channelId,
       channelType,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
       log: log as any,
     });
   }

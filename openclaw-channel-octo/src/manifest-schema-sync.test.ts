@@ -34,3 +34,31 @@ describe("openclaw.plugin.json channelConfigs", () => {
     );
   });
 });
+
+// Regression for PR #35 review: onBehalfOf must reject whitespace-only /
+// empty-string typos at config validation time (`minLength: 1`).
+describe("openclaw.plugin.json onBehalfOf validation", () => {
+  const manifest = JSON.parse(
+    readFileSync(resolve(__dirname, "..", "openclaw.plugin.json"), "utf-8"),
+  );
+
+  it("top-level onBehalfOf has minLength: 1", () => {
+    expect(
+      manifest.channelConfigs.octo.schema.properties.onBehalfOf.minLength,
+    ).toBe(1);
+  });
+
+  it("per-account onBehalfOf has minLength: 1", () => {
+    const accountProps =
+      manifest.channelConfigs.octo.schema.properties.accounts
+        .additionalProperties.properties;
+    expect(accountProps.onBehalfOf.minLength).toBe(1);
+  });
+
+  it("TS-side DmworkConfigJsonSchema mirrors minLength: 1", () => {
+    const props = DmworkConfigJsonSchema.schema.properties as any;
+    expect(props.onBehalfOf.minLength).toBe(1);
+    const accountProps = props.accounts.additionalProperties.properties;
+    expect(accountProps.onBehalfOf.minLength).toBe(1);
+  });
+});
