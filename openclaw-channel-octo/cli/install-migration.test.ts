@@ -2,12 +2,13 @@
  * Phase B migration tests.
  *
  * Two scenarios share the same runMigration() implementation:
- *   - rebrand:        openclaw-channel-dmwork → openclaw-channel-octo
- *   - legacy-to-octo: very-legacy "dmwork" plugin id → openclaw-channel-octo
+ *   - rebrand:        openclaw-channel-dmwork → ClawHub octo (plugin id "octo")
+ *   - legacy-to-octo: very-legacy "dmwork" plugin id → ClawHub octo
  *
- * Both transform channels.dmwork → channels.octo and rewrite bindings'
- * match.channel from "dmwork" to "octo". Tests assert the command sequence
- * (via execFileSync mock) and final config state (via fs writeFileSync mock).
+ * Both install via CLAWHUB_INSTALL_SPEC ("clawhub:octo"), transform
+ * channels.dmwork → channels.octo, and rewrite bindings' match.channel from
+ * "dmwork" to "octo". Tests assert the command sequence (via execFileSync
+ * mock) and final config state (via fs writeFileSync mock).
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -208,25 +209,25 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     const origExecImpl = mockExecFileSync.getMockImplementation();
     mockExecFileSync.mockImplementation((cmd: any, args: any) => {
       const a = args as string[];
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
         // Side effect: octo install populates entries/installs/dir
         state.cfg.plugins ??= {};
         state.cfg.plugins.entries ??= {};
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
+        state.cfg.plugins.entries["octo"] = { enabled: true };
         state.cfg.plugins.installs ??= {};
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
         state.cfg.plugins.allow ??= [];
-        if (!state.cfg.plugins.allow.includes("openclaw-channel-octo")) {
-          state.cfg.plugins.allow.push("openclaw-channel-octo");
+        if (!state.cfg.plugins.allow.includes("octo")) {
+          state.cfg.plugins.allow.push("octo");
         }
-        state.extDirs.add("openclaw-channel-octo");
+        state.extDirs.add("octo");
         return "";
       }
       // After install, inspect octo should succeed too — re-dispatch via opts
-      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "openclaw-channel-octo") {
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo") {
         if (state.cfg.plugins?.entries?.["openclaw-channel-octo"]) {
           return JSON.stringify({
-            plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true },
+            plugin: { id: "octo", version: "1.0.0", enabled: true },
           });
         }
       }
@@ -239,8 +240,8 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     const ops = calledOps();
     // Sequence: disable legacy → install octo → enable octo → uninstall legacy
     const disableIdx = ops.findIndex((o) => /^plugins disable openclaw-channel-dmwork$/.test(o));
-    const installIdx = ops.findIndex((o) => /^plugins install openclaw-channel-octo/.test(o));
-    const enableIdx = ops.findIndex((o) => /^plugins enable openclaw-channel-octo$/.test(o));
+    const installIdx = ops.findIndex((o) => /^plugins install clawhub:octo/.test(o));
+    const enableIdx = ops.findIndex((o) => /^plugins enable octo$/.test(o));
     const uninstallIdx = ops.findIndex((o) => /^plugins uninstall openclaw-channel-dmwork/.test(o));
 
     expect(disableIdx).toBeGreaterThanOrEqual(0);
@@ -281,15 +282,15 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     const origExecImpl = mockExecFileSync.getMockImplementation();
     mockExecFileSync.mockImplementation((cmd: any, args: any) => {
       const a = args as string[];
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("octo");
         return "";
       }
-      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "openclaw-channel-octo"
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo"
           && state.cfg.plugins?.entries?.["openclaw-channel-octo"]) {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } });
+        return JSON.stringify({ plugin: { id: "octo", version: "1.0.0", enabled: true } });
       }
       return origExecImpl!(cmd, args, undefined as any) as any;
     });
@@ -308,21 +309,21 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     const state = setupFs({
       cfg: {
         plugins: {
-          entries: { "openclaw-channel-octo": { enabled: true } },
-          installs: { "openclaw-channel-octo": { source: "npm", version: "1.0.0" } },
+          entries: { "octo": { enabled: true } },
+          installs: { "octo": { source: "clawhub", version: "1.0.0" } },
         },
         channels: {
           octo: { accounts: { b1: { botToken: "bf_b1" } } },
         },
         bindings: [{ agentId: "a1", match: { channel: "octo", accountId: "b1" } }],
       },
-      extDirs: ["openclaw-channel-octo"],
+      extDirs: ["octo"],
     });
     await applyFsMocks(state);
 
     mockOpenclawCli({
       inspect: {
-        "openclaw-channel-octo": { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } },
+        "octo": { plugin: { id: "octo", version: "1.0.0", enabled: true } },
       },
     });
 
@@ -347,13 +348,13 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
         },
         bindings: [{ agentId: "a1", match: { channel: "dmwork", accountId: "b1" } }],
       },
-      extDirs: ["openclaw-channel-octo"],
+      extDirs: ["octo"],
     });
     await applyFsMocks(state);
 
     mockOpenclawCli({
       inspect: {
-        "openclaw-channel-octo": { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } },
+        "octo": { plugin: { id: "octo", version: "1.0.0", enabled: true } },
       },
     });
 
@@ -362,7 +363,7 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
 
     const ops = calledOps();
     // pluginsInstall should NOT be called (octo already healthy → migration skips reinstall)
-    const installCalls = ops.filter((o) => /^plugins install openclaw-channel-octo/.test(o));
+    const installCalls = ops.filter((o) => /^plugins install clawhub:octo/.test(o));
     expect(installCalls.length).toBe(0);
     // Data migration still happens
     expect(state.cfg.channels?.octo?.accounts?.b1?.botToken).toBe("bf_b1");
@@ -393,7 +394,7 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     mockOpenclawCli({
       inspect: {
         "openclaw-channel-dmwork": { plugin: { id: "openclaw-channel-dmwork", version: "0.6.4", enabled: true } },
-        "openclaw-channel-octo": { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } },
+        "octo": { plugin: { id: "octo", version: "1.0.0", enabled: true } },
       },
     });
 
@@ -435,15 +436,15 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     const origImpl = mockExecFileSync.getMockImplementation();
     mockExecFileSync.mockImplementation((cmd: any, args: any) => {
       const a = args as string[];
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("octo");
         return "";
       }
-      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "openclaw-channel-octo"
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo"
           && state.cfg.plugins?.entries?.["openclaw-channel-octo"]) {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } });
+        return JSON.stringify({ plugin: { id: "octo", version: "1.0.0", enabled: true } });
       }
       return origImpl!(cmd, args, undefined as any) as any;
     });
@@ -475,7 +476,7 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
       inspect: {
         "openclaw-channel-dmwork": { plugin: { id: "openclaw-channel-dmwork", version: "0.6.4", enabled: true } },
       },
-      failOn: { match: /^plugins install openclaw-channel-octo/ },
+      failOn: { match: /^plugins install clawhub:octo/ },
     });
 
     const { runInstall } = await loadInstall();
@@ -483,7 +484,7 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
 
     const ops = calledOps();
     // Rollback: pluginsEnable(legacy) called after install failure
-    const installFailIdx = ops.findIndex((o) => /^plugins install openclaw-channel-octo/.test(o));
+    const installFailIdx = ops.findIndex((o) => /^plugins install clawhub:octo/.test(o));
     const reEnableIdx = ops.findIndex(
       (o, i) => i > installFailIdx && /^plugins enable openclaw-channel-dmwork$/.test(o),
     );
@@ -523,11 +524,11 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
         e.stderr = "EBUSY";
         throw e;
       }
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } };
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("octo");
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && (a[1] === "enable" || a[1] === "disable")) return "";
@@ -543,7 +544,7 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     expect(state.cfg.channels?.octo?.accounts?.b1?.botToken).toBe("bf_b1");
     expect(state.cfg.bindings[0].match.channel).toBe("octo");
     // octo install still in place (no rollback)
-    expect(state.cfg.plugins.entries["openclaw-channel-octo"]?.enabled).toBe(true);
+    expect(state.cfg.plugins.entries["octo"]?.enabled).toBe(true);
   });
 
   it("4.20 fallback: unknown command for plugins disable/enable falls back to cfg edit", async () => {
@@ -571,15 +572,15 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     const origImpl = mockExecFileSync.getMockImplementation();
     mockExecFileSync.mockImplementation((cmd: any, args: any) => {
       const a = args as string[];
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("octo");
         return "";
       }
-      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "openclaw-channel-octo"
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo"
           && state.cfg.plugins?.entries?.["openclaw-channel-octo"]) {
-        return JSON.stringify({ plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } });
+        return JSON.stringify({ plugin: { id: "octo", version: "1.0.0", enabled: true } });
       }
       return origImpl!(cmd, args, undefined as any) as any;
     });
@@ -592,7 +593,7 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
     expect(state.cfg.plugins.entries["openclaw-channel-dmwork"]).toBeUndefined();
     expect(state.cfg.plugins.installs?.["openclaw-channel-dmwork"]).toBeUndefined();
     expect(state.extDirs.has("openclaw-channel-dmwork")).toBe(false);
-    expect(state.cfg.plugins.entries["openclaw-channel-octo"]?.enabled).toBe(true);
+    expect(state.cfg.plugins.entries["octo"]?.enabled).toBe(true);
     expect(state.cfg.channels?.octo?.accounts?.b1?.botToken).toBe("bf_b1");
   });
 
@@ -628,16 +629,16 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
         if (!r) { const e: any = new Error("not found"); e.stderr = "not found"; throw e; }
         return JSON.stringify(r);
       }
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } };
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "clawhub", version: "1.0.0" };
+        state.extDirs.add("octo");
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       // pluginsEnable(octo) throws an UNEXPECTED error (not unknown-command,
       // not not-installed) — should propagate and trigger rollback.
-      if (op === "plugins enable openclaw-channel-octo") {
+      if (op === "plugins enable octo") {
         const e: any = new Error("permission denied");
         e.stderr = "permission denied";
         throw e;
@@ -698,11 +699,11 @@ describe("runInstall — legacy-to-octo scenario (very-legacy 'dmwork' → octo)
         if (!r) { const e: any = new Error("not found"); e.stderr = "not found"; throw e; }
         return JSON.stringify(r);
       }
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } };
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("octo");
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && a[1] === "uninstall") {
@@ -768,11 +769,11 @@ describe("runInstall — legacy-to-octo scenario (very-legacy 'dmwork' → octo)
         if (!r) { const e: any = new Error("not found"); e.stderr = "not found"; throw e; }
         return JSON.stringify(r);
       }
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } };
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("octo");
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && a[1] === "uninstall") {
@@ -853,14 +854,14 @@ describe("runInstall — deadlock scenario (channels.octo without plugin)", () =
         if (!r) { const e: any = new Error("not found"); e.stderr = "not found"; throw e; }
         return JSON.stringify(r);
       }
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
         // Side effect: at this point, channels.octo and bindings(channel=octo)
         // must ALREADY be removed (asserted below). pluginsInstall populates
         // plugin records.
-        state.cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
-        state.cfg.plugins.installs["openclaw-channel-octo"] = { source: "npm", version: "1.0.0" };
-        state.extDirs.add("openclaw-channel-octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } };
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
+        state.extDirs.add("octo");
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && (a[1] === "enable" || a[1] === "disable")) return "";
@@ -878,7 +879,7 @@ describe("runInstall — deadlock scenario (channels.octo without plugin)", () =
     const origImpl = mockExecFileSync.getMockImplementation();
     mockExecFileSync.mockImplementation((cmd: any, args: any) => {
       const a = args as string[];
-      if (a[0] === "plugins" && a[1] === "install" && a[2]?.startsWith("openclaw-channel-octo")) {
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
         // At install time, neither channels.octo nor bindings(channel=octo)
         // should be in cfg yet — they were temporarily removed.
         stateAtInstall.hadChannel = Boolean(state.cfg.channels?.octo);
@@ -905,6 +906,6 @@ describe("runInstall — deadlock scenario (channels.octo without plugin)", () =
     expect(restoredBindings[0].match.accountId).toBe("mybot");
 
     // Assertion 3: plugin is now installed and enabled
-    expect(state.cfg.plugins.entries["openclaw-channel-octo"]?.enabled).toBe(true);
+    expect(state.cfg.plugins.entries["octo"]?.enabled).toBe(true);
   });
 });

@@ -11,6 +11,7 @@ import { createInterface } from "node:readline";
 import { getOpenClawVersion, getOpenClawVersionStrict } from "./openclaw-cli.js";
 import {
   PLUGIN_ID, CHANNEL_ID,
+  NPM_PACKAGE_NAME, CLAWHUB_INSTALL_SPEC,
   LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID,
   stripChannelPrefix,
   getChannelConfig, getChannelConfigFor,
@@ -23,6 +24,7 @@ import {
 
 export {
   PLUGIN_ID, CHANNEL_ID,
+  NPM_PACKAGE_NAME, CLAWHUB_INSTALL_SPEC,
   LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID,
   stripChannelPrefix,
   getChannelConfig, getChannelConfigFor,

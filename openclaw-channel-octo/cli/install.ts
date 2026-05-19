@@ -36,6 +36,7 @@ import {
   pluginsInspect,
   pluginsInstall,
   pluginsUninstall,
+  pluginsUpdate,
   readConfigFromFile,
   removeBindingsFromFile,
   removeChannelConfigFromFile,
@@ -48,18 +49,38 @@ import {
 } from "./openclaw-cli.js";
 import {
   CHANNEL_ID,
+  CLAWHUB_INSTALL_SPEC,
   LEGACY_CHANNEL_ID,
   LEGACY_PLUGIN_ID,
+  NPM_PACKAGE_NAME,
   PLUGIN_ID,
   VERY_LEGACY_PLUGIN_ID,
   ensureOpenClawCompat,
 } from "./utils.js";
 
-function getLatestNpmVersion(tag: string): string | null {
+export function getLatestClawHubVersion(): string | null {
+  // Try OpenClaw's built-in ClawHub client first (no external `clawhub`
+  // binary dependency). Falls back to standalone `clawhub` if available.
+  // Returns null on any failure — caller treats null as "skip version check".
   try {
-    return runCmd("npm", ["view", `${PLUGIN_ID}@${tag}`, "version"], {
+    const out = runCmd("openclaw", ["plugins", "inspect", PLUGIN_ID, "--json"], {
       stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+    });
+    const jsonStart = out.indexOf("{");
+    if (jsonStart >= 0) {
+      const data = JSON.parse(out.slice(jsonStart));
+      const latest = data?.plugin?.latestVersion ?? data?.latestVersion ?? null;
+      if (latest) return latest;
+    }
+  } catch { /* try clawhub fallback */ }
+  try {
+    const out = runCmd("clawhub", ["package", "inspect", PLUGIN_ID, "--json"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const jsonStart = out.indexOf("{");
+    if (jsonStart < 0) return null;
+    const data = JSON.parse(out.slice(jsonStart));
+    return data?.package?.latestVersion ?? null;
   } catch {
     return null;
   }
@@ -69,27 +90,27 @@ export interface InstallOptions {
   force?: boolean;
   dev?: boolean;
   /**
-   * Install the @next pre-release dist-tag instead of @latest.
+   * [v2.0.0+ no-op] Previously selected the npm @next dist-tag.
    *
-   * Use during rc/beta cycles: `npx -y openclaw-channel-octo@next install --next`
-   * ensures the OpenClaw plugin install also resolves to the @next version
-   * (without --next, the npx CLI is @next but pluginsInstall would let
-   * OpenClaw fetch @latest, defeating the smoke test).
+   * v2.0.0 installs from ClawHub via `clawhub:octo`. ClawHub's release model
+   * uses a single channel without npm dist-tag equivalents, so this flag now
+   * triggers a warning and falls back to ClawHub @latest. For pre-release
+   * testing, use --from with a local tarball.
    */
   next?: boolean;
   /**
    * Override the install spec passed to `openclaw plugins install`.
    * Accepts anything OpenClaw's plugins-install accepts: a tarball path,
-   * a directory path, an alternate npm spec, etc.
+   * a directory path, or any alternate spec (clawhub:..., openclaw-..., etc.).
    *
    * Primary use: pre-publish local testing. Build a tarball with `npm pack`
    * and pass it here so the migration's pluginsInstall step doesn't try to
-   * fetch a package that isn't on npm yet.
+   * fetch a package from ClawHub yet.
    *
-   *   node bin/octo.js install --from ./openclaw-channel-octo-1.0.0-rc.1.tgz
+   *   node bin/octo.js install --from ./openclaw-channel-octo-2.0.0-rc.1.tgz
    *
-   * When set, --dev and --next are ignored for spec resolution. Update-scenario
-   * version comparison is also skipped (tarball install is unconditional).
+   * When set, --dev and --next are ignored. Update-scenario version comparison
+   * is also skipped (tarball install is unconditional).
    */
   from?: string;
 }
@@ -97,23 +118,49 @@ export interface InstallOptions {
 export async function runInstall(opts: InstallOptions): Promise<void> {
   ensureOpenClawCompat();
 
+  // ---------------------------------------------------------------------------
+  // v2.0.0 npm→ClawHub migration: detect (NOT yet uninstall) any pre-2.0 npm
+  // install of this very package. We defer the actual uninstall until AFTER
+  // the ClawHub install completes + verifies healthy — preventing a broken
+  // state where the user loses the npm plugin but the ClawHub install fails.
+  //
+  // v1.x of openclaw-channel-octo installed itself as an npm plugin in
+  // ~/.openclaw/npm/node_modules/openclaw-channel-octo (plugin id ==
+  // NPM_PACKAGE_NAME). v2.x installs the ClawHub plugin (plugin id == PLUGIN_ID
+  // == "octo") into ~/.openclaw/extensions/octo. Both register channel id
+  // "octo", so leaving the v1.x install after ClawHub install would
+  // double-register the channel.
+  // ---------------------------------------------------------------------------
+  const oldNpmSnapshot = capturePluginState(NPM_PACKAGE_NAME);
+  if (oldNpmSnapshot.installed) {
+    console.log(
+      `Detected legacy npm-installed ${NPM_PACKAGE_NAME} v${oldNpmSnapshot.version ?? "?"}. ` +
+      `Will replace with ClawHub octo after install verifies healthy.`,
+    );
+  }
+
   const scenario = detectScenario();
-  // Tag/spec selection: --from > --dev > --next > default (latest).
-  const tag = opts.dev ? "dev" : opts.next ? "next" : "latest";
-  const spec = opts.from
-    ? opts.from
-    : opts.dev ? `${PLUGIN_ID}@dev`
-    : opts.next ? `${PLUGIN_ID}@next`
-    : PLUGIN_ID;
+  // Spec selection: --from > CLAWHUB_INSTALL_SPEC (default).
+  // v2.0.0+ installs via ClawHub (`clawhub:octo`) instead of npm.
+  // --dev / --next: ClawHub dist-tag semantics differ from npm; not supported
+  // in v2.0.0. Use --from with a local tarball for pre-release testing.
+  // Gate the warning on !opts.from — when --from overrides the spec, --dev/--next
+  // are silently ignored per the doc comment on InstallOptions.next, so warning
+  // about them adds noise without action (P2, PR #37 review).
+  if ((opts.dev || opts.next) && !opts.from) {
+    console.warn(
+      "Warning: --dev / --next are not supported in v2.0.0+ " +
+      "(ClawHub installs use a different release model). " +
+      "Falling back to ClawHub @latest. " +
+      "For pre-release testing use --from <tarball>.",
+    );
+  }
+  const spec = opts.from ?? CLAWHUB_INSTALL_SPEC;
   const quiet = false;
   let didChange = false;
 
-  // Display label for "(dev)", "(next)", or "(from <path>)" in log lines.
-  const tagLabel = opts.from
-    ? ` (from ${opts.from})`
-    : opts.dev ? " (dev)"
-    : opts.next ? " (next)"
-    : "";
+  // Display label for "(from <path>)" in log lines.
+  const tagLabel = opts.from ? ` (from ${opts.from})` : "";
 
   switch (scenario) {
     case "legacy-to-octo":
@@ -124,7 +171,8 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       break;
     case "rebrand":
     case "legacy-warn":
-      // Phase B: full migration from openclaw-channel-dmwork to openclaw-channel-octo.
+      // Phase B: full migration from openclaw-channel-dmwork to the ClawHub
+      // octo plugin (plugin id = "octo", installed to ~/.openclaw/extensions/octo/).
       runRebrandMigration(spec, quiet, opts.force);
       didChange = true;
       break;
@@ -133,8 +181,8 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       const currentVersion = inspect?.plugin?.version ?? "unknown";
 
       if (opts.force || opts.from) {
-        // --from skips version comparison: tarball install is unconditional
-        // because npm registry doesn't know about the tarball's contents.
+        // --from skips version comparison: local tarball install is unconditional
+        // because the remote registry can't know the tarball's contents.
         console.log(`Force installing Octo plugin${tagLabel}...`);
         pluginsInstall(spec, quiet, true);
         console.log("Plugin installed successfully.");
@@ -142,11 +190,26 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
         break;
       }
 
-      const targetVersion = getLatestNpmVersion(tag);
+      const targetVersion = getLatestClawHubVersion();
 
       if (!targetVersion) {
-        console.log(`Cannot reach npm registry to check ${tag} version.`);
-        console.log(`Current version: v${currentVersion}`);
+        // No version info available — delegate to OpenClaw's plugins update
+        // which queries ClawHub via its built-in client and no-ops if already
+        // at latest. Safer than skipping silently.
+        console.log(`Cannot determine latest version locally. Delegating to \`openclaw plugins update\`...`);
+        try {
+          pluginsUpdate(PLUGIN_ID, quiet);
+          const after = pluginsInspect(PLUGIN_ID);
+          const newVersion = after?.plugin?.version ?? currentVersion;
+          if (newVersion !== currentVersion) {
+            console.log(`Octo plugin updated: v${currentVersion} → v${newVersion}.`);
+            didChange = true;
+          } else {
+            console.log(`Octo plugin v${currentVersion} is up to date.`);
+          }
+        } catch (err) {
+          console.warn(`Update check failed: ${(err as Error).message}. Current version: v${currentVersion}.`);
+        }
         break;
       }
 
@@ -189,6 +252,68 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   ensurePluginsAllow();
   ensurePluginEnabled();
 
+  // ---------------------------------------------------------------------------
+  // v2.0.0 npm→ClawHub migration step 2: AFTER ClawHub install succeeds +
+  // verifies healthy, uninstall the legacy npm plugin. Doing this AFTER (not
+  // before) prevents a broken state if the ClawHub install fails midway.
+  //
+  // Transaction guarantees:
+  //   - ClawHub install failed → legacy npm plugin stays in place; user keeps
+  //     working state. Warn + tell user to re-run install once issue resolved.
+  //   - ClawHub install OK but uninstall fails → throw (loud), because leaving
+  //     both plugins live causes duplicate channel "octo" registration. User
+  //     must manually clean up: `openclaw plugins uninstall <NPM_PACKAGE_NAME>`.
+  //
+  // P0-2 (PR #37 review): `openclaw plugins uninstall` ALSO removes
+  // `channels.<channelId>` config as a side effect (see cli/uninstall.ts:2-4
+  // and cli/openclaw-cli.ts:647-650). Since both the legacy npm plugin and the
+  // new ClawHub plugin own `channel.id = "octo"`, uninstalling the legacy npm
+  // plugin will wipe `channels.octo` along with it — including any bot accounts
+  // the user just migrated. We save channels.octo + bindings(channel=octo)
+  // before uninstall and restore them after, mirroring the runMigration pattern.
+  // ---------------------------------------------------------------------------
+  if (oldNpmSnapshot.installed) {
+    if (isHealthyInstall(PLUGIN_ID)) {
+      // SAVE channels.octo + bindings BEFORE uninstall (uninstall removes them)
+      const savedChannelConfig = saveChannelConfigFromFile(CHANNEL_ID);
+      const savedBindings = saveBindingsFromFile(CHANNEL_ID);
+
+      if (oldNpmSnapshot.enabled === true) {
+        try {
+          pluginsDisable(NPM_PACKAGE_NAME);
+        } catch { /* best effort — uninstall below will still remove it */ }
+      }
+      try {
+        pluginsUninstall(NPM_PACKAGE_NAME, true);
+
+        // RESTORE channels.octo + bindings (openclaw uninstall removed them as
+        // a side effect; we kept a snapshot above)
+        if (savedChannelConfig) {
+          restoreChannelConfigToFile(savedChannelConfig, CHANNEL_ID);
+          console.log(`  Preserved channels.${CHANNEL_ID} config across legacy uninstall.`);
+        }
+        if (savedBindings.length > 0) {
+          restoreBindingsToFile(savedBindings, CHANNEL_ID, CHANNEL_ID);
+          console.log(`  Preserved ${savedBindings.length} bindings(channel=${CHANNEL_ID}) across legacy uninstall.`);
+        }
+        console.log(`Uninstalled legacy ${NPM_PACKAGE_NAME} (replaced by ClawHub octo).`);
+        didChange = true;
+      } catch (err) {
+        throw new Error(
+          `Failed to uninstall legacy ${NPM_PACKAGE_NAME} after ClawHub install: ${(err as Error).message}\n` +
+          `This would leave duplicate "octo" channel registrations. ` +
+          `Manual cleanup required: openclaw plugins uninstall ${NPM_PACKAGE_NAME} --force`,
+        );
+      }
+    } else {
+      console.warn(
+        `Warning: detected legacy ${NPM_PACKAGE_NAME} but ClawHub octo install did not verify as healthy.\n` +
+        `Legacy plugin left in place to preserve current functionality.\n` +
+        `Re-run \`npx openclaw-channel-octo install\` after addressing the install issue.`,
+      );
+    }
+  }
+
   if (!didChange) return;
 
   console.log("Restarting gateway...");
@@ -202,11 +327,12 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
 // ---------------------------------------------------------------------------
 // Phase B: unified migration
 //
-// Both rebrand (openclaw-channel-dmwork → openclaw-channel-octo) and
-// legacy-to-octo (very-legacy "dmwork" → openclaw-channel-octo) go through
-// runMigration() with a different `legacyPluginId` parameter. Channel config
-// and bindings always live under the same legacy channel id ("dmwork"), so
-// data migration is identical.
+// Both rebrand (openclaw-channel-dmwork → ClawHub octo) and legacy-to-octo
+// (very-legacy "dmwork" → ClawHub octo) go through runMigration() with a
+// different `legacyPluginId` parameter. The target install spec is always
+// `CLAWHUB_INSTALL_SPEC` (= "clawhub:octo") and the post-install plugin id
+// is `PLUGIN_ID` (= "octo"). Channel config and bindings always live under
+// the same legacy channel id ("dmwork"), so data migration is identical.
 // ---------------------------------------------------------------------------
 
 interface MigrationContext {
@@ -535,7 +661,10 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
 
   try {
     console.log(`  Installing ${PLUGIN_ID}...`);
-    pluginsInstall(spec, quiet);
+    // P2 (PR #37): pass force=true to be consistent with other recovery paths
+    // (broken / cleanup) — deadlock repair may leave a partial extension dir
+    // from a previous crashed attempt that bare install would refuse to overwrite.
+    pluginsInstall(spec, quiet, true);
   } catch (err) {
     console.error("  Install failed! Restoring config...");
     try { copyFileSync(backupPath, configPath); } catch { /* best effort */ }

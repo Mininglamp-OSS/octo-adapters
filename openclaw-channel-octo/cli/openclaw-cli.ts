@@ -8,7 +8,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { CHANNEL_ID, PLUGIN_ID, LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID } from "../src/constants.js";
+import { CHANNEL_ID, PLUGIN_ID, NPM_PACKAGE_NAME, LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID } from "../src/constants.js";
 
 /**
  * Find the user's globally installed openclaw, skipping the npx environment.
@@ -909,7 +909,11 @@ export function cleanupStaleStageDirectories(): string[] {
         for (const p of [pkgPath, altPkgPath]) {
           try {
             const pkg = JSON.parse(readFileSync(p, "utf-8"));
-            if (pkg.name === PLUGIN_ID) {
+            // Match either the npm package name or the ClawHub plugin id —
+            // staged dirs may use either depending on install source
+            // (P2, PR #37 review: PLUGIN_ID semantic shift made the previous
+            // single-comparison check dead code for staged npm installs).
+            if (pkg.name === NPM_PACKAGE_NAME || pkg.name === PLUGIN_ID) {
               isDmwork = true;
               break;
             }

@@ -7,8 +7,22 @@
  * (`cli/*.ts`). Runtime code MUST NOT import from `cli/`.
  */
 
-export const PLUGIN_ID = "openclaw-channel-octo";
+/**
+ * Target plugin id after install — matches the ClawHub plugin id `octo`
+ * (Mininglamp-OSS/openclaw-channel-octo standalone repo, published to ClawHub).
+ * Used by cli/* for plugin inspect / enable / cleanup operations.
+ */
+export const PLUGIN_ID = "octo";
 export const CHANNEL_ID = "octo";
+
+/** The npm package name (this very package). Used as the install spec when
+ * publishing to npm, and as a legacy plugin id to detect+cleanup when an older
+ * version (1.x) was installed via `openclaw plugins install openclaw-channel-octo`.
+ */
+export const NPM_PACKAGE_NAME = "openclaw-channel-octo";
+
+/** Spec passed to `openclaw plugins install <spec>` to install from ClawHub. */
+export const CLAWHUB_INSTALL_SPEC = "clawhub:octo";
 
 // LEGACY-COMPAT: legacy identifiers used only by Phase B migration code and
 // Phase A's legacy-warn / dual-prefix compatibility paths.
