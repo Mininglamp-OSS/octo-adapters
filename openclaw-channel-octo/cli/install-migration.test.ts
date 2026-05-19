@@ -527,7 +527,7 @@ describe("runInstall — rebrand scenario (openclaw-channel-dmwork → octo)", (
         state.cfg.plugins.entries["octo"] = { enabled: true };
         state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
         state.extDirs.add("octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && (a[1] === "enable" || a[1] === "disable")) return "";
@@ -702,7 +702,7 @@ describe("runInstall — legacy-to-octo scenario (very-legacy 'dmwork' → octo)
         state.cfg.plugins.entries["octo"] = { enabled: true };
         state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
         state.extDirs.add("octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && a[1] === "uninstall") {
@@ -772,7 +772,7 @@ describe("runInstall — legacy-to-octo scenario (very-legacy 'dmwork' → octo)
         state.cfg.plugins.entries["octo"] = { enabled: true };
         state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
         state.extDirs.add("octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && a[1] === "uninstall") {
@@ -860,7 +860,7 @@ describe("runInstall — deadlock scenario (channels.octo without plugin)", () =
         state.cfg.plugins.entries["octo"] = { enabled: true };
         state.cfg.plugins.installs["octo"] = { source: "npm", version: "1.0.0" };
         state.extDirs.add("octo");
-        inspectMap["openclaw-channel-octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
+        inspectMap["octo"] = { plugin: { id: "octo", version: "1.0.0", enabled: true } };
         return "";
       }
       if (a[0] === "plugins" && (a[1] === "enable" || a[1] === "disable")) return "";
