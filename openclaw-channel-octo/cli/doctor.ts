@@ -183,32 +183,28 @@ export async function runDoctorChecks(params: {
         detail: `${versionLabel}${sourceNote}`,
       });
     } else if (fix) {
-      // Not installed (or broken/partial). Use detectScenario() for precise fix.
+      // Not installed (or broken/partial). Defer to runInstall for full
+      // scenario handling — it covers legacy-to-octo / rebrand / legacy /
+      // deadlock / broken / fresh with the correct CLAWHUB_INSTALL_SPEC
+      // and transactional rollback. Doctor used to inline a partial subset
+      // (only legacy/deadlock/broken) and passed PLUGIN_ID as install spec,
+      // which broke after PLUGIN_ID's semantics changed from npm name to
+      // ClawHub plugin id "octo".
       try {
-        const scenario = detectScenario();
-        if (scenario === "legacy") {
-          const { runLegacyMigrationForUpdate } = await import("./install.js");
-          runLegacyMigrationForUpdate(PLUGIN_ID, true);
-        } else if (scenario === "deadlock") {
-          const { runDeadlockRepairForUpdate } = await import("./install.js");
-          runDeadlockRepairForUpdate(PLUGIN_ID, true);
-        } else if (scenario === "broken") {
-          cleanupBrokenInstall();
-          pluginsInstall(PLUGIN_ID, true);
-        } else {
-          pluginsInstall(PLUGIN_ID, true);
-        }
+        const { runInstall } = await import("./install.js");
+        await runInstall({ force: true });
         pluginState = resolvePluginState(PLUGIN_ID);
         checks.push({
           name: "Plugin installed",
           status: "FIXED",
           detail: `Installed v${pluginState.version ?? "unknown"}`,
         });
-      } catch {
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
         checks.push({
           name: "Plugin installed",
           status: "FAIL",
-          detail: "Not installed (auto-install failed)",
+          detail: `Auto-install failed: ${errMsg}`,
         });
         return summarize(checks);
       }

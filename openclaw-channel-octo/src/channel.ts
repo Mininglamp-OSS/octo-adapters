@@ -289,25 +289,29 @@ async function checkForUpdates(
   log?: { info?: (msg: string) => void; error?: (msg: string) => void; warn?: (msg: string) => void; debug?: (msg: string) => void },
 ): Promise<void> {
   try {
-    // Check npm version
+    // v2.0.0+: plugin is distributed via ClawHub (plugin id = "octo"), not npm.
+    // Use ClawHub's public registry API for version check.
     const localVersion = PLUGIN_VERSION;
-    const resp = await fetch("https://registry.npmjs.org/openclaw-channel-octo/latest");
+    const resp = await fetch("https://clawhub.ai/api/v1/packages/octo");
     if (resp.ok) {
-      const data = await resp.json() as { version?: string };
-      if (data.version && data.version !== localVersion) {
-        log?.info?.(`octo: new version available: ${data.version} (current: ${localVersion}). Run: npm install openclaw-channel-octo@latest`);
+      const data = await resp.json() as { package?: { latestVersion?: string } };
+      const latest = data?.package?.latestVersion;
+      if (latest && latest !== localVersion) {
+        log?.info?.(
+          `octo: new version available: ${latest} (current: ${localVersion}). ` +
+          `Run: openclaw plugins install clawhub:octo --force ` +
+          `(or upgrade via: npx openclaw-channel-octo install)`,
+        );
       }
     } else if (resp.status === 404) {
-      // Phase A: package not yet published to npm. Silently ignore.
-      // Once published in Phase B this branch becomes unreachable.
-      log?.debug?.(`octo: registry returned 404 for openclaw-channel-octo (not published yet)`);
+      log?.debug?.(`octo: ClawHub returned 404 for octo (not published yet)`);
     }
   } catch (err) {
     log?.debug?.(`octo: version check failed: ${String(err)}`);
   }
 
   // Skills are distributed via the plugin's skills/ directory (openclaw.plugin.json "skills" field).
-  // No runtime fetch needed — openclaw loads skills from ~/.openclaw/extensions/openclaw-channel-octo/skills/ automatically.
+  // No runtime fetch needed — openclaw loads skills from ~/.openclaw/extensions/octo/skills/ automatically.
 }
 
 /** Resolve correct accountId for outbound context using group→account mapping */

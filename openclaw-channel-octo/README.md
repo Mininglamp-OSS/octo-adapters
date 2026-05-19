@@ -35,7 +35,8 @@ npx -y openclaw-channel-octo bind \
 `install` flags:
 
 - `--force`: reinstall even if already installed
-- `--dev`: install the `@dev` dist-tag instead of `@latest`
+- `--from <spec>`: install from a local tarball or alternate `openclaw plugins install` spec (pre-publish local testing)
+- `--dev` / `--next`: deprecated in v2.0.0+ (ClawHub installs use a single channel; use `--from` for pre-release testing)
 
 ## CLI Commands
 

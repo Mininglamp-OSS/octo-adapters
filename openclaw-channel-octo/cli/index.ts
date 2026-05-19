@@ -14,7 +14,7 @@ import {
 } from "./doctor.js";
 import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
-import { ensureOpenClawCompat, PLUGIN_ID } from "./utils.js";
+import { ensureOpenClawCompat, NPM_PACKAGE_NAME, PLUGIN_ID } from "./utils.js";
 import { getOpenClawVersionStrict, resolvePluginState } from "./openclaw-cli.js";
 import { PLUGIN_VERSION } from "../src/version.js";
 
@@ -55,8 +55,9 @@ program
 
     console.log(`${b}openclaw-channel-octo-cli:${r} ${g}${PLUGIN_VERSION}${r}`);
     console.log(`${b}openclaw:${r} ${g}${openclawVersion}${r}`);
-    console.log(`${b}openclaw-channel-octo:${r} ${g}${installedVersion}${r}`);
-    console.log(`${b}plugin package:${r} ${g}${PLUGIN_ID}${r}`);
+    console.log(`${b}installed plugin id:${r} ${g}${PLUGIN_ID}${r} (ClawHub)`);
+    console.log(`${b}installed plugin version:${r} ${g}${installedVersion}${r}`);
+    console.log(`${b}npm package:${r} ${g}${NPM_PACKAGE_NAME}${r}`);
     console.log();
     console.log(`${b}Environment:${r}`);
     console.log(`${b}OS:${r} ${g}${process.platform} ${process.arch}${r}`);
@@ -69,10 +70,14 @@ program
   .command("install")
   .description("Install or update the Octo plugin")
   .option("--force", "Force reinstall", false)
-  .option("--next", "Install the @next pre-release dist-tag (use during rc/beta cycles)", false)
+  .option(
+    "--next",
+    "[v2.0.0+ no-op] Previously selected npm @next dist-tag. ClawHub installs use a single channel; use --from <tarball> for pre-release testing.",
+    false,
+  )
   .option(
     "--from <spec>",
-    "Override install spec (tarball path or alternate npm spec). Pre-publish local testing.",
+    "Override install spec (tarball path or alternate `openclaw plugins install` spec). Pre-publish local testing.",
   )
   .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
@@ -88,7 +93,11 @@ program
 program
   .command("update")
   .description("Update the Octo plugin (alias for install)")
-  .option("--next", "Update to the @next pre-release dist-tag", false)
+  .option(
+    "--next",
+    "[v2.0.0+ no-op] Previously selected npm @next dist-tag. ClawHub installs use a single channel; use `install --from <tarball>` for pre-release testing.",
+    false,
+  )
   .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
     await runUpdate({ dev: opts.dev, next: opts.next });
