@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- openclaw-channel-octo: new optional account config `onBehalfOf`. When set, the adapter forwards `on_behalf_of` on every `/v1/bot/sendMessage` request so the bot can post as a real user under a Persona Clone (OBO) grant. Unset → identical behavior to before (field omitted from request body).
+
 ## [0.3.6] - 2026-03-14
 
 ### Changed

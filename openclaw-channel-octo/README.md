@@ -106,6 +106,7 @@ Configuration fields per account:
 - `wsUrl` (optional): WuKongIM WebSocket URL. Auto-detected if omitted.
 - `requireMention` (optional): Only respond when @mentioned in groups
 - `historyLimit` (optional): Group chat history message limit (default: 20)
+- `onBehalfOf` (optional): Real user UID this bot sends on behalf of (Persona Clone / OBO). When set, every outbound message includes `on_behalf_of` and is delivered as that user. Requires an active server-side OBO grant; otherwise the server returns 403. Leave empty/unset for normal bot behavior.
 
 ## What it does
 

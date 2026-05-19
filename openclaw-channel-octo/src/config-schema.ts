@@ -14,6 +14,7 @@ export interface DmworkAccountConfig {
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
+  onBehalfOf?: string;  // 该 bot 代理发送的真人 uid。设置后,所有 outbound 消息以该 uid 身份发出。
 }
 
 export interface DmworkConfig {
@@ -30,6 +31,7 @@ export interface DmworkConfig {
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
+  onBehalfOf?: string;  // 该 bot 代理发送的真人 uid。设置后,所有 outbound 消息以该 uid 身份发出。
   accounts?: Record<string, DmworkAccountConfig | undefined>;
 }
 
@@ -55,6 +57,7 @@ export const DmworkConfigJsonSchema = {
       botUid: { type: "string" },
       historyLimit: { type: "number", minimum: 1, maximum: 100 },
       historyPromptTemplate: { type: "string" },
+      onBehalfOf: { type: "string" },
       accounts: {
         type: "object",
         additionalProperties: {
@@ -73,6 +76,7 @@ export const DmworkConfigJsonSchema = {
             botUid: { type: "string" },
             historyLimit: { type: "number", minimum: 1, maximum: 100 },
             historyPromptTemplate: { type: "string" },
+            onBehalfOf: { type: "string" },
           },
         },
       },
