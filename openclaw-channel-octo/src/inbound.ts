@@ -66,9 +66,10 @@ export async function uploadAndSendMedia(params: {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  onBehalfOf?: string;
   log?: ChannelLogSink;
 }): Promise<SendMessageResult | undefined> {
-  const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
+  const { mediaUrl, apiUrl, botToken, channelId, channelType, onBehalfOf, log } = params;
 
   const { createReadStream: fsCreateReadStream, statSync: fsStatSync, createWriteStream: fsCreateWriteStream } = await import("node:fs");
   const { basename, join: pathJoin } = await import("node:path");
@@ -173,6 +174,7 @@ export async function uploadAndSendMedia(params: {
       size: fileSize,
       width,
       height,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
     });
     return result;
   } finally {
@@ -1720,6 +1722,7 @@ export async function handleInboundMessage(params: {
       ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
       ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
+      ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
     });
     statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
     return result;
@@ -1756,6 +1759,7 @@ export async function handleInboundMessage(params: {
                 botToken: account.config.botToken ?? "",
                 channelId: replyChannelId,
                 channelType: replyChannelType,
+                ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
                 log,
               });
               sentMediaUrls.add(mediaUrl);
@@ -1798,6 +1802,7 @@ export async function handleInboundMessage(params: {
               channelId: replyChannelId,
               channelType: replyChannelType,
               content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
+              ...(account.config.onBehalfOf ? { onBehalfOf: account.config.onBehalfOf } : {}),
             });
           } catch (sendErr) {
             log?.error?.(`octo: failed to send error message: ${String(sendErr)}`);

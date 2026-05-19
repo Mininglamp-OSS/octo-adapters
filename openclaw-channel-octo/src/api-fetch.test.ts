@@ -1201,3 +1201,102 @@ describe("sendMessage — mentionAll serialization", () => {
     expect(sentBody.payload.mention).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// sendMessage / sendMediaMessage — onBehalfOf (Persona Clone / OBO) passthrough
+// ---------------------------------------------------------------------------
+describe("sendMessage — onBehalfOf passthrough", () => {
+  const originalFetch = global.fetch;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("onBehalfOf 设置后请求体应包含 on_behalf_of", async () => {
+    let sentBody: any = null;
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "代发的回复",
+      onBehalfOf: "yu_uid",
+    });
+
+    expect(sentBody.on_behalf_of).toBe("yu_uid");
+    // 兼容性: payload 内部结构不变
+    expect(sentBody.channel_id).toBe("group1");
+    expect(sentBody.payload.content).toBe("代发的回复");
+  });
+
+  it("onBehalfOf 未设置 / 空串时请求体不应包含该字段（向后兼容）", async () => {
+    let bodies: any[] = [];
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(init?.body as string));
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "normal",
+    });
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      content: "normal",
+      onBehalfOf: "",
+    });
+
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).not.toHaveProperty("on_behalf_of");
+    expect(bodies[1]).not.toHaveProperty("on_behalf_of");
+  });
+
+  it("sendMediaMessage 也应透传 on_behalf_of", async () => {
+    let sentBody: any = null;
+    global.fetch = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const { sendMediaMessage } = await import("./api-fetch.js");
+    await sendMediaMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "group1",
+      channelType: ChannelType.Group,
+      type: MessageType.Image,
+      url: "https://cdn.example.com/img.png",
+      width: 100,
+      height: 100,
+      onBehalfOf: "yu_uid",
+    });
+
+    expect(sentBody.on_behalf_of).toBe("yu_uid");
+  });
+});
