@@ -11,6 +11,6 @@ permissions: {}
 
 jobs:
   add-to-project:
-    uses: Mininglamp-OSS/.github/.github/workflows/auto-add-to-project.yml@main
+    uses: Mininglamp-OSS/.github/.github/workflows/auto-add-to-project.yml@e367284d0c052d184d4e625732f840a1f6ed118a
     secrets:
       PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
