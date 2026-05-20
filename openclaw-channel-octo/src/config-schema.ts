@@ -57,7 +57,11 @@ export const DmworkConfigJsonSchema = {
       botUid: { type: "string" },
       historyLimit: { type: "number", minimum: 1, maximum: 100 },
       historyPromptTemplate: { type: "string" },
-      onBehalfOf: { type: "string", minLength: 1 },
+      // `\\S` requires at least one non-whitespace char so a value like "   "
+      // (which `minLength: 1` would otherwise accept) is rejected. The OBO
+      // attribution path keys identity off this string, so a whitespace-only
+      // grantor would silently fail server-side OBO lookups.
+      onBehalfOf: { type: "string", minLength: 1, pattern: "\\S" },
       accounts: {
         type: "object",
         additionalProperties: {
@@ -76,7 +80,7 @@ export const DmworkConfigJsonSchema = {
             botUid: { type: "string" },
             historyLimit: { type: "number", minimum: 1, maximum: 100 },
             historyPromptTemplate: { type: "string" },
-            onBehalfOf: { type: "string", minLength: 1 },
+            onBehalfOf: { type: "string", minLength: 1, pattern: "\\S" },
           },
         },
       },

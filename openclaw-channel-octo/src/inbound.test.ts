@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ChannelType, MessageType, type MentionPayload } from "./types.js";
+import { ChannelType, MessageType, type MentionPayload, type BotMessage } from "./types.js";
 import { DEFAULT_HISTORY_PROMPT_TEMPLATE } from "./config-schema.js";
 import {
   resolveInnerMessageText,
@@ -85,14 +85,17 @@ describe("mention.all detection", () => {
  *
  * Trigger rule (mirrors inbound.ts):
  *   isMentioned =
- *       ((aisFlag || legacyAll) && !ignoreMentionAll)
+ *       (aisFlag && !ignoreMentionAll)
  *     || mentionUids.includes(botUid)
  *
- * Where `aisFlag = mention.ais === true || === 1` and `legacyAll` is the
- * pre-three-state broadcast that means "everyone including bots". Legacy
- * `all` MUST keep waking bots — old servers/clients still emit only `all`,
- * and dropping that would silently regress bot triggering (Jerry-Xin
- * review feedback). `humans=1` alone never wakes a bot.
+ * Where `aisFlag = mention.ais === true || === 1`.
+ *
+ * `humans=1` and legacy `all=1` are BOTH humans-only signals per the
+ * server-authoritative contract (server `all=humans`, see
+ * `MentionPayload.all` in types.ts and the Jerry-Xin R2 review). Neither
+ * wakes a bot on its own — only `ais=1` (the explicit AI broadcast) does.
+ * An explicit uid mention always wakes the bot regardless of the broadcast
+ * flags.
  */
 describe("mention three-state trigger (PR-B)", () => {
   // Helper that mirrors the inbound.ts decision block verbatim.
@@ -107,7 +110,8 @@ describe("mention three-state trigger (PR-B)", () => {
     const hasAis = m.ais === true || m.ais === 1;
     const hasAll = m.all === true || m.all === 1;
     void hasHumans; // humansFlag — does not gate bot
-    const broadcastWakesBot = hasAis || hasAll;
+    void hasAll; // legacyAllFlag — does not gate bot (humans-only signal)
+    const broadcastWakesBot = hasAis;
     return (broadcastWakesBot && !ignoreMentionAll) || mentionUids.includes(botUid);
   }
 
@@ -128,13 +132,22 @@ describe("mention three-state trigger (PR-B)", () => {
     expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
   });
 
-  it("legacy all=1 only → bot triggered (backward compat with pre-three-state clients)", () => {
+  it("legacy all=1 only → bot NOT triggered (server `all=humans`, humans-only signal)", () => {
+    // Server double-writes legacy `all=1` for `@所有人` (humans only). It must
+    // NOT wake the bot on its own; doing so contradicts the type contract on
+    // `MentionPayload.all` and would summon AIs to a humans-only broadcast
+    // (Jerry-Xin R2 blocker — fixed by aligning impl with the contract).
     const mention: MentionPayload = { all: 1 };
-    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(false);
   });
 
-  it("legacy all=1 + humans=1 → bot triggered (legacy `all` wakes bot regardless of humans)", () => {
+  it("legacy all=1 + humans=1 → bot NOT triggered (both humans-only signals)", () => {
     const mention: MentionPayload = { all: 1, humans: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(false);
+  });
+
+  it("legacy all=1 + ais=1 → bot triggered (ais wakes the bot, all is irrelevant)", () => {
+    const mention: MentionPayload = { all: 1, ais: 1 };
     expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
   });
 
@@ -148,7 +161,7 @@ describe("mention three-state trigger (PR-B)", () => {
     expect(computeIsMentioned(mention, BOT_UID, true)).toBe(false);
   });
 
-  it("legacy all=1 with ignoreMentionAll=true → bot NOT triggered (opt-out covers both broadcasts)", () => {
+  it("legacy all=1 with ignoreMentionAll=true → bot NOT triggered (humans-only signal anyway)", () => {
     const mention: MentionPayload = { all: 1 };
     expect(computeIsMentioned(mention, BOT_UID, true)).toBe(false);
   });
@@ -158,9 +171,9 @@ describe("mention three-state trigger (PR-B)", () => {
     expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
   });
 
-  it("all=true (boolean form) → bot triggered (parity with numeric 1)", () => {
+  it("all=true (boolean form) → bot NOT triggered (humans-only signal in either form)", () => {
     const mention: MentionPayload = { all: true };
-    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(false);
   });
 
   it("ais=1 + explicit uid mention → bot triggered (ignoreMentionAll does NOT silence explicit @)", () => {
@@ -168,7 +181,7 @@ describe("mention three-state trigger (PR-B)", () => {
     expect(computeIsMentioned(mention, BOT_UID, true)).toBe(true);
   });
 
-  it("legacy all=1 + explicit uid mention → bot triggered (ignoreMentionAll does NOT silence explicit @)", () => {
+  it("legacy all=1 + explicit uid mention → bot triggered via explicit uid (not via all)", () => {
     const mention: MentionPayload = { all: 1, uids: [BOT_UID] };
     expect(computeIsMentioned(mention, BOT_UID, true)).toBe(true);
   });
@@ -2471,5 +2484,291 @@ describe("resolveEffectiveSender — OBO sender attribution (Jerry-Xin fix)", ()
       hasOnBehalfOfConfig: true,
     });
     expect(sender.senderUid).toBe(replyTarget);
+  });
+});
+
+/**
+ * OBO marker trust gate (Jerry-Xin R2 P0 blocker #1).
+ *
+ * Background: previously the call-site computed `hasOnBehalfOfConfig =
+ * Boolean(account.config.onBehalfOf)` — i.e. it only checked whether the
+ * receiving account is OBO-enabled. That alone is NOT sufficient: any
+ * inbound message on an OBO-enabled account could stuff a spoofed
+ * `obo_origin_from_uid` into its payload and redirect both the reply
+ * target and the OpenClaw session/peer identity.
+ *
+ * Fix: the OBO marker is now only trusted when the inbound message is
+ * actually a fan-out copy from the configured grantor. Concretely, trust
+ * requires:
+ *   - `account.config.onBehalfOf` is set (account is OBO-enabled), AND
+ *   - `message.from_uid === account.config.onBehalfOf` (server-side, fan-out
+ *     copies always stamp `from_uid` to the grantor), AND
+ *   - `payload.obo_grantor_uid` (when present) also matches the configured
+ *     grantor.
+ *
+ * The helpers `resolveReplyChannelId`, `isOBOFanoutMessage`, and
+ * `resolveEffectiveSender` still take a `hasOnBehalfOfConfig` flag — the
+ * semantics is now "the OBO marker is trusted for THIS message", computed
+ * at the call site. These tests verify the trust decision the call site
+ * computes for representative inbound shapes.
+ */
+describe("OBO marker trust gate (Jerry-Xin R2)", () => {
+  // Mirror of the trust check in inbound.ts ~ handleInboundMessage.
+  function computeOboMarkerTrusted(params: {
+    configuredGrantor: string | undefined;
+    fromUid: string;
+    payload?: BotMessage["payload"];
+  }): boolean {
+    const oboGrantorUidRaw = (params.payload as { obo_grantor_uid?: unknown } | undefined)
+      ?.obo_grantor_uid;
+    const oboGrantorUid =
+      typeof oboGrantorUidRaw === "string" && oboGrantorUidRaw.length > 0
+        ? oboGrantorUidRaw
+        : undefined;
+    return Boolean(
+      params.configuredGrantor &&
+        params.fromUid === params.configuredGrantor &&
+        (oboGrantorUid === undefined || oboGrantorUid === params.configuredGrantor),
+    );
+  }
+
+  const ADMIN = "u_admin";
+  const SPOOFER = "u_evil";
+  const VICTIM = "u_victim";
+
+  // ─── trust check unit tests ──────────────────────────────────────────────
+
+  it("trust=false when account is NOT OBO-configured", () => {
+    expect(
+      computeOboMarkerTrusted({
+        configuredGrantor: undefined,
+        fromUid: ADMIN,
+        payload: {
+          type: MessageType.Text,
+          content: "hi",
+          obo_origin_from_uid: VICTIM,
+          obo_grantor_uid: ADMIN,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("trust=true when from_uid matches configured grantor and obo_grantor_uid also matches", () => {
+    expect(
+      computeOboMarkerTrusted({
+        configuredGrantor: ADMIN,
+        fromUid: ADMIN,
+        payload: {
+          type: MessageType.Text,
+          content: "hi",
+          obo_origin_from_uid: VICTIM,
+          obo_grantor_uid: ADMIN,
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("trust=true when from_uid matches and obo_grantor_uid is absent", () => {
+    expect(
+      computeOboMarkerTrusted({
+        configuredGrantor: ADMIN,
+        fromUid: ADMIN,
+        payload: {
+          type: MessageType.Text,
+          content: "hi",
+          obo_origin_from_uid: VICTIM,
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("trust=false when from_uid is NOT the configured grantor (spoof attempt)", () => {
+    expect(
+      computeOboMarkerTrusted({
+        configuredGrantor: ADMIN,
+        fromUid: SPOOFER,
+        payload: {
+          type: MessageType.Text,
+          content: "redirect me",
+          obo_origin_from_uid: VICTIM, // attacker tries to redirect to victim
+          obo_grantor_uid: ADMIN, // attacker may stamp anything here
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("trust=false when from_uid matches but obo_grantor_uid contradicts configured grantor", () => {
+    expect(
+      computeOboMarkerTrusted({
+        configuredGrantor: ADMIN,
+        fromUid: ADMIN,
+        payload: {
+          type: MessageType.Text,
+          content: "hi",
+          obo_origin_from_uid: VICTIM,
+          obo_grantor_uid: SPOOFER, // mismatch — refuse to trust
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("trust=false when payload is undefined and from_uid mismatch", () => {
+    expect(
+      computeOboMarkerTrusted({
+        configuredGrantor: ADMIN,
+        fromUid: SPOOFER,
+        payload: undefined,
+      }),
+    ).toBe(false);
+  });
+
+  // ─── end-to-end: spoof attempts on OBO-enabled accounts ──────────────────
+
+  it("resolveReplyChannelId: spoof from non-grantor on OBO account → reply falls back to from_uid", () => {
+    const trusted = computeOboMarkerTrusted({
+      configuredGrantor: ADMIN,
+      fromUid: SPOOFER,
+      payload: {
+        type: MessageType.Text,
+        content: "redirect me",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+    });
+    const reply = resolveReplyChannelId({
+      isGroup: false,
+      channelId: SPOOFER,
+      fromUid: SPOOFER,
+      payload: {
+        type: MessageType.Text,
+        content: "redirect me",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+      hasOnBehalfOfConfig: trusted,
+    });
+    // Spoofed OBO marker MUST be ignored — reply target stays with the
+    // actual sender (the spoofer), NOT the victim.
+    expect(reply).toBe(SPOOFER);
+  });
+
+  it("isOBOFanoutMessage: spoof from non-grantor on OBO account → not a fan-out copy", () => {
+    const trusted = computeOboMarkerTrusted({
+      configuredGrantor: ADMIN,
+      fromUid: SPOOFER,
+      payload: {
+        type: MessageType.Text,
+        content: "x",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+    });
+    expect(
+      isOBOFanoutMessage(
+        {
+          type: MessageType.Text,
+          content: "x",
+          obo_origin_from_uid: VICTIM,
+          obo_grantor_uid: ADMIN,
+        },
+        { hasOnBehalfOfConfig: trusted },
+      ),
+    ).toBe(false);
+  });
+
+  it("resolveEffectiveSender: spoof from non-grantor on OBO account → sender stays as from_uid", () => {
+    const trusted = computeOboMarkerTrusted({
+      configuredGrantor: ADMIN,
+      fromUid: SPOOFER,
+      payload: {
+        type: MessageType.Text,
+        content: "x",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+    });
+    const sender = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: SPOOFER,
+      payload: {
+        type: MessageType.Text,
+        content: "x",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+      hasOnBehalfOfConfig: trusted,
+    });
+    // Spoofed marker MUST NOT redirect sender attribution — downstream
+    // permission checks must see the real sender (the spoofer), not the
+    // victim's uid.
+    expect(sender.senderUid).toBe(SPOOFER);
+    expect(sender.grantorUid).toBeUndefined();
+  });
+
+  it("legitimate fan-out copy (from configured grantor) → OBO marker honored", () => {
+    const trusted = computeOboMarkerTrusted({
+      configuredGrantor: ADMIN,
+      fromUid: ADMIN, // server stamps fan-out copies with the grantor
+      payload: {
+        type: MessageType.Text,
+        content: "hi",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+    });
+    expect(trusted).toBe(true);
+    const reply = resolveReplyChannelId({
+      isGroup: false,
+      channelId: ADMIN,
+      fromUid: ADMIN,
+      payload: {
+        type: MessageType.Text,
+        content: "hi",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+      hasOnBehalfOfConfig: trusted,
+    });
+    expect(reply).toBe(VICTIM);
+
+    const sender = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: ADMIN,
+      payload: {
+        type: MessageType.Text,
+        content: "hi",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+      hasOnBehalfOfConfig: trusted,
+    });
+    expect(sender.senderUid).toBe(VICTIM);
+    expect(sender.grantorUid).toBe(ADMIN);
+  });
+
+  it("non-OBO account ignores OBO marker regardless of from_uid (existing defense, regression guard)", () => {
+    const trusted = computeOboMarkerTrusted({
+      configuredGrantor: undefined,
+      fromUid: ADMIN,
+      payload: {
+        type: MessageType.Text,
+        content: "x",
+        obo_origin_from_uid: VICTIM,
+        obo_grantor_uid: ADMIN,
+      },
+    });
+    expect(trusted).toBe(false);
+    const reply = resolveReplyChannelId({
+      isGroup: false,
+      channelId: ADMIN,
+      fromUid: ADMIN,
+      payload: {
+        type: MessageType.Text,
+        content: "x",
+        obo_origin_from_uid: VICTIM,
+      },
+      hasOnBehalfOfConfig: trusted,
+    });
+    expect(reply).toBe(ADMIN);
   });
 });

@@ -61,4 +61,27 @@ describe("openclaw.plugin.json onBehalfOf validation", () => {
     const accountProps = props.accounts.additionalProperties.properties;
     expect(accountProps.onBehalfOf.minLength).toBe(1);
   });
+
+  // Jerry-Xin R2 P1: minLength alone accepts whitespace-only typos like
+  // "   " (each space counts as a character). Adding `pattern: "\\S"`
+  // requires at least one non-whitespace character.
+  it("top-level onBehalfOf has pattern \\S to reject whitespace-only values", () => {
+    expect(
+      manifest.channelConfigs.octo.schema.properties.onBehalfOf.pattern,
+    ).toBe("\\S");
+  });
+
+  it("per-account onBehalfOf has pattern \\S to reject whitespace-only values", () => {
+    const accountProps =
+      manifest.channelConfigs.octo.schema.properties.accounts
+        .additionalProperties.properties;
+    expect(accountProps.onBehalfOf.pattern).toBe("\\S");
+  });
+
+  it("TS-side DmworkConfigJsonSchema mirrors pattern \\S", () => {
+    const props = DmworkConfigJsonSchema.schema.properties as any;
+    expect(props.onBehalfOf.pattern).toBe("\\S");
+    const accountProps = props.accounts.additionalProperties.properties;
+    expect(accountProps.onBehalfOf.pattern).toBe("\\S");
+  });
 });

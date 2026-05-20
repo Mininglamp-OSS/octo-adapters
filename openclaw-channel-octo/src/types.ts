@@ -18,6 +18,14 @@ export interface BotSendMessageReq {
   channel_type: ChannelType;
   stream_no?: string;
   payload: MessagePayload;
+  /**
+   * OBO (On-Behalf-Of) attribution. When set, the server attributes the
+   * outbound message to this uid (the grantor) instead of the calling
+   * bot. Adapter populates this from `account.config.onBehalfOf` for
+   * configured accounts; api-fetch maps the field to the over-the-wire
+   * `on_behalf_of` JSON key (see `api-fetch.ts`).
+   */
+  on_behalf_of?: string;
 }
 
 export interface BotTypingReq {
@@ -65,11 +73,14 @@ export interface MentionPayload {
   entities?: MentionEntity[];
   /**
    * Legacy "@all" flag. Server outbound double-writes this for legacy clients
-   * even after the three-state split landed (server-side semantic: all=humans).
-   * Adapter treats `all=1` as a humans-only signal (NOT ais) to match the
-   * server's authoritative decision.
+   * even after the three-state split landed (server-side semantic: `all=1`
+   * means "@所有人" → humans only, NOT ais). The adapter therefore treats
+   * `all=1` as a humans-only signal: it does NOT wake bots on its own and
+   * MUST be folded into the humans bucket, not the ais bucket. This matches
+   * the server's authoritative decision (see `inbound.ts` mention three-state
+   * read block).
    */
-  all?: boolean | number; // true or 1 = @all (API returns either depending on version)
+  all?: boolean | number; // true or 1 = @所有人 (humans-only; API returns either depending on version)
   /**
    * Three-state mention (server-authoritative, PR-A landed on octo-server #94).
    * `humans=1` → "@所有人", `ais=1` → "@所有AI". Both can co-exist.

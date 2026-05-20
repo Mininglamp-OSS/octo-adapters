@@ -949,11 +949,14 @@ export function resolveCommandAuthorized(isGroup: boolean, isOwnerUser: boolean,
  * Falls back to `fromUid` when no OBO marker is present (backward compat).
  *
  * `hasOnBehalfOfConfig` (optional, default `true`) gates whether the OBO
- * marker is honored. Set it to `false` for accounts that are NOT OBO-configured
- * (i.e. `account.config.onBehalfOf` is unset) so a spoofed
- * `payload.obo_origin_from_uid` from an arbitrary sender cannot redirect
- * replies / split sessions. When `true` (or omitted) the existing OBO
- * behavior is preserved.
+ * marker is honored. Despite its historical name, callers should pass the
+ * stronger "OBO marker is trusted for this message" decision computed at the
+ * call site (see `handleInboundMessage` — trust requires both the account
+ * being OBO-enabled AND the inbound `message.from_uid` matching the
+ * configured grantor, plus `obo_grantor_uid` if present). Set to `false`
+ * whenever those checks fail so a spoofed `payload.obo_origin_from_uid`
+ * from an arbitrary sender cannot redirect replies / split sessions.
+ * When `true` (or omitted) the OBO marker is honored.
  */
 export function resolveReplyChannelId(params: {
   isGroup: boolean;
@@ -990,10 +993,15 @@ export function resolveReplyChannelId(params: {
  * true. The sendMessage path is unaffected — it passes `on_behalf_of`.
  *
  * `opts.hasOnBehalfOfConfig` (optional, default `true`) gates the detection
- * on the receiving account actually being OBO-configured. When `false`
- * (account has no `onBehalfOf`), an arbitrary `payload.obo_origin_from_uid`
- * from an inbound message is treated as untrusted and the function returns
- * `false`. This prevents spoofed payloads from affecting non-OBO accounts.
+ * on whether the OBO marker is trusted for this message. Despite the
+ * historical name, callers should pass the call-site trust decision (see
+ * `handleInboundMessage` — trust requires both the account being
+ * OBO-enabled AND `message.from_uid` matching the configured grantor,
+ * plus `obo_grantor_uid` if present). When `false`, an arbitrary
+ * `payload.obo_origin_from_uid` from an inbound message is treated as
+ * untrusted and the function returns `false`. This prevents spoofed
+ * payloads from being honored on non-OBO accounts or from non-grantor
+ * senders on OBO-enabled accounts.
  */
 export function isOBOFanoutMessage(
   payload?: BotMessage["payload"],
@@ -1028,8 +1036,10 @@ export function isOBOFanoutMessage(
  * Gating:
  * - Only DM (`isGroup=false`) honors the OBO origin marker. Groups always
  *   carry the actual speaker in `from_uid`.
- * - `hasOnBehalfOfConfig=false` suppresses honoring the marker — a spoofed
- *   `obo_origin_from_uid` on a non-OBO account cannot redirect attribution.
+ * - `hasOnBehalfOfConfig=false` suppresses honoring the marker — used when
+ *   the OBO marker is NOT trusted for this message (account not OBO-enabled,
+ *   or `from_uid` / `obo_grantor_uid` mismatch with the configured grantor),
+ *   so a spoofed `obo_origin_from_uid` cannot redirect attribution.
  */
 export function resolveEffectiveSender(params: {
   isGroup: boolean;
@@ -1236,7 +1246,48 @@ export async function handleInboundMessage(params: {
   // target — otherwise two different fan-out conversations (same grantor,
   // different obo_origin_from_uid) would collapse onto the same OpenClaw
   // session and leak context across users.
-  const hasOnBehalfOfConfig = Boolean(account.config.onBehalfOf);
+  //
+  // OBO marker trust gate (Jerry-Xin R2 review feedback):
+  // It is NOT enough that the receiving account has `onBehalfOf` configured —
+  // a non-grantor sender on an OBO-enabled account could otherwise stuff a
+  // spoofed `obo_origin_from_uid` into their payload and redirect the
+  // session/reply target. We trust the OBO marker only when the inbound
+  // message actually comes from the configured grantor:
+  //   - `account.config.onBehalfOf` is set (account is OBO-enabled)
+  //   - AND `message.from_uid === account.config.onBehalfOf` (server-side,
+  //     fan-out copies always stamp `from_uid` to the grantor; a payload
+  //     from any other sender is not a fan-out copy and its OBO fields are
+  //     attacker-controlled)
+  //   - AND when the server populates `payload.obo_grantor_uid`, it must
+  //     also match the configured grantor (extra defense-in-depth so that
+  //     even if `from_uid` were bypassed, the explicit grantor stamp has
+  //     to match too).
+  // Anywhere the helpers below take a `hasOnBehalfOfConfig` flag, we now
+  // pass `oboMarkerTrusted` — the flag's effective meaning is "the OBO
+  // marker on THIS message is trusted", not "this account is OBO-enabled".
+  const configuredGrantor = account.config.onBehalfOf;
+  const oboGrantorUidFromPayloadRaw = (message.payload as { obo_grantor_uid?: unknown } | undefined)
+    ?.obo_grantor_uid;
+  const oboGrantorUidFromPayload =
+    typeof oboGrantorUidFromPayloadRaw === "string" && oboGrantorUidFromPayloadRaw.length > 0
+      ? oboGrantorUidFromPayloadRaw
+      : undefined;
+  const oboMarkerTrusted = Boolean(
+    configuredGrantor &&
+      message.from_uid === configuredGrantor &&
+      (oboGrantorUidFromPayload === undefined || oboGrantorUidFromPayload === configuredGrantor),
+  );
+  if (configuredGrantor && !oboMarkerTrusted) {
+    // Either from_uid mismatch or obo_grantor_uid mismatch on an OBO-enabled
+    // account — most likely a spoof attempt (or simply a non-fan-out message
+    // on an OBO-enabled account). Either way we ignore the OBO markers.
+    log?.debug?.(
+      `octo: [OBO] marker not trusted (from_uid=${message.from_uid}, ` +
+        `obo_grantor_uid=${oboGrantorUidFromPayload ?? "<none>"}, ` +
+        `configured grantor=${configuredGrantor}) — ignoring obo_origin_from_uid`,
+    );
+  }
+  const hasOnBehalfOfConfig = oboMarkerTrusted;
   const effectiveDmPeer = isGroup
     ? message.channel_id!
     : resolveReplyChannelId({
@@ -1399,38 +1450,44 @@ export async function handleInboundMessage(params: {
     //
     // Server contract on inbound payloads:
     //   - canonical form: `{humans?: 1, ais?: 1}` (independent flags)
-    //   - legacy form:    `{all: 1}` — emitted by old servers/clients that
-    //                     pre-date the three-state split. Semantically means
-    //                     "everyone, including bots", so it MUST continue to
-    //                     wake bots — otherwise this PR silently regresses
-    //                     bot triggering for any caller still on the legacy
-    //                     wire format. (Jerry-Xin review feedback.) `ais`
-    //                     is additive, not a replacement for `all`.
+    //   - legacy form:    `{all: 1}` — server double-writes this for legacy
+    //                     clients even post-three-state split. Server-side
+    //                     semantic is `all = humans` (i.e. "@所有人"),
+    //                     NOT "everyone including bots". See the comment on
+    //                     `MentionPayload.all` in types.ts: the adapter
+    //                     treats `all=1` as a humans-only signal so a bot
+    //                     does NOT wake on an `@所有人` broadcast that was
+    //                     never intended to summon AIs (Jerry-Xin R2
+    //                     blocker — previous implementation made `all`
+    //                     wake bots, contradicting the type contract and
+    //                     incorrectly triggering on human-only broadcasts).
     //
-    // Trigger rule: bots wake up on `ais=1` OR legacy `all=1` (subject to
-    // the existing `ignoreMentionAll` opt-out), or an explicit uid mention.
-    // `humans=1` alone never wakes a bot.
+    // Trigger rule: bots wake up on `ais=1` (subject to the existing
+    // `ignoreMentionAll` opt-out), or on an explicit uid mention.
+    // `humans=1` and legacy `all=1` (both humans-only signals) never wake
+    // a bot on their own.
     const mention = message.payload?.mention ?? {};
     const hasHumans = mention.humans === true || mention.humans === 1;
     const hasAis = mention.ais === true || mention.ais === 1;
     const hasAll = mention.all === true || mention.all === 1;
 
-    // `humansFlag` is computed for parity / debug logs but does NOT gate the
-    // bot. Both `ais` (new explicit broadcast) and `all` (legacy "everyone
-    // including bots") wake the bot, so they fold together into the trigger.
+    // `humansFlag` and `legacyAllFlag` are computed for parity / debug logs
+    // but do NOT gate the bot — both are humans-only signals per the
+    // server-authoritative contract. Only `ais` (the explicit AI broadcast)
+    // wakes the bot.
     const humansFlag = hasHumans;
     const aisFlag = hasAis;
-    const broadcastWakesBot = hasAis || hasAll;
+    const legacyAllFlag = hasAll;
+    const broadcastWakesBot = hasAis;
 
-    // Reuse existing ignoreMentionAll for opt-out. No separate ignoreAis
-    // config — keeps a single user-facing knob for "don't trigger me on
-    // broadcast mentions" regardless of which broadcast flavor the server
-    // emits.
+    // Reuse existing ignoreMentionAll for opt-out on the AI broadcast. Kept
+    // as a single user-facing knob ("don't trigger me on broadcast mentions")
+    // rather than splitting into separate `ignoreAis` config.
     isMentioned = (broadcastWakesBot && !account.config.ignoreMentionAll) || mentionUids.includes(botUid);
     isExplicitBotMention = mentionUids.includes(botUid);
 
     log?.debug?.(
-      `octo: [RECV] mention three-state: humans=${humansFlag} ais=${aisFlag} legacyAll=${hasAll} → bot triggered=${isMentioned}`,
+      `octo: [RECV] mention three-state: humans=${humansFlag} ais=${aisFlag} legacyAll=${legacyAllFlag} → bot triggered=${isMentioned}`,
     );
 
     // Defensive fallback: if payload.mention is missing/empty but the message
@@ -1839,8 +1896,10 @@ export async function handleInboundMessage(params: {
   // readReceipt/typing — those endpoints don't accept `on_behalf_of`. The
   // sendMessage path is unaffected because it does pass `on_behalf_of`.
   // These side-channel signals are cosmetic only, so we skip them.
-  // Gated on `account.config.onBehalfOf` so a spoofed `obo_origin_from_uid`
-  // on a non-OBO account cannot trip the skip path.
+  // Gated on the call-site OBO marker trust check (account is OBO-enabled
+  // AND `message.from_uid` matches the configured grantor) so a spoofed
+  // `obo_origin_from_uid` from a non-grantor sender — or any sender on a
+  // non-OBO account — cannot trip the skip path.
   const isOBOFanout = isOBOFanoutMessage(message.payload, { hasOnBehalfOfConfig });
 
   const apiUrl = account.config.apiUrl;

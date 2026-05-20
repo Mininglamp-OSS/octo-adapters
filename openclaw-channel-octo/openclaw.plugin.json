@@ -30,7 +30,7 @@
           "botUid": { "type": "string" },
           "historyLimit": { "type": "number", "minimum": 1, "maximum": 100 },
           "historyPromptTemplate": { "type": "string" },
-          "onBehalfOf": { "type": "string", "minLength": 1 },
+          "onBehalfOf": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "accounts": {
             "type": "object",
             "additionalProperties": {
@@ -49,7 +49,7 @@
                 "botUid": { "type": "string" },
                 "historyLimit": { "type": "number", "minimum": 1, "maximum": 100 },
                 "historyPromptTemplate": { "type": "string" },
-                "onBehalfOf": { "type": "string", "minLength": 1 }
+                "onBehalfOf": { "type": "string", "minLength": 1, "pattern": "\\S" }
               }
             }
           }
