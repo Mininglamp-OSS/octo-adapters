@@ -1336,10 +1336,41 @@ export async function handleInboundMessage(params: {
   let isExplicitBotMention = false;
   if (isGroup) {
     const mentionUids = extractMentionUids(message.payload?.mention);
-    const mentionAllRaw = message.payload?.mention?.all;
-    const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionUids.includes(botUid);
+
+    // ── Mention three-state read (PR-B; tracks octo-server #94) ────────────
+    // Adapter is NOT a decision boundary — server decides what "humans" vs
+    // "ais" means. We only read the three flags and decide whether THIS bot
+    // instance should be triggered.
+    //
+    // Server contract on inbound payloads:
+    //   - canonical form: `{humans?: 1, ais?: 1}` (independent flags)
+    //   - legacy form:    `{all: 1}` — server outbound double-writes this
+    //                     for legacy clients; semantically equals humans=1
+    //                     (NOT ais). Defensive read mirrors that decision.
+    //
+    // Trigger rule: bots wake up on `ais=1` (subject to opt-out) or an
+    // explicit uid mention. `humans=1` / `all=1` never wakes a bot.
+    const mention = message.payload?.mention ?? {};
+    const hasHumans = mention.humans === true || mention.humans === 1;
+    const hasAis = mention.ais === true || mention.ais === 1;
+    const hasAll = mention.all === true || mention.all === 1;
+
+    // hasAll folds into humans, NOT ais — matches server's "all = humans-only"
+    // decision. `humansFlag` is computed for parity / future read sites
+    // (e.g. debug logs) even though it intentionally does NOT gate the bot.
+    const humansFlag = hasHumans || hasAll;
+    const aisFlag = hasAis;
+
+    // Reuse existing ignoreMentionAll for opt-out. No separate ignoreAis
+    // config — keeps a single user-facing knob for "don't trigger me on
+    // broadcast mentions" regardless of which broadcast flavor the server
+    // emits.
+    isMentioned = (aisFlag && !account.config.ignoreMentionAll) || mentionUids.includes(botUid);
     isExplicitBotMention = mentionUids.includes(botUid);
+
+    log?.debug?.(
+      `octo: [RECV] mention three-state: humans=${humansFlag} ais=${aisFlag} legacyAll=${hasAll} → bot triggered=${isMentioned}`,
+    );
 
     // Defensive fallback: if payload.mention is missing/empty but the message
     // text contains @botName, treat it as a mention.  This covers old senders

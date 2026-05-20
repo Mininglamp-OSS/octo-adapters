@@ -63,7 +63,22 @@ export interface MentionEntity {
 export interface MentionPayload {
   uids?: string[];
   entities?: MentionEntity[];
+  /**
+   * Legacy "@all" flag. Server outbound double-writes this for legacy clients
+   * even after the three-state split landed (server-side semantic: all=humans).
+   * Adapter treats `all=1` as a humans-only signal (NOT ais) to match the
+   * server's authoritative decision.
+   */
   all?: boolean | number; // true or 1 = @all (API returns either depending on version)
+  /**
+   * Three-state mention (server-authoritative, PR-A landed on octo-server #94).
+   * `humans=1` → "@所有人", `ais=1` → "@所有AI". Both can co-exist.
+   * Adapter only reads these; it never decides semantics — server is the
+   * source of truth and rewrites legacy `all=1` into the canonical form
+   * before adapter sees it.
+   */
+  humans?: boolean | number;
+  ais?: boolean | number;
 }
 
 export interface ReplyPayload {
