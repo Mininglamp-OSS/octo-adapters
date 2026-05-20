@@ -10,7 +10,7 @@ permissions: {}
 
 jobs:
   notify:
-    uses: Mininglamp-OSS/.github/.github/workflows/octo-ci-status.yml@e367284d0c052d184d4e625732f840a1f6ed118a
+    uses: Mininglamp-OSS/.github/.github/workflows/octo-ci-status.yml@main
     with:
       repo_name: ${{ github.event.workflow_run.repository.name }}
       workflow_name: ${{ github.event.workflow_run.name }}
