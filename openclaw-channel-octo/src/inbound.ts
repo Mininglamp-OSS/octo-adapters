@@ -1012,6 +1012,42 @@ export function isOBOFanoutMessage(
 }
 
 /**
+ * Resolve the effective sender attribution for an inbound message.
+ *
+ * For OBO fan-out copies, the server stamps `from_uid` with the grantor
+ * (e.g. admin) and stashes the real conversation peer / actual speaker in
+ * `payload.obo_origin_from_uid` (e.g. u_bob). All downstream identity-bearing
+ * fields (`From`, `SenderId`, `SenderUsername`, the `isOwner` check, audit
+ * logs, etc.) MUST attribute the message to the real peer — otherwise the
+ * peer's message inherits the grantor's roles and bypasses gating
+ * (Jerry-Xin review feedback).
+ *
+ * The grantor uid is preserved separately (`grantorUid`) so callers can
+ * surface it as audit / OBO metadata without losing speaker attribution.
+ *
+ * Gating:
+ * - Only DM (`isGroup=false`) honors the OBO origin marker. Groups always
+ *   carry the actual speaker in `from_uid`.
+ * - `hasOnBehalfOfConfig=false` suppresses honoring the marker — a spoofed
+ *   `obo_origin_from_uid` on a non-OBO account cannot redirect attribution.
+ */
+export function resolveEffectiveSender(params: {
+  isGroup: boolean;
+  fromUid: string;
+  payload?: BotMessage["payload"];
+  hasOnBehalfOfConfig?: boolean;
+}): { senderUid: string; grantorUid: string | undefined } {
+  const obeyObo = params.hasOnBehalfOfConfig !== false;
+  if (!params.isGroup && obeyObo) {
+    const origin = params.payload?.obo_origin_from_uid;
+    if (typeof origin === "string" && origin.length > 0) {
+      return { senderUid: origin, grantorUid: params.fromUid };
+    }
+  }
+  return { senderUid: params.fromUid, grantorUid: undefined };
+}
+
+/**
  * Compute the OpenClaw session id for an inbound message.
  *
  * Group messages share a session keyed by `channel_id`. DM messages are keyed
@@ -1211,6 +1247,25 @@ export async function handleInboundMessage(params: {
         hasOnBehalfOfConfig,
       });
 
+  // OBO-aware sender attribution (Jerry-Xin review fix):
+  // When the server fans out an OBO copy, `from_uid` is the grantor (e.g.
+  // admin) for invisibility, but the real conversation peer / actual speaker
+  // lives in `payload.obo_origin_from_uid` (e.g. u_bob). Downstream
+  // permission checks (isOwner, cross-channel read auth) MUST attribute the
+  // message to the real peer, NOT the grantor — otherwise the peer's
+  // message inherits the grantor's owner role and bypasses gating.
+  //
+  // The grantor identity is preserved separately in `OboGrantorId` /
+  // `OboGrantorUsername` on the OpenClaw context so downstream code can
+  // audit who delegated the session without losing speaker attribution.
+  const { senderUid: effectiveSenderUid, grantorUid: oboGrantorUid } =
+    resolveEffectiveSender({
+      isGroup,
+      fromUid: message.from_uid,
+      payload: message.payload,
+      hasOnBehalfOfConfig,
+    });
+
   let spaceId = "";
   const effectiveChannelId = isGroup ? message.channel_id! : effectiveDmPeer;
   if (effectiveChannelId.startsWith("s")) {
@@ -1344,28 +1399,34 @@ export async function handleInboundMessage(params: {
     //
     // Server contract on inbound payloads:
     //   - canonical form: `{humans?: 1, ais?: 1}` (independent flags)
-    //   - legacy form:    `{all: 1}` — server outbound double-writes this
-    //                     for legacy clients; semantically equals humans=1
-    //                     (NOT ais). Defensive read mirrors that decision.
+    //   - legacy form:    `{all: 1}` — emitted by old servers/clients that
+    //                     pre-date the three-state split. Semantically means
+    //                     "everyone, including bots", so it MUST continue to
+    //                     wake bots — otherwise this PR silently regresses
+    //                     bot triggering for any caller still on the legacy
+    //                     wire format. (Jerry-Xin review feedback.) `ais`
+    //                     is additive, not a replacement for `all`.
     //
-    // Trigger rule: bots wake up on `ais=1` (subject to opt-out) or an
-    // explicit uid mention. `humans=1` / `all=1` never wakes a bot.
+    // Trigger rule: bots wake up on `ais=1` OR legacy `all=1` (subject to
+    // the existing `ignoreMentionAll` opt-out), or an explicit uid mention.
+    // `humans=1` alone never wakes a bot.
     const mention = message.payload?.mention ?? {};
     const hasHumans = mention.humans === true || mention.humans === 1;
     const hasAis = mention.ais === true || mention.ais === 1;
     const hasAll = mention.all === true || mention.all === 1;
 
-    // hasAll folds into humans, NOT ais — matches server's "all = humans-only"
-    // decision. `humansFlag` is computed for parity / future read sites
-    // (e.g. debug logs) even though it intentionally does NOT gate the bot.
-    const humansFlag = hasHumans || hasAll;
+    // `humansFlag` is computed for parity / debug logs but does NOT gate the
+    // bot. Both `ais` (new explicit broadcast) and `all` (legacy "everyone
+    // including bots") wake the bot, so they fold together into the trigger.
+    const humansFlag = hasHumans;
     const aisFlag = hasAis;
+    const broadcastWakesBot = hasAis || hasAll;
 
     // Reuse existing ignoreMentionAll for opt-out. No separate ignoreAis
     // config — keeps a single user-facing knob for "don't trigger me on
     // broadcast mentions" regardless of which broadcast flavor the server
     // emits.
-    isMentioned = (aisFlag && !account.config.ignoreMentionAll) || mentionUids.includes(botUid);
+    isMentioned = (broadcastWakesBot && !account.config.ignoreMentionAll) || mentionUids.includes(botUid);
     isExplicitBotMention = mentionUids.includes(botUid);
 
     log?.debug?.(
@@ -1706,7 +1767,10 @@ export async function handleInboundMessage(params: {
   }
 
   const commandBody = resolveCommandBody(rawBody, isGroup, isExplicitBotMention);
-  const commandAuthorized = resolveCommandAuthorized(isGroup, isOwner(account.accountId, message.from_uid), isExplicitBotMention);
+  // Owner check uses `effectiveSenderUid` so OBO fan-out copies attribute
+  // ownership to the real peer (e.g. u_bob), not the grantor (admin). Without
+  // this, a non-owner peer would inherit the grantor's owner role.
+  const commandAuthorized = resolveCommandAuthorized(isGroup, isOwner(account.accountId, effectiveSenderUid), isExplicitBotMention);
 
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
@@ -1722,15 +1786,21 @@ export async function handleInboundMessage(params: {
       return current ? [current] : undefined;
     })(),
     MediaTypes: resolved.mediaType ? [resolved.mediaType] : undefined,
-    From: `${CHANNEL_ID}:${message.from_uid}`,
+    From: `${CHANNEL_ID}:${effectiveSenderUid}`,
     To: `${CHANNEL_ID}:${sessionId}`,
     SessionKey: route.sessionKey,
     AccountId: route.accountId,
     ChatType: isGroup ? "group" : "direct",
     ConversationLabel: fromLabel,
-    SenderId: message.from_uid,
+    SenderId: effectiveSenderUid,
     SenderName: senderName,
-    SenderUsername: message.from_uid,
+    SenderUsername: effectiveSenderUid,
+    // OBO grantor metadata: when this message is an OBO fan-out copy, the
+    // grantor (e.g. admin) is preserved here so downstream auditing can see
+    // who delegated. `SenderId` deliberately points at the real peer instead.
+    ...(oboGrantorUid
+      ? { OboGrantorId: oboGrantorUid, OboGrantorUsername: oboGrantorUid }
+      : {}),
     WasMentioned: isGroup ? isMentioned : undefined,
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,

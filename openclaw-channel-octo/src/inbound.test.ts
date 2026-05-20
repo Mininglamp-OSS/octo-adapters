@@ -18,6 +18,7 @@ import {
   resolveReplyChannelId,
   resolveSessionId,
   isOBOFanoutMessage,
+  resolveEffectiveSender,
   pendingInboundContext,
   segmentHistoryEntries,
   type ResolveFileResult,
@@ -84,12 +85,14 @@ describe("mention.all detection", () => {
  *
  * Trigger rule (mirrors inbound.ts):
  *   isMentioned =
- *       (aisFlag && !ignoreMentionAll)
+ *       ((aisFlag || legacyAll) && !ignoreMentionAll)
  *     || mentionUids.includes(botUid)
  *
- * Where `aisFlag = mention.ais === true || === 1`. `humans` and legacy
- * `all` do NOT wake the bot — `all` is server outbound double-write of
- * humans-only broadcast for legacy clients.
+ * Where `aisFlag = mention.ais === true || === 1` and `legacyAll` is the
+ * pre-three-state broadcast that means "everyone including bots". Legacy
+ * `all` MUST keep waking bots — old servers/clients still emit only `all`,
+ * and dropping that would silently regress bot triggering (Jerry-Xin
+ * review feedback). `humans=1` alone never wakes a bot.
  */
 describe("mention three-state trigger (PR-B)", () => {
   // Helper that mirrors the inbound.ts decision block verbatim.
@@ -103,9 +106,9 @@ describe("mention three-state trigger (PR-B)", () => {
     const hasHumans = m.humans === true || m.humans === 1;
     const hasAis = m.ais === true || m.ais === 1;
     const hasAll = m.all === true || m.all === 1;
-    void (hasHumans || hasAll); // humansFlag — does not gate bot
-    const aisFlag = hasAis;
-    return (aisFlag && !ignoreMentionAll) || mentionUids.includes(botUid);
+    void hasHumans; // humansFlag — does not gate bot
+    const broadcastWakesBot = hasAis || hasAll;
+    return (broadcastWakesBot && !ignoreMentionAll) || mentionUids.includes(botUid);
   }
 
   const BOT_UID = "bot_uid";
@@ -125,9 +128,14 @@ describe("mention three-state trigger (PR-B)", () => {
     expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
   });
 
-  it("legacy all=1 (server double-write) → bot NOT triggered (hasAll → humans, NOT ais)", () => {
+  it("legacy all=1 only → bot triggered (backward compat with pre-three-state clients)", () => {
     const mention: MentionPayload = { all: 1 };
-    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(false);
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+  });
+
+  it("legacy all=1 + humans=1 → bot triggered (legacy `all` wakes bot regardless of humans)", () => {
+    const mention: MentionPayload = { all: 1, humans: 1 };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
   });
 
   it("explicit uid mention → bot triggered (unchanged regression coverage)", () => {
@@ -140,7 +148,7 @@ describe("mention three-state trigger (PR-B)", () => {
     expect(computeIsMentioned(mention, BOT_UID, true)).toBe(false);
   });
 
-  it("legacy all=1 with ignoreMentionAll=true → bot NOT triggered (regression coverage)", () => {
+  it("legacy all=1 with ignoreMentionAll=true → bot NOT triggered (opt-out covers both broadcasts)", () => {
     const mention: MentionPayload = { all: 1 };
     expect(computeIsMentioned(mention, BOT_UID, true)).toBe(false);
   });
@@ -150,8 +158,18 @@ describe("mention three-state trigger (PR-B)", () => {
     expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
   });
 
+  it("all=true (boolean form) → bot triggered (parity with numeric 1)", () => {
+    const mention: MentionPayload = { all: true };
+    expect(computeIsMentioned(mention, BOT_UID, false)).toBe(true);
+  });
+
   it("ais=1 + explicit uid mention → bot triggered (ignoreMentionAll does NOT silence explicit @)", () => {
     const mention: MentionPayload = { ais: 1, uids: [BOT_UID] };
+    expect(computeIsMentioned(mention, BOT_UID, true)).toBe(true);
+  });
+
+  it("legacy all=1 + explicit uid mention → bot triggered (ignoreMentionAll does NOT silence explicit @)", () => {
+    const mention: MentionPayload = { all: 1, uids: [BOT_UID] };
     expect(computeIsMentioned(mention, BOT_UID, true)).toBe(true);
   });
 
@@ -2307,5 +2325,151 @@ describe("resolveSessionId — OBO fan-out session isolation (PR-B)", () => {
     ).toBe(
       resolveSessionId({ isGroup: false, effectiveDmPeer: peerSpoofB }),
     );
+  });
+});
+
+/**
+ * Tests for resolveEffectiveSender — OBO sender attribution (Jerry-Xin
+ * review fix).
+ *
+ * Identity-bearing fields (`From`, `SenderId`, `SenderUsername`, `isOwner`
+ * checks, audit logs, etc.) must reflect the real conversation peer, not
+ * the OBO grantor stamped on `from_uid` by the server's fan-out copy.
+ *
+ * Scope:
+ * - DM with `obo_origin_from_uid` and `hasOnBehalfOfConfig=true` → real
+ *   peer attribution; grantor preserved separately.
+ * - DM without OBO marker → falls back to `from_uid` (backward compat).
+ * - Group messages → always use `from_uid` (groups don't fan out OBO).
+ * - Non-OBO accounts → ignore the marker (spoof defense).
+ */
+describe("resolveEffectiveSender — OBO sender attribution (Jerry-Xin fix)", () => {
+  it("DM with obo_origin_from_uid attributes to the real peer; grantor preserved", () => {
+    const result = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: "u_admin",
+      payload: {
+        type: 1,
+        content: "hi",
+        obo_origin_from_uid: "u_bob",
+      },
+      hasOnBehalfOfConfig: true,
+    });
+    expect(result.senderUid).toBe("u_bob");
+    expect(result.grantorUid).toBe("u_admin");
+  });
+
+  it("DM without obo_origin_from_uid falls back to from_uid (backward compat)", () => {
+    const result = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: "u_alice",
+      payload: { type: 1, content: "hi" },
+      hasOnBehalfOfConfig: true,
+    });
+    expect(result.senderUid).toBe("u_alice");
+    expect(result.grantorUid).toBeUndefined();
+  });
+
+  it("DM with empty obo_origin_from_uid falls back to from_uid", () => {
+    const result = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: "u_alice",
+      payload: {
+        type: 1,
+        content: "hi",
+        obo_origin_from_uid: "",
+      },
+      hasOnBehalfOfConfig: true,
+    });
+    expect(result.senderUid).toBe("u_alice");
+    expect(result.grantorUid).toBeUndefined();
+  });
+
+  it("DM with non-string obo_origin_from_uid falls back to from_uid", () => {
+    const result = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: "u_alice",
+      payload: {
+        type: 1,
+        content: "hi",
+        obo_origin_from_uid: 12345 as unknown as string,
+      },
+      hasOnBehalfOfConfig: true,
+    });
+    expect(result.senderUid).toBe("u_alice");
+    expect(result.grantorUid).toBeUndefined();
+  });
+
+  it("group messages always use from_uid (OBO marker ignored even if present)", () => {
+    // Defensive: if some upstream accidentally stamped obo_origin_from_uid
+    // on a group message, we must not redirect attribution — the real
+    // speaker in a group is already `from_uid`.
+    const result = resolveEffectiveSender({
+      isGroup: true,
+      fromUid: "u_carol",
+      payload: {
+        type: 1,
+        content: "hi",
+        obo_origin_from_uid: "u_bob",
+      },
+      hasOnBehalfOfConfig: true,
+    });
+    expect(result.senderUid).toBe("u_carol");
+    expect(result.grantorUid).toBeUndefined();
+  });
+
+  it("non-OBO account (hasOnBehalfOfConfig=false) ignores marker — spoof defense", () => {
+    // A spoofed `obo_origin_from_uid` on an account that is NOT OBO-configured
+    // must not be honored; otherwise an arbitrary sender could redirect
+    // attribution to anyone (and inherit their roles).
+    const result = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: "u_attacker",
+      payload: {
+        type: 1,
+        content: "hi",
+        obo_origin_from_uid: "u_owner",
+      },
+      hasOnBehalfOfConfig: false,
+    });
+    expect(result.senderUid).toBe("u_attacker");
+    expect(result.grantorUid).toBeUndefined();
+  });
+
+  it("default hasOnBehalfOfConfig (omitted) preserves OBO behavior", () => {
+    const result = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: "u_admin",
+      payload: {
+        type: 1,
+        content: "hi",
+        obo_origin_from_uid: "u_bob",
+      },
+    });
+    expect(result.senderUid).toBe("u_bob");
+    expect(result.grantorUid).toBe("u_admin");
+  });
+
+  it("OBO origin and reply target are derived from the same source (lockstep)", () => {
+    // Regression guard: effective sender uid and reply channel id must agree
+    // on the OBO origin so attribution and reply routing don't drift.
+    const payload = {
+      type: 1,
+      content: "hi",
+      obo_origin_from_uid: "u_bob",
+    };
+    const sender = resolveEffectiveSender({
+      isGroup: false,
+      fromUid: "u_admin",
+      payload,
+      hasOnBehalfOfConfig: true,
+    });
+    const replyTarget = resolveReplyChannelId({
+      isGroup: false,
+      fromUid: "u_admin",
+      payload,
+      hasOnBehalfOfConfig: true,
+    });
+    expect(sender.senderUid).toBe(replyTarget);
   });
 });
