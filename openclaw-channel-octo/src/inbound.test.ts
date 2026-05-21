@@ -74,6 +74,102 @@ describe("mention.all detection", () => {
 });
 
 /**
+ * Tests for mention.humans + persona clone (onBehalfOf) gating.
+ *
+ * Plan X: mention.humans=1 means @所有人 (human-only notification).
+ * Regular bots should NOT respond. Persona clone bots (onBehalfOf configured)
+ * SHOULD respond because they act on behalf of a human who is part of @所有人.
+ */
+describe("mention.humans + persona clone gating", () => {
+  function isMentionHumans(mention?: MentionPayload): boolean {
+    const raw = mention?.humans;
+    return raw === true || raw === 1;
+  }
+
+  function shouldRespond(mention: MentionPayload | undefined, opts: { onBehalfOf?: string; ignoreMentionAll?: boolean }): boolean {
+    const mentionAllRaw = mention?.all;
+    const mentionAll = mentionAllRaw === true || mentionAllRaw === 1;
+    const mentionAisRaw = mention?.ais;
+    const mentionAis = mentionAisRaw === true || mentionAisRaw === 1;
+    const mentionHumans = isMentionHumans(mention);
+    const isPersonaClone = Boolean(opts.onBehalfOf);
+    return (!opts.ignoreMentionAll && mentionAll) || mentionAis || (mentionHumans && isPersonaClone);
+  }
+
+  // Helper to determine reply identity: returns "grantor" or "self"
+  function replyIdentity(mention: MentionPayload | undefined, opts: { onBehalfOf?: string; ignoreMentionAll?: boolean; botUidMentioned?: boolean }): "grantor" | "self" {
+    const mentionAllRaw = mention?.all;
+    const mentionAll = mentionAllRaw === true || mentionAllRaw === 1;
+    const mentionHumans = isMentionHumans(mention);
+    const isPersonaClone = Boolean(opts.onBehalfOf);
+    const isExplicitBotMention = Boolean(opts.botUidMentioned);
+    const isHumanBroadcast = mentionHumans || (!opts.ignoreMentionAll && mentionAll);
+    const triggered = isHumanBroadcast && isPersonaClone && !isExplicitBotMention;
+    return triggered ? "grantor" : "self";
+  }
+
+  it("persona clone bot should respond to mention.humans=1", () => {
+    expect(shouldRespond({ humans: 1 }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  it("persona clone bot should respond to mention.humans=true", () => {
+    expect(shouldRespond({ humans: true }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  it("regular bot should NOT respond to mention.humans=1", () => {
+    expect(shouldRespond({ humans: 1 }, {})).toBe(false);
+  });
+
+  it("regular bot should NOT respond to mention.humans=true", () => {
+    expect(shouldRespond({ humans: true }, {})).toBe(false);
+  });
+
+  it("persona clone bot should still respond to mention.ais=1", () => {
+    expect(shouldRespond({ ais: 1 }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  it("regular bot should respond to mention.ais=1", () => {
+    expect(shouldRespond({ ais: 1 }, {})).toBe(true);
+  });
+
+  it("mention.humans=0 should NOT trigger persona clone", () => {
+    expect(shouldRespond({ humans: 0 }, { onBehalfOf: "admin" })).toBe(false);
+  });
+
+  it("mention.humans=1 + ais=1 should trigger both types", () => {
+    expect(shouldRespond({ humans: 1, ais: 1 }, { onBehalfOf: "admin" })).toBe(true);
+    expect(shouldRespond({ humans: 1, ais: 1 }, {})).toBe(true); // ais=1 triggers regular bot
+  });
+
+  it("legacy all=1 should trigger persona clone (via mentionAll path)", () => {
+    expect(shouldRespond({ all: 1 }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  // Identity tests
+  it("@所有人 (humans=1) → persona clone replies as grantor", () => {
+    expect(replyIdentity({ humans: 1 }, { onBehalfOf: "admin" })).toBe("grantor");
+  });
+
+  it("legacy @所有人 (all=1, server rewrite to {all:1,ais:1}) → persona clone replies as grantor", () => {
+    expect(replyIdentity({ all: 1, ais: 1 }, { onBehalfOf: "admin" })).toBe("grantor");
+  });
+
+  it("@所有AI (ais=1 only) → persona clone replies as self", () => {
+    expect(replyIdentity({ ais: 1 }, { onBehalfOf: "admin" })).toBe("self");
+  });
+
+  it("direct @james mention → persona clone replies as self", () => {
+    expect(replyIdentity({ humans: 1 }, { onBehalfOf: "admin", botUidMentioned: true })).toBe("self");
+  });
+
+  it("regular bot always replies as self regardless of mention type", () => {
+    expect(replyIdentity({ humans: 1 }, {})).toBe("self");
+    expect(replyIdentity({ all: 1 }, {})).toBe("self");
+    expect(replyIdentity({ ais: 1 }, {})).toBe("self");
+  });
+});
+
+/**
  * Tests for historyPromptTemplate configuration.
  *
  * The template supports placeholders:

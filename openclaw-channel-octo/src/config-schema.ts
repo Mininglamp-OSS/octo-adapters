@@ -14,6 +14,7 @@ export interface DmworkAccountConfig {
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
+  onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
 }
 
 export interface DmworkConfig {
@@ -30,6 +31,7 @@ export interface DmworkConfig {
   botUid?: string;
   historyLimit?: number;  // 群聊历史消息条数限制（默认20）
   historyPromptTemplate?: string;  // Template for group history context injection
+  onBehalfOf?: string;  // Persona clone: grantor uid — bot acts on behalf of this human
   accounts?: Record<string, DmworkAccountConfig | undefined>;
 }
 
@@ -73,6 +75,7 @@ export const DmworkConfigJsonSchema = {
             botUid: { type: "string" },
             historyLimit: { type: "number", minimum: 1, maximum: 100 },
             historyPromptTemplate: { type: "string" },
+            onBehalfOf: { type: "string" },
           },
         },
       },

@@ -65,6 +65,7 @@ export interface MentionPayload {
   entities?: MentionEntity[];
   all?: boolean | number; // true or 1 = @all (API returns either depending on version)
   ais?: boolean | number; // true or 1 = @AI / @所有AI
+  humans?: boolean | number; // true or 1 = @所有人 (Plan X: human-only notification)
 }
 
 export interface ReplyPayload {

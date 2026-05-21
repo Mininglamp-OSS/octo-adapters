@@ -1200,6 +1200,7 @@ export async function handleInboundMessage(params: {
   // Compute mention flags — separate "reply gating" from "command gating"
   let isMentioned = false;
   let isExplicitBotMention = false;
+  let triggeredByMentionHumans = false;
   if (isGroup) {
     const mentionUids = extractMentionUids(message.payload?.mention);
     const mentionAllRaw = message.payload?.mention?.all;
@@ -1207,8 +1208,26 @@ export async function handleInboundMessage(params: {
     // mention.ais=1 means @AI / @所有AI — bots should respond
     const mentionAisRaw = message.payload?.mention?.ais;
     const mentionAis: boolean = mentionAisRaw === true || mentionAisRaw === 1;
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid);
+    // mention.humans=1 means @所有人 (Plan X) — only persona-clone bots respond,
+    // because they act on behalf of a human who IS part of @所有人.
+    // Regular bots without onBehalfOf stay silent.
+    const mentionHumansRaw = message.payload?.mention?.humans;
+    const mentionHumans: boolean = mentionHumansRaw === true || mentionHumansRaw === 1;
+    const isPersonaClone = Boolean(account.config.onBehalfOf);
+    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid) || (mentionHumans && isPersonaClone);
     isExplicitBotMention = mentionUids.includes(botUid);
+    // Track whether the bot was triggered by a "human broadcast" (@所有人 in any form).
+    // When true, persona clone replies as the grantor (admin), not as itself.
+    // Covers both new `mention.humans=1` AND legacy `mention.all=1` (which the server
+    // rewrites to {all:1, ais:1} per Plan X). @所有AI (ais=1 only) and direct @james
+    // mentions should still respond as the bot itself.
+    const isHumanBroadcast = mentionHumans || (!account.config.ignoreMentionAll && mentionAll);
+    triggeredByMentionHumans = isHumanBroadcast && isPersonaClone && !isExplicitBotMention;
+
+    // Debug: log mention flags for troubleshooting persona clone routing
+    if (isPersonaClone) {
+      log?.info?.(`octo: [MENTION-DEBUG] mentionAll=${mentionAll} mentionAis=${mentionAis} mentionHumans=${mentionHumans} isExplicitBot=${isExplicitBotMention} isHumanBroadcast=${isHumanBroadcast} triggeredAsGrantor=${triggeredByMentionHumans} isMentioned=${isMentioned}`);
+    }
 
     // Defensive fallback: if payload.mention is missing/empty but the message
     // text contains @botName, treat it as a mention.  This covers old senders
@@ -1629,7 +1648,9 @@ export async function handleInboundMessage(params: {
   } else {
     replyChannelId = isGroup ? message.channel_id! : message.from_uid;
     replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
-    effectiveOnBehalfOf = undefined;
+    // Persona clone: only reply as grantor when triggered by @所有人 (mention.humans=1).
+    // When the bot is directly mentioned (@James, @AI), respond as itself.
+    effectiveOnBehalfOf = (isGroup && triggeredByMentionHumans && account.config.onBehalfOf) ? account.config.onBehalfOf : undefined;
   }
 
   const apiUrl = account.config.apiUrl;
@@ -1648,14 +1669,14 @@ export async function handleInboundMessage(params: {
     sendReadReceipt({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageIds })
       .then(() => log?.info?.("octo: readReceipt sent OK"))
       .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
-    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType })
-      .then(() => log?.info?.("octo: typing sent OK"))
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) })
+      .then(() => log?.info?.(`octo: typing sent OK${effectiveOnBehalfOf ? ` (as ${effectiveOnBehalfOf})` : ""}`))
       .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
   }
 
   // Keep sending typing indicator while AI is processing
   const typingInterval = setInterval(() => {
-    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(isOBOv2 ? { onBehalfOf: effectiveOnBehalfOf } : {}) }).catch(() => {});
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) }).catch(() => {});
   }, 5000);
 
   // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
@@ -1862,6 +1883,9 @@ export async function handleInboundMessage(params: {
       },
     });
   } finally {
+    // --- Debug: log dispatch outcome ---
+    log?.info?.(`octo: [dispatch-result] replySucceeded=${replySucceeded} bufferedText=${deliverBuffer.lastText?.length ?? 0} textSent=${deliverBuffer.textSent} effectiveOBO=${effectiveOnBehalfOf ?? 'none'}`);
+
     // --- Final send: deliver buffered text if only blocks arrived (no final/tool) ---
     if (deliverBuffer.lastText && !deliverBuffer.textSent) {
       deliverBuffer.textSent = true;
