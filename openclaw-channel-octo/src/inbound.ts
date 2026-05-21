@@ -1230,7 +1230,7 @@ export async function handleInboundMessage(params: {
 
     // Debug: log mention flags for troubleshooting persona clone routing
     if (isPersonaClone) {
-      log?.info?.(`octo: [MENTION-DEBUG] mentionAll=${mentionAll} mentionAis=${mentionAis} mentionHumans=${mentionHumans} isExplicitBot=${isExplicitBotMention} isHumanBroadcast=${isHumanBroadcast} triggeredAsGrantor=${triggeredByMentionHumans} isMentioned=${isMentioned}`);
+      log?.debug?.(`octo: [MENTION-DEBUG] mentionAll=${mentionAll} mentionAis=${mentionAis} mentionHumans=${mentionHumans} isExplicitBot=${isExplicitBotMention} isHumanBroadcast=${isHumanBroadcast} triggeredAsGrantor=${triggeredByMentionHumans} isMentioned=${isMentioned}`);
     }
 
     // Defensive fallback: if payload.mention is missing/empty but the message
@@ -1591,11 +1591,15 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    // OBO v2: inject obo_system_hint as GroupSystemPrompt so it reaches LLM
-    // as a system-level instruction (persona identity + reply context)
-    GroupSystemPrompt: (typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0)
-      ? message.payload.obo_system_hint
-      : undefined,
+    // OBO v2: inject obo_system_hint as GroupSystemPrompt ONLY when the message
+    // carries a valid OBO v2 envelope (obo_origin_channel_id + obo_respond_as).
+    // Without this gate, any sender who can set obo_system_hint in a payload
+    // could inject arbitrary system-level instructions into the LLM.
+    GroupSystemPrompt: (
+      typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0 &&
+      typeof message.payload?.obo_origin_channel_id === "string" && message.payload.obo_origin_channel_id.length > 0 &&
+      typeof (message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid) === "string"
+    ) ? message.payload.obo_system_hint : undefined,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
@@ -1905,7 +1909,7 @@ export async function handleInboundMessage(params: {
     });
   } finally {
     // --- Debug: log dispatch outcome ---
-    log?.info?.(`octo: [dispatch-result] replySucceeded=${replySucceeded} bufferedText=${deliverBuffer.lastText?.length ?? 0} textSent=${deliverBuffer.textSent} effectiveOBO=${effectiveOnBehalfOf ?? 'none'}`);
+    log?.debug?.(`octo: [dispatch-result] replySucceeded=${replySucceeded} bufferedText=${deliverBuffer.lastText?.length ?? 0} textSent=${deliverBuffer.textSent} effectiveOBO=${effectiveOnBehalfOf ?? 'none'}`);
 
     // --- Final send: deliver buffered text if only blocks arrived (no final/tool) ---
     if (deliverBuffer.lastText && !deliverBuffer.textSent) {

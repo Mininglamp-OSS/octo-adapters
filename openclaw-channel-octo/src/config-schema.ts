@@ -57,6 +57,7 @@ export const DmworkConfigJsonSchema = {
       botUid: { type: "string" },
       historyLimit: { type: "number", minimum: 1, maximum: 100 },
       historyPromptTemplate: { type: "string" },
+      onBehalfOf: { type: "string" },
       accounts: {
         type: "object",
         additionalProperties: {
