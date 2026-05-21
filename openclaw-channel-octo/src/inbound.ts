@@ -1214,15 +1214,19 @@ export async function handleInboundMessage(params: {
     const mentionHumansRaw = message.payload?.mention?.humans;
     const mentionHumans: boolean = mentionHumansRaw === true || mentionHumansRaw === 1;
     const isPersonaClone = Boolean(account.config.onBehalfOf);
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid) || (mentionHumans && isPersonaClone);
+    const grantorUid = account.config.onBehalfOf;
+    // Persona clone: when the GRANTOR is @mentioned, treat it as a mention
+    // for the bot too (the bot acts on the grantor's behalf).
+    const grantorMentioned: boolean = !!(isPersonaClone && grantorUid && mentionUids.includes(grantorUid));
+    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid) || (mentionHumans && isPersonaClone) || grantorMentioned;
     isExplicitBotMention = mentionUids.includes(botUid);
-    // Track whether the bot was triggered by a "human broadcast" (@所有人 in any form).
+    // Track whether the bot was triggered as the grantor's proxy.
     // When true, persona clone replies as the grantor (admin), not as itself.
-    // Covers both new `mention.humans=1` AND legacy `mention.all=1` (which the server
-    // rewrites to {all:1, ais:1} per Plan X). @所有AI (ais=1 only) and direct @james
+    // Covers: @admin (grantor uid mentioned), @所有人 (mention.humans=1),
+    // legacy @所有人 (mention.all=1). @所有AI (ais=1 only) and direct @james
     // mentions should still respond as the bot itself.
     const isHumanBroadcast = mentionHumans || (!account.config.ignoreMentionAll && mentionAll);
-    triggeredByMentionHumans = isHumanBroadcast && isPersonaClone && !isExplicitBotMention;
+    triggeredByMentionHumans = !!(isHumanBroadcast || grantorMentioned) && isPersonaClone && !isExplicitBotMention;
 
     // Debug: log mention flags for troubleshooting persona clone routing
     if (isPersonaClone) {
@@ -1622,6 +1626,23 @@ export async function handleInboundMessage(params: {
     typeof oboV2RespondAs === "string" &&
     oboV2RespondAs.length > 0
   );
+
+  // OBO v2 relevance filter: when the fan-out message is @AI-only (mention.ais=1
+  // but no grantor mention, no @所有人), the persona clone should NOT respond.
+  // @AI targets AI bots directly, not humans or their persona clones.
+  if (isOBOv2) {
+    const origMention = message.payload?.mention;
+    const origAis = origMention?.ais === true || origMention?.ais === 1;
+    const origHumans = origMention?.humans === true || origMention?.humans === 1;
+    const origAll = origMention?.all === true || origMention?.all === 1;
+    const origUids: string[] = Array.isArray(origMention?.uids) ? origMention.uids : [];
+    const grantorInUids = typeof oboV2RespondAs === "string" && origUids.includes(oboV2RespondAs);
+    const isRelevantToPersona = origHumans || origAll || grantorInUids || (!origAis && origUids.length === 0);
+    if (!isRelevantToPersona) {
+      log?.info?.(`octo: OBO v2 skipped — message not relevant to persona (ais=${origAis} humans=${origHumans} all=${origAll} grantorInUids=${grantorInUids})`);
+      return;
+    }
+  }
 
   let replyChannelId: string;
   let replyChannelType: ChannelType;
