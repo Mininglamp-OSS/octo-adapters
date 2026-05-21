@@ -1592,13 +1592,17 @@ export async function handleInboundMessage(params: {
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
     // OBO v2: inject obo_system_hint as GroupSystemPrompt ONLY when the message
-    // carries a valid OBO v2 envelope (obo_origin_channel_id + obo_respond_as).
-    // Without this gate, any sender who can set obo_system_hint in a payload
-    // could inject arbitrary system-level instructions into the LLM.
+    // carries a valid OBO v2 envelope (obo_origin_channel_id + obo_respond_as)
+    // AND the sender is the configured grantor (onBehalfOf). Without the sender
+    // gate, a forged message from any uid could inject arbitrary system-level
+    // instructions into the LLM — the downstream OBO routing would be rejected,
+    // but the system prompt would already be in the session context.
     GroupSystemPrompt: (
       typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0 &&
       typeof message.payload?.obo_origin_channel_id === "string" && message.payload.obo_origin_channel_id.length > 0 &&
-      typeof (message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid) === "string"
+      typeof (message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid) === "string" &&
+      // Security: only trust system hint from the configured grantor
+      Boolean(account.config.onBehalfOf) && message.from_uid === account.config.onBehalfOf
     ) ? message.payload.obo_system_hint : undefined,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
