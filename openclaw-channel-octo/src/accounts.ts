@@ -56,7 +56,21 @@ export function resolveDmworkAccount(params: {
 }): ResolvedDmworkAccount {
   const accountId = params.accountId ?? DEFAULT_ACCOUNT_ID;
   const channel = getChannelConfig<DmworkAccountConfig>(params.cfg);
-  const accountConfig = channel.accounts?.[accountId] ?? channel;
+  // Strict lookup first; fall back to case-insensitive match because OpenClaw's
+  // routing layer normalizes accountId to lowercase via normalizeAccountId
+  // (canonicalizeAccountId in openclaw/dist/account-id-*.js), while botfather
+  // generates mixed-case bot IDs (e.g. "27pBwzf2F6bfa5cd142_bot"). Without the
+  // fallback, outbound paths that re-resolve account from the lowercased ID
+  // miss the mixed-case config key and throw "botToken is not configured",
+  // silently dropping replies. Long-term, botfather should produce lowercase
+  // IDs to match OpenClaw's contract; this bridges the gap and keeps working
+  // for historical mixed-case bot IDs already in production.
+  const accountConfig =
+    channel.accounts?.[accountId]
+    ?? Object.entries(channel.accounts ?? {}).find(
+      ([key]) => key.toLowerCase() === accountId.toLowerCase(),
+    )?.[1]
+    ?? channel;
 
   const botToken = accountConfig.botToken ?? channel.botToken;
   const apiUrl = accountConfig.apiUrl ?? channel.apiUrl ?? DEFAULT_API_URL;
