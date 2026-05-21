@@ -77,6 +77,7 @@ export async function sendMediaMessage(params: {
   height?: number;
   mentionUids?: string[];
   mentionEntities?: MentionEntity[];
+  onBehalfOf?: string;
   signal?: AbortSignal;
 }): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
@@ -112,6 +113,7 @@ export async function sendMediaMessage(params: {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
   }, params.signal);
 }
 

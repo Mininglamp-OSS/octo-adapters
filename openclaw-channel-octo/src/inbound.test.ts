@@ -93,7 +93,7 @@ describe("mention.humans + persona clone gating", () => {
     const mentionAis = mentionAisRaw === true || mentionAisRaw === 1;
     const mentionHumans = isMentionHumans(mention);
     const isPersonaClone = Boolean(opts.onBehalfOf);
-    return (!opts.ignoreMentionAll && mentionAll) || mentionAis || (mentionHumans && isPersonaClone);
+    return (!opts.ignoreMentionAll && mentionAll) || mentionAis || (mentionHumans && isPersonaClone && !opts.ignoreMentionAll);
   }
 
   // Helper to determine reply identity: returns "grantor" or "self"
@@ -103,7 +103,7 @@ describe("mention.humans + persona clone gating", () => {
     const mentionHumans = isMentionHumans(mention);
     const isPersonaClone = Boolean(opts.onBehalfOf);
     const isExplicitBotMention = Boolean(opts.botUidMentioned);
-    const isHumanBroadcast = mentionHumans || (!opts.ignoreMentionAll && mentionAll);
+    const isHumanBroadcast = (!opts.ignoreMentionAll && mentionHumans) || (!opts.ignoreMentionAll && mentionAll);
     const triggered = isHumanBroadcast && isPersonaClone && !isExplicitBotMention;
     return triggered ? "grantor" : "self";
   }
@@ -166,6 +166,27 @@ describe("mention.humans + persona clone gating", () => {
     expect(replyIdentity({ humans: 1 }, {})).toBe("self");
     expect(replyIdentity({ all: 1 }, {})).toBe("self");
     expect(replyIdentity({ ais: 1 }, {})).toBe("self");
+  });
+
+  // ignoreMentionAll gating — covers mention.humans (Plan X) in addition to mention.all
+  it("persona clone + ignoreMentionAll=true + mention.humans=1 → NOT mentioned", () => {
+    expect(shouldRespond({ humans: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.humans=true → NOT mentioned", () => {
+    expect(shouldRespond({ humans: true }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.humans=1 → reply identity stays self (no human broadcast)", () => {
+    expect(replyIdentity({ humans: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe("self");
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.all=1 → reply identity stays self", () => {
+    expect(replyIdentity({ all: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe("self");
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.ais=1 → still mentioned (ais bypasses gate)", () => {
+    expect(shouldRespond({ ais: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(true);
   });
 });
 

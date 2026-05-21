@@ -66,9 +66,10 @@ export async function uploadAndSendMedia(params: {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  onBehalfOf?: string;
   log?: ChannelLogSink;
 }): Promise<SendMessageResult | undefined> {
-  const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
+  const { mediaUrl, apiUrl, botToken, channelId, channelType, onBehalfOf, log } = params;
 
   const { createReadStream: fsCreateReadStream, statSync: fsStatSync, createWriteStream: fsCreateWriteStream } = await import("node:fs");
   const { basename, join: pathJoin } = await import("node:path");
@@ -173,6 +174,7 @@ export async function uploadAndSendMedia(params: {
       size: fileSize,
       width,
       height,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
     });
     return result;
   } finally {
@@ -1218,14 +1220,14 @@ export async function handleInboundMessage(params: {
     // Persona clone: when the GRANTOR is @mentioned, treat it as a mention
     // for the bot too (the bot acts on the grantor's behalf).
     const grantorMentioned: boolean = !!(isPersonaClone && grantorUid && mentionUids.includes(grantorUid));
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid) || (mentionHumans && isPersonaClone) || grantorMentioned;
+    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid) || (mentionHumans && isPersonaClone && !account.config.ignoreMentionAll) || grantorMentioned;
     isExplicitBotMention = mentionUids.includes(botUid);
     // Track whether the bot was triggered as the grantor's proxy.
     // When true, persona clone replies as the grantor (admin), not as itself.
     // Covers: @admin (grantor uid mentioned), @所有人 (mention.humans=1),
     // legacy @所有人 (mention.all=1). @所有AI (ais=1 only) and direct @james
     // mentions should still respond as the bot itself.
-    const isHumanBroadcast = mentionHumans || (!account.config.ignoreMentionAll && mentionAll);
+    const isHumanBroadcast = (!account.config.ignoreMentionAll && mentionHumans) || (!account.config.ignoreMentionAll && mentionAll);
     triggeredByMentionHumans = !!(isHumanBroadcast || grantorMentioned) && isPersonaClone && !isExplicitBotMention;
 
     // Debug: log mention flags for troubleshooting persona clone routing
@@ -1879,6 +1881,7 @@ export async function handleInboundMessage(params: {
                 botToken: account.config.botToken ?? "",
                 channelId: replyChannelId,
                 channelType: replyChannelType,
+                ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
                 log,
               });
               sentMediaUrls.add(mediaUrl);
