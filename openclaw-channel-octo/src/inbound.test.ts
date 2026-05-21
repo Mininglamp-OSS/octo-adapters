@@ -1937,3 +1937,154 @@ describe("inbound message_seq cutoff tracking", () => {
     expect(map.get(sessionId)).toBe(300);
   });
 });
+
+/**
+ * Tests for OBO v2 sender identity validation (GH#63).
+ *
+ * Mirrors the isOBOv2 detection logic in inbound.ts. Only payloads sent by
+ * the configured grantor (account.config.onBehalfOf) should be honored;
+ * arbitrary senders inserting obo_origin_channel_id / obo_respond_as fields
+ * must be ignored, otherwise they could trick the persona clone into
+ * replying in another channel as the grantor.
+ */
+describe("OBO v2 sender identity validation (GH#63)", () => {
+  type OboPayload = {
+    obo_origin_channel_id?: unknown;
+    obo_origin_channel_type?: unknown;
+    obo_respond_as?: unknown;
+    obo_grantor_uid?: unknown;
+  };
+  type FakeMessage = { from_uid: string; payload?: OboPayload };
+  type FakeAccount = { config: { onBehalfOf?: string } };
+  type WarnSink = { warn: (msg: string) => void };
+
+  // Mirrors the validation block at inbound.ts:1624-1642
+  function detectOBOv2(
+    message: FakeMessage,
+    account: FakeAccount,
+    log?: WarnSink,
+  ): boolean {
+    const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+    const oboV2RespondAs =
+      message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+    const grantorUid = account.config.onBehalfOf;
+    const isOBOv2 = Boolean(
+      typeof oboV2OriginChannel === "string" &&
+        (oboV2OriginChannel as string).length > 0 &&
+        typeof oboV2RespondAs === "string" &&
+        (oboV2RespondAs as string).length > 0 &&
+        grantorUid &&
+        message.from_uid === grantorUid,
+    );
+    if (
+      !isOBOv2 &&
+      typeof oboV2OriginChannel === "string" &&
+      (oboV2OriginChannel as string).length > 0
+    ) {
+      log?.warn(
+        `octo: OBO v2 payload rejected — from_uid=${message.from_uid} is not configured grantor ${grantorUid ?? "(none)"}`,
+      );
+    }
+    return isOBOv2;
+  }
+
+  it("OBO v2 from configured grantor → isOBOv2=true, no warn", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_origin_channel_type: ChannelType.Group,
+          obo_respond_as: "admin",
+        },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("OBO v2 from non-grantor sender → isOBOv2=false, warn logged", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "mallory",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_origin_channel_type: ChannelType.Group,
+          obo_respond_as: "admin",
+        },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("OBO v2 payload rejected");
+    expect(warn.mock.calls[0][0]).toContain("from_uid=mallory");
+    expect(warn.mock.calls[0][0]).toContain("admin");
+  });
+
+  it("OBO v2 with no onBehalfOf configured → OBO v2 disabled, warn logged", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_origin_channel_type: ChannelType.Group,
+          obo_respond_as: "admin",
+        },
+      },
+      { config: {} },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("(none)");
+  });
+
+  it("no OBO payload → isOBOv2=false, no warn (nothing to reject)", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      { from_uid: "alice", payload: {} },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("OBO v2 with obo_grantor_uid fallback from grantor → isOBOv2=true", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_grantor_uid: "admin",
+        },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("OBO v2 missing obo_respond_as / obo_grantor_uid → isOBOv2=false, warn logged", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: { obo_origin_channel_id: "group_xyz" },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});

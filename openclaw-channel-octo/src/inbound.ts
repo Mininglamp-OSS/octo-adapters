@@ -1624,12 +1624,22 @@ export async function handleInboundMessage(params: {
   const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
   const oboV2OriginChannelType = message.payload?.obo_origin_channel_type;
   const oboV2RespondAs = message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+  const grantorUid = account.config.onBehalfOf;
   const isOBOv2 = Boolean(
     typeof oboV2OriginChannel === "string" &&
     oboV2OriginChannel.length > 0 &&
     typeof oboV2RespondAs === "string" &&
-    oboV2RespondAs.length > 0
+    oboV2RespondAs.length > 0 &&
+    // Security: only trust OBO v2 fields when the message is sent by the
+    // configured grantor. Without this, any user able to put obo_* fields in
+    // their payload could trick the bot into replying in another channel as
+    // somebody else's persona.
+    grantorUid && message.from_uid === grantorUid
   );
+
+  if (!isOBOv2 && typeof oboV2OriginChannel === "string" && oboV2OriginChannel.length > 0) {
+    log?.warn?.(`octo: OBO v2 payload rejected — from_uid=${message.from_uid} is not configured grantor ${grantorUid ?? "(none)"}`);
+  }
 
   // OBO v2 relevance filter: when the fan-out message is @AI-only (mention.ais=1
   // but no grantor mention, no @所有人), the persona clone should NOT respond.
