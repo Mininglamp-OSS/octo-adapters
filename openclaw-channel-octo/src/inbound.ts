@@ -1204,7 +1204,10 @@ export async function handleInboundMessage(params: {
     const mentionUids = extractMentionUids(message.payload?.mention);
     const mentionAllRaw = message.payload?.mention?.all;
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionUids.includes(botUid);
+    // mention.ais=1 means @AI / @所有AI — bots should respond
+    const mentionAisRaw = message.payload?.mention?.ais;
+    const mentionAis: boolean = mentionAisRaw === true || mentionAisRaw === 1;
+    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid);
     isExplicitBotMention = mentionUids.includes(botUid);
 
     // Defensive fallback: if payload.mention is missing/empty but the message
@@ -1565,7 +1568,11 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    GroupSystemPrompt: undefined,
+    // OBO v2: inject obo_system_hint as GroupSystemPrompt so it reaches LLM
+    // as a system-level instruction (persona identity + reply context)
+    GroupSystemPrompt: (typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0)
+      ? message.payload.obo_system_hint
+      : undefined,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
@@ -1583,25 +1590,72 @@ export async function handleInboundMessage(params: {
 
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
 
-  const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
-  const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
+  // OBO v2: when the payload carries `obo_origin_channel_id`, the reply should
+  // go to the origin GROUP channel (not the DM), with `on_behalf_of` set to
+  // `obo_respond_as` (the grantor). This way the bot replies in the group as
+  // the grantor, not in DM.
+  const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+  const oboV2OriginChannelType = message.payload?.obo_origin_channel_type;
+  const oboV2RespondAs = message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+  const isOBOv2 = Boolean(
+    typeof oboV2OriginChannel === "string" &&
+    oboV2OriginChannel.length > 0 &&
+    typeof oboV2RespondAs === "string" &&
+    oboV2RespondAs.length > 0
+  );
 
-  // 已读回执 + 正在输入 — fire-and-forget
-  log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
-  const messageIds = message.message_id ? [message.message_id] : [];
-  sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
-    .then(() => log?.info?.("octo: readReceipt sent OK"))
-    .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
-  sendTyping({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType })
-    .then(() => log?.info?.("octo: typing sent OK"))
-    .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  let replyChannelId: string;
+  let replyChannelType: ChannelType;
+  let effectiveOnBehalfOf: string | undefined;
+
+  if (isOBOv2) {
+    const oboV2OriginFromUid = message.payload?.obo_origin_from_uid;
+    const resolvedChannelType = (typeof oboV2OriginChannelType === "number" ? oboV2OriginChannelType : ChannelType.Group) as ChannelType;
+    if (resolvedChannelType === ChannelType.DM) {
+      // DM: bot is only friends with the grantor, not the original sender.
+      // Reply to the original sender (bob) using on_behalf_of=grantor (admin).
+      // The channel is the original sender's uid — the server routes
+      // admin→bob DM via on_behalf_of, which bypasses the bot-friend gate.
+      replyChannelId = (typeof oboV2OriginFromUid === "string" && oboV2OriginFromUid.length > 0)
+        ? oboV2OriginFromUid
+        : oboV2OriginChannel as string;
+    } else {
+      // Group/Thread: reply to the origin group
+      replyChannelId = oboV2OriginChannel as string;
+    }
+    replyChannelType = resolvedChannelType;
+    effectiveOnBehalfOf = oboV2RespondAs as string;
+    log?.info?.(`octo: OBO v2 detected — reply target=${replyChannelId} type=${replyChannelType} respondAs=${effectiveOnBehalfOf} originFrom=${oboV2OriginFromUid}`);
+  } else {
+    replyChannelId = isGroup ? message.channel_id! : message.from_uid;
+    replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
+    effectiveOnBehalfOf = undefined;
+  }
 
   const apiUrl = account.config.apiUrl;
   const botToken = account.config.botToken ?? "";
 
+  // 已读回执 + 正在输入 — fire-and-forget
+  if (isOBOv2) {
+    // v2: send typing to origin group with grantor identity (skip readReceipt)
+    log?.info?.(`octo: OBO v2 — sending typing to origin group=${replyChannelId} as=${effectiveOnBehalfOf}`);
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, onBehalfOf: effectiveOnBehalfOf })
+      .then(() => log?.info?.("octo: OBO v2 typing sent OK"))
+      .catch((err) => log?.error?.(`octo: OBO v2 typing failed: ${String(err)}`));
+  } else {
+    log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${apiUrl}`);
+    const messageIds = message.message_id ? [message.message_id] : [];
+    sendReadReceipt({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageIds })
+      .then(() => log?.info?.("octo: readReceipt sent OK"))
+      .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType })
+      .then(() => log?.info?.("octo: typing sent OK"))
+      .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  }
+
   // Keep sending typing indicator while AI is processing
   const typingInterval = setInterval(() => {
-    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(isOBOv2 ? { onBehalfOf: effectiveOnBehalfOf } : {}) }).catch(() => {});
   }, 5000);
 
   // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
@@ -1720,6 +1774,7 @@ export async function handleInboundMessage(params: {
       ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
       ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
+      ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
     });
     statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
     return result;
@@ -1798,6 +1853,7 @@ export async function handleInboundMessage(params: {
               channelId: replyChannelId,
               channelType: replyChannelType,
               content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
+              ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
             });
           } catch (sendErr) {
             log?.error?.(`octo: failed to send error message: ${String(sendErr)}`);

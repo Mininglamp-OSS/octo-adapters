@@ -215,6 +215,7 @@ export async function sendMessage(params: {
   mentionEntities?: MentionEntity[];
   mentionAll?: boolean;
   replyMsgId?: string;
+  onBehalfOf?: string;
   signal?: AbortSignal;
 }): Promise<SendMessageResult | undefined> {
   const payload: Record<string, unknown> = {
@@ -247,6 +248,7 @@ export async function sendMessage(params: {
     channel_id: params.channelId,
     channel_type: params.channelType,
     payload,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
   }, params.signal);
 }
 
@@ -255,11 +257,13 @@ export async function sendTyping(params: {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  onBehalfOf?: string;
   signal?: AbortSignal;
 }): Promise<void> {
   await postJson(params.apiUrl, params.botToken, "/v1/bot/typing", {
     channel_id: params.channelId,
     channel_type: params.channelType,
+    ...(params.onBehalfOf ? { on_behalf_of: params.onBehalfOf } : {}),
   }, params.signal);
 }
 
