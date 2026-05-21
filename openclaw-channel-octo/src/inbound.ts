@@ -1682,8 +1682,16 @@ export async function handleInboundMessage(params: {
       replyChannelId = oboV2OriginChannel as string;
     }
     replyChannelType = resolvedChannelType;
-    effectiveOnBehalfOf = oboV2RespondAs as string;
-    log?.info?.(`octo: OBO v2 detected — reply target=${replyChannelId} type=${replyChannelType} respondAs=${effectiveOnBehalfOf} originFrom=${oboV2OriginFromUid}`);
+    // Security: always use the trusted account.config.onBehalfOf as the
+    // authoritative grantor identity. `oboV2RespondAs` comes from the payload
+    // and must not be trusted as the reply identity — it is kept only for
+    // logging/debug visibility. (`isOBOv2` above already guarantees
+    // account.config.onBehalfOf is non-empty.)
+    effectiveOnBehalfOf = account.config.onBehalfOf!;
+    if (oboV2RespondAs !== effectiveOnBehalfOf) {
+      log?.warn?.(`octo: OBO v2 payload respondAs=${oboV2RespondAs} differs from configured grantor=${effectiveOnBehalfOf} — using configured grantor`);
+    }
+    log?.info?.(`octo: OBO v2 detected — reply target=${replyChannelId} type=${replyChannelType} respondAs=${effectiveOnBehalfOf} payloadRespondAs=${oboV2RespondAs} originFrom=${oboV2OriginFromUid}`);
   } else {
     replyChannelId = isGroup ? message.channel_id! : message.from_uid;
     replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;

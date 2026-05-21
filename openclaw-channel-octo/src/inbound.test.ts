@@ -2088,3 +2088,56 @@ describe("OBO v2 sender identity validation (GH#63)", () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Tests for OBO v2 effective identity authority (PR#61 R5).
+ *
+ * In the isOBOv2 branch of inbound.ts (~L1685), `effectiveOnBehalfOf` is the
+ * identity we use as `on_behalf_of` for replies/typing. It MUST come from the
+ * trusted `account.config.onBehalfOf`, not from the payload field
+ * `obo_respond_as` (which is attacker-controllable in transit). When the two
+ * disagree, we keep the configured grantor and emit a warn for visibility.
+ */
+describe("OBO v2 effective identity authority (PR#61 R5)", () => {
+  type WarnSink = { warn: (msg: string) => void; info?: (msg: string) => void };
+
+  // Mirrors the assignment at inbound.ts:1685 (post-fix).
+  function resolveEffectiveOnBehalfOf(
+    oboV2RespondAs: string | undefined,
+    configuredGrantor: string,
+    log?: WarnSink,
+  ): string {
+    const effective = configuredGrantor; // trusted source
+    if (oboV2RespondAs !== effective) {
+      log?.warn(
+        `octo: OBO v2 payload respondAs=${oboV2RespondAs} differs from configured grantor=${effective} — using configured grantor`,
+      );
+    }
+    return effective;
+  }
+
+  it("payload respondAs matches configured grantor → no warn, uses configured", () => {
+    const warn = vi.fn();
+    const eff = resolveEffectiveOnBehalfOf("admin", "admin", { warn });
+    expect(eff).toBe("admin");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("payload respondAs differs from configured grantor → warn, uses configured", () => {
+    const warn = vi.fn();
+    const eff = resolveEffectiveOnBehalfOf("evil-spoofed-uid", "admin", { warn });
+    // Authority is configured grantor, never the payload value.
+    expect(eff).toBe("admin");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("payload respondAs=evil-spoofed-uid");
+    expect(warn.mock.calls[0][0]).toContain("configured grantor=admin");
+    expect(warn.mock.calls[0][0]).toContain("using configured grantor");
+  });
+
+  it("payload respondAs missing → warn, still uses configured grantor", () => {
+    const warn = vi.fn();
+    const eff = resolveEffectiveOnBehalfOf(undefined, "admin", { warn });
+    expect(eff).toBe("admin");
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
