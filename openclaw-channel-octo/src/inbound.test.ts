@@ -18,6 +18,7 @@ import {
   resolveCommandAuthorized,
   pendingInboundContext,
   sessionAccountMap,
+  buildSessionAccountKey,
   segmentHistoryEntries,
   type ResolveFileResult,
 } from "./inbound.js";
@@ -1313,33 +1314,57 @@ describe("pendingInboundContext", () => {
   });
 });
 
-describe("sessionAccountMap", () => {
+describe("sessionAccountMap (composite-keyed)", () => {
   beforeEach(() => {
     sessionAccountMap.clear();
   });
 
-  it("should store and retrieve accountId by sessionKey", () => {
-    const key = "octo:group:abc";
-    sessionAccountMap.set(key, "bot_account_1");
-    expect(sessionAccountMap.get(key)).toBe("bot_account_1");
+  it("buildSessionAccountKey concatenates accountId and sessionKey", () => {
+    expect(buildSessionAccountKey("acct_a", "octo:group:abc")).toBe("acct_a:octo:group:abc");
   });
 
-  it("should keep separate entries for different sessionKeys", () => {
-    sessionAccountMap.set("k1", "acct_a");
-    sessionAccountMap.set("k2", "acct_b");
-    expect(sessionAccountMap.get("k1")).toBe("acct_a");
-    expect(sessionAccountMap.get("k2")).toBe("acct_b");
+  it("stores and retrieves accountId by the composite key", () => {
+    const sessionKey = "octo:group:abc";
+    sessionAccountMap.set(buildSessionAccountKey("bot_account_1", sessionKey), "bot_account_1");
+    expect(sessionAccountMap.get(buildSessionAccountKey("bot_account_1", sessionKey))).toBe("bot_account_1");
   });
 
-  it("should overwrite on repeated set for same sessionKey", () => {
-    const key = "octo:dm:reroute";
-    sessionAccountMap.set(key, "acct_old");
-    sessionAccountMap.set(key, "acct_new");
-    expect(sessionAccountMap.get(key)).toBe("acct_new");
+  it("keeps separate entries for different sessionKeys", () => {
+    sessionAccountMap.set(buildSessionAccountKey("acct_a", "k1"), "acct_a");
+    sessionAccountMap.set(buildSessionAccountKey("acct_b", "k2"), "acct_b");
+    expect(sessionAccountMap.get(buildSessionAccountKey("acct_a", "k1"))).toBe("acct_a");
+    expect(sessionAccountMap.get(buildSessionAccountKey("acct_b", "k2"))).toBe("acct_b");
   });
 
-  it("returns undefined for unknown sessionKey", () => {
-    expect(sessionAccountMap.get("nope")).toBeUndefined();
+  it("does NOT overwrite when two accounts share the same sessionKey (multi-account isolation)", () => {
+    // 🔴 PR#69 R3 regression guard: two distinct accounts can legitimately
+    // share the same sessionKey. The composite-key map must keep both
+    // entries so the hook can disambiguate per-account; otherwise the
+    // second account's persona prompt would leak into the first account's
+    // prompt build.
+    const sharedSessionKey = "agent:default:octo:group:shared_group";
+    sessionAccountMap.set(buildSessionAccountKey("acct_persona_a", sharedSessionKey), "acct_persona_a");
+    sessionAccountMap.set(buildSessionAccountKey("acct_persona_b", sharedSessionKey), "acct_persona_b");
+    expect(sessionAccountMap.get(buildSessionAccountKey("acct_persona_a", sharedSessionKey))).toBe("acct_persona_a");
+    expect(sessionAccountMap.get(buildSessionAccountKey("acct_persona_b", sharedSessionKey))).toBe("acct_persona_b");
+    expect(sessionAccountMap.size).toBe(2);
+  });
+
+  it("overwrites on repeated set for the same (accountId, sessionKey) pair", () => {
+    const key = buildSessionAccountKey("acct_a", "octo:dm:reroute");
+    sessionAccountMap.set(key, "acct_a");
+    sessionAccountMap.set(key, "acct_a"); // idempotent
+    expect(sessionAccountMap.get(key)).toBe("acct_a");
+    expect(sessionAccountMap.size).toBe(1);
+  });
+
+  it("returns undefined for unknown composite keys", () => {
+    expect(sessionAccountMap.get(buildSessionAccountKey("acct_a", "nope"))).toBeUndefined();
+    // And: looking up by raw sessionKey alone (the old buggy access pattern)
+    // never matches a composite-keyed entry — guards against accidental
+    // regression to the pre-fix call site.
+    sessionAccountMap.set(buildSessionAccountKey("acct_a", "octo:group:x"), "acct_a");
+    expect(sessionAccountMap.get("octo:group:x")).toBeUndefined();
   });
 });
 

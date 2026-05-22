@@ -252,6 +252,54 @@ export function getPersonaPromptForSession(
   return _cache.get(accountId)?.hint;
 }
 
+/**
+ * Return the accountIds that have an active persona refresh loop registered
+ * via `initPersonaPromptCache`. This is the set of accounts the
+ * `before_prompt_build` hook should consider when resolving persona identity
+ * for a given sessionKey.
+ *
+ * Returning only persona-clone accounts (those with `account.config.onBehalfOf`
+ * set, since `initPersonaPromptCache` is a no-op for non-persona accounts)
+ * keeps the hook's resolution cheap and avoids accidentally matching regular
+ * bots that happen to share a sessionKey with a persona clone.
+ */
+export function getRegisteredPersonaAccountIds(): string[] {
+  return Array.from(_timers.keys());
+}
+
+/**
+ * Resolve the persona hint for a sessionKey using a caller-supplied
+ * `(accountId, sessionKey) → boolean` membership check.
+ *
+ * The hook caller passes a closure over `sessionAccountMap` (composite-keyed
+ * by `${accountId}:${sessionKey}`, see inbound.ts). We iterate every
+ * registered persona account and ask "have you been seen on this
+ * sessionKey?". If exactly one persona account matches we return its cached
+ * hint; on 0 or >1 matches we return undefined (fail safe — better to drop
+ * the persona injection than to attach the wrong account's identity to the
+ * prompt). This is the multi-account isolation fix called out in PR#69 R3
+ * (Jerry-Xin).
+ *
+ * Extracted as a pure helper so the resolution logic is unit-testable
+ * without standing up the full plugin hook surface.
+ */
+export function resolvePersonaHintForSession(params: {
+  sessionKey: string;
+  hasAccountSession: (accountId: string, sessionKey: string) => boolean;
+}): string | undefined {
+  const { sessionKey, hasAccountSession } = params;
+  if (!sessionKey) return undefined;
+  const matches: string[] = [];
+  for (const accountId of _timers.keys()) {
+    if (hasAccountSession(accountId, sessionKey)) {
+      matches.push(accountId);
+      if (matches.length > 1) return undefined; // ambiguous — fail safe
+    }
+  }
+  if (matches.length !== 1) return undefined;
+  return _cache.get(matches[0])?.hint;
+}
+
 /** Test helper — fully reset module state between cases. */
 export function _resetPersonaPromptCacheForTests(): void {
   for (const timer of _timers.values()) clearInterval(timer);

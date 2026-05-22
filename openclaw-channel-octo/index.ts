@@ -12,8 +12,8 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { dmworkPlugin } from "./src/channel.js";
 import { setDmworkRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
-import { pendingInboundContext, sessionAccountMap } from "./src/inbound.js";
-import { getPersonaPromptForSession } from "./src/persona-prompt.js";
+import { pendingInboundContext, sessionAccountMap, buildSessionAccountKey } from "./src/inbound.js";
+import { resolvePersonaHintForSession } from "./src/persona-prompt.js";
 import {
   inProcessConfigReader,
   runDoctorChecks,
@@ -303,15 +303,28 @@ const plugin: {
       // when this bot is not a persona clone, the lookup returns undefined
       // and we skip.
       //
-      // The hook ctx does not expose accountId, so we resolve it through
-      // sessionAccountMap (populated by handleInboundMessage in inbound.ts).
-      // Using ctx.accountId directly returns undefined — confirmed by
-      // PR#69 review.
-      const accountIdForPersona = sessionKey ? sessionAccountMap.get(sessionKey) : undefined;
-      if (accountIdForPersona) {
-        const personaHint = getPersonaPromptForSession(accountIdForPersona);
-        if (personaHint) systemSections.push(personaHint);
-      }
+      // The hook ctx does not expose accountId, so we cannot key the
+      // persona cache by sessionKey alone — two persona-clone bots
+      // running on the same node can legitimately share a sessionKey
+      // (OpenClaw routes per-account but session keys can collide).
+      // Keying sessionAccountMap only by sessionKey lets a later inbound
+      // overwrite an earlier one and the hook then attaches the WRONG
+      // account's persona prompt — a cross-account identity leak called
+      // out in PR#69 R3 (Jerry-Xin).
+      //
+      // Fix: sessionAccountMap is composite-keyed by
+      // `${accountId}:${sessionKey}` (see inbound.ts). The resolver
+      // iterates every registered persona account and asks
+      // sessionAccountMap whether it has been seen on this sessionKey.
+      // On 0 / >1 matches we fail safe to "no persona injection".
+      const personaHint = sessionKey
+        ? resolvePersonaHintForSession({
+            sessionKey,
+            hasAccountSession: (accountId, sk) =>
+              sessionAccountMap.has(buildSessionAccountKey(accountId, sk)),
+          })
+        : undefined;
+      if (personaHint) systemSections.push(personaHint);
 
       if (contextSections.length === 0 && systemSections.length === 0) return;
       return {

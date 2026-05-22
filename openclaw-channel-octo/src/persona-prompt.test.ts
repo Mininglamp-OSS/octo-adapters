@@ -3,8 +3,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   composePersonaHint,
   getPersonaPromptForSession,
+  getRegisteredPersonaAccountIds,
   initPersonaPromptCache,
   refreshPersonaPromptCache,
+  resolvePersonaHintForSession,
   setPersonaPromptRefreshIntervalMs,
   stopPersonaPromptCache,
   _resetPersonaPromptCacheForTests,
@@ -401,5 +403,209 @@ describe("generation guard (abort in-flight fetches)", () => {
     expect(getPersonaPromptForSession("bot_reconf")).toContain("fresh");
 
     stopPersonaPromptCache("bot_reconf");
+  });
+});
+
+describe("getRegisteredPersonaAccountIds", () => {
+  it("returns the accountIds of accounts that called initPersonaPromptCache", async () => {
+    // Initial fetch is fire-and-forget; stub fetch so it can't reach the network.
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache({
+      accountId: "persona_a",
+      apiUrl: "http://api.example/",
+      botToken: "bf_a",
+      onBehalfOf: "u_admin",
+    });
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache({
+      accountId: "persona_b",
+      apiUrl: "http://api.example/",
+      botToken: "bf_b",
+      onBehalfOf: "u_admin",
+    });
+
+    expect(getRegisteredPersonaAccountIds().sort()).toEqual(["persona_a", "persona_b"]);
+
+    stopPersonaPromptCache("persona_a");
+    expect(getRegisteredPersonaAccountIds()).toEqual(["persona_b"]);
+  });
+
+  it("skips non-persona accounts (no onBehalfOf)", () => {
+    initPersonaPromptCache({
+      accountId: "regular_bot",
+      apiUrl: "http://api.example/",
+      botToken: "bf_x",
+      // onBehalfOf intentionally undefined
+    });
+    expect(getRegisteredPersonaAccountIds()).toEqual([]);
+  });
+});
+
+describe("resolvePersonaHintForSession — multi-account isolation (PR#69 R3)", () => {
+  async function seedPersonaCache(accountId: string, personaPrompt: string) {
+    mockFetchOnce({
+      has_grant: true,
+      grantor_uid: "u_admin",
+      grantor_name: `Admin-${accountId}`,
+      persona_prompt: personaPrompt,
+      active: true,
+    });
+    await refreshPersonaPromptCache({
+      accountId,
+      apiUrl: "http://api.example/",
+      botToken: `bf_${accountId}`,
+      onBehalfOf: "u_admin",
+    });
+  }
+
+  /**
+   * Build a fake sessionAccountMap closure over a plain Map so the test
+   * mirrors the real call site in index.ts (`sessionAccountMap.has(
+   * buildSessionAccountKey(accountId, sessionKey))`) without importing
+   * from inbound.ts (which would drag the channel runtime into this
+   * isolated test).
+   */
+  function makeHasAccountSession(entries: Array<[string, string]>) {
+    const set = new Set(entries.map(([acct, sk]) => `${acct}:${sk}`));
+    return (accountId: string, sessionKey: string) => set.has(`${accountId}:${sessionKey}`);
+  }
+
+  it("returns the hint when exactly one persona account is bound to the session", async () => {
+    mockFetchOnce({ has_grant: false }); // suppress init's fire-and-forget fetch
+    initPersonaPromptCache({
+      accountId: "persona_only",
+      apiUrl: "http://api.example/",
+      botToken: "bf_only",
+      onBehalfOf: "u_admin",
+    });
+    await seedPersonaCache("persona_only", "be helpful");
+
+    const sessionKey = "agent:default:octo:group:abc";
+    const hint = resolvePersonaHintForSession({
+      sessionKey,
+      hasAccountSession: makeHasAccountSession([["persona_only", sessionKey]]),
+    });
+    expect(hint).toContain("be helpful");
+
+    stopPersonaPromptCache("persona_only");
+  });
+
+  it("returns undefined when zero persona accounts match the session", async () => {
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache({
+      accountId: "persona_alpha",
+      apiUrl: "http://api.example/",
+      botToken: "bf_alpha",
+      onBehalfOf: "u_admin",
+    });
+    await seedPersonaCache("persona_alpha", "alpha prompt");
+
+    const hint = resolvePersonaHintForSession({
+      sessionKey: "agent:default:octo:group:other",
+      // Empty map — persona_alpha never seen on this sessionKey.
+      hasAccountSession: makeHasAccountSession([]),
+    });
+    expect(hint).toBeUndefined();
+
+    stopPersonaPromptCache("persona_alpha");
+  });
+
+  it("returns undefined when two persona accounts share the same sessionKey (no cross-account leak)", async () => {
+    // 🔴 Core regression guard for PR#69 R3 (Jerry-Xin blocker):
+    // when two persona-clone accounts collide on a sessionKey we MUST
+    // refuse to inject either persona prompt rather than guessing,
+    // because the hook cannot tell which account the prompt build is for.
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache({
+      accountId: "persona_a",
+      apiUrl: "http://api.example/",
+      botToken: "bf_a",
+      onBehalfOf: "u_admin",
+    });
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache({
+      accountId: "persona_b",
+      apiUrl: "http://api.example/",
+      botToken: "bf_b",
+      onBehalfOf: "u_admin",
+    });
+    await seedPersonaCache("persona_a", "A-only prompt");
+    await seedPersonaCache("persona_b", "B-only prompt");
+
+    const sharedSessionKey = "agent:default:octo:group:shared";
+    const hint = resolvePersonaHintForSession({
+      sessionKey: sharedSessionKey,
+      hasAccountSession: makeHasAccountSession([
+        ["persona_a", sharedSessionKey],
+        ["persona_b", sharedSessionKey],
+      ]),
+    });
+
+    expect(hint).toBeUndefined();
+    // And the per-account caches themselves are untouched — each persona
+    // still has its own prompt, the resolver just refused to disambiguate.
+    expect(getPersonaPromptForSession("persona_a")).toContain("A-only");
+    expect(getPersonaPromptForSession("persona_b")).toContain("B-only");
+
+    stopPersonaPromptCache("persona_a");
+    stopPersonaPromptCache("persona_b");
+  });
+
+  it("ignores non-persona accounts that share a sessionKey with a persona account", async () => {
+    // Regular bot (no onBehalfOf) bound to the same sessionKey must NOT
+    // prevent the persona account's prompt from being resolved — only
+    // entries from registered persona accounts count toward disambiguation.
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache({
+      accountId: "persona_solo",
+      apiUrl: "http://api.example/",
+      botToken: "bf_solo",
+      onBehalfOf: "u_admin",
+    });
+    await seedPersonaCache("persona_solo", "solo prompt");
+
+    const sharedSessionKey = "agent:default:octo:group:mixed";
+    const hint = resolvePersonaHintForSession({
+      sessionKey: sharedSessionKey,
+      // sessionAccountMap contains both a persona and a regular bot, but
+      // only `persona_solo` is a registered persona account so only its
+      // membership is consulted.
+      hasAccountSession: makeHasAccountSession([
+        ["persona_solo", sharedSessionKey],
+        ["regular_bot", sharedSessionKey],
+      ]),
+    });
+    expect(hint).toContain("solo prompt");
+
+    stopPersonaPromptCache("persona_solo");
+  });
+
+  it("returns undefined for empty sessionKey", () => {
+    const hint = resolvePersonaHintForSession({
+      sessionKey: "",
+      hasAccountSession: () => true,
+    });
+    expect(hint).toBeUndefined();
+  });
+
+  it("returns undefined when the matching persona account has no cached hint yet (cold start)", async () => {
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache({
+      accountId: "persona_cold",
+      apiUrl: "http://api.example/",
+      botToken: "bf_cold",
+      onBehalfOf: "u_admin",
+    });
+    // Deliberately do NOT seed a hint — _cache.get returns undefined.
+
+    const sessionKey = "agent:default:octo:dm:user1";
+    const hint = resolvePersonaHintForSession({
+      sessionKey,
+      hasAccountSession: makeHasAccountSession([["persona_cold", sessionKey]]),
+    });
+    // Single match, but no hint cached → undefined (fail-safe).
+    expect(hint).toBeUndefined();
+
+    stopPersonaPromptCache("persona_cold");
   });
 });
