@@ -898,6 +898,32 @@ async function refreshGroupMemberCache(opts: {
   }
 }
 
+/**
+ * Build the group-path persona-clone GroupSystemPrompt (GH octo-adapters#64).
+ *
+ * When the persona-clone bot AND its grantor are both members of the same
+ * group, the inbound message arrives as a normal group event (not OBO v2).
+ * If someone @-mentions the grantor (or @所有人 / legacy @everyone), the
+ * adapter routes the reply as the grantor — but the LLM agent sees the raw
+ * `@grantor` text and concludes the message is not addressed to it,
+ * returning NO_REPLY. This hint tells the agent it is the grantor's
+ * persona clone and should respond as the grantor.
+ *
+ * Locally synthesized — no payload trust required because all inputs come
+ * from server-trusted state (`account.config.onBehalfOf` and the resolved
+ * `uidToNameMap`).
+ */
+export function buildPersonaGroupSystemPrompt(
+  grantorUid: string,
+  uidToNameMap: Map<string, string>,
+): string {
+  const grantorName = uidToNameMap.get(grantorUid) || grantorUid;
+  return (
+    `你是${grantorName}的AI分身（persona clone）。当群里有人@${grantorName}` +
+    `或@所有人时，就是在叫你，你应当以${grantorName}的身份回复，不要返回 NO_REPLY。`
+  );
+}
+
 export function buildMemberListPrefix(uidToNameMap: Map<string, string>): string {
   if (uidToNameMap.size === 0) return "";
 
@@ -1650,6 +1676,47 @@ export async function handleInboundMessage(params: {
     }
   }
 
+  // Compute GroupSystemPrompt for two distinct persona-clone scenarios:
+  //
+  //   1. OBO v2 DM-relay path: bot is friends with the grantor only; the
+  //      grantor sends a relay message carrying `obo_system_hint` so the
+  //      LLM knows it is acting as the grantor's persona in the origin
+  //      group. The hint must come from the configured grantor (security).
+  //
+  //   2. Group path (GH octo-adapters#64): grantor and persona clone bot
+  //      are both members of the group, so the message arrives as a normal
+  //      group event (not OBO v2). When `triggeredByMentionHumans` is true
+  //      (i.e. @grantor / @所有人 / legacy @everyone), the bot replies as
+  //      the grantor — but without a system hint the LLM sees `@grantor`
+  //      and concludes "not addressed to me" → NO_REPLY. Inject a locally
+  //      synthesized hint so the LLM understands it is the grantor's
+  //      persona clone and should respond.
+  //
+  // OBO v2 takes precedence: if the message carries a valid OBO v2
+  // envelope from the grantor, we use the payload-supplied hint as-is.
+  let groupSystemPrompt: string | undefined;
+  const oboHintTrusted =
+    typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0 &&
+    typeof message.payload?.obo_origin_channel_id === "string" && message.payload.obo_origin_channel_id.length > 0 &&
+    typeof (message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid) === "string" &&
+    // Security: only trust system hint from the configured grantor. Without
+    // this sender gate, a forged message from any uid could inject arbitrary
+    // system-level instructions into the LLM — the downstream OBO routing
+    // would be rejected, but the system prompt would already be in session.
+    Boolean(account.config.onBehalfOf) && message.from_uid === account.config.onBehalfOf;
+  if (oboHintTrusted) {
+    groupSystemPrompt = message.payload!.obo_system_hint as string;
+  } else if (isGroup && triggeredByMentionHumans && account.config.onBehalfOf) {
+    // Group path persona hint (GH octo-adapters#64). The bot was triggered
+    // because someone @-mentioned the grantor (or @所有人 / legacy @everyone)
+    // and the bot is the grantor's persona clone. Without this hint the LLM
+    // sees `@grantor` in the body, concludes the message is not for it, and
+    // returns NO_REPLY. Synthesized locally — no payload trust needed because
+    // the values come from server-trusted config (`onBehalfOf`) and the
+    // already-resolved group member map.
+    groupSystemPrompt = buildPersonaGroupSystemPrompt(account.config.onBehalfOf, uidToNameMap);
+  }
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,
@@ -1677,19 +1744,7 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    // OBO v2: inject obo_system_hint as GroupSystemPrompt ONLY when the message
-    // carries a valid OBO v2 envelope (obo_origin_channel_id + obo_respond_as)
-    // AND the sender is the configured grantor (onBehalfOf). Without the sender
-    // gate, a forged message from any uid could inject arbitrary system-level
-    // instructions into the LLM — the downstream OBO routing would be rejected,
-    // but the system prompt would already be in the session context.
-    GroupSystemPrompt: (
-      typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0 &&
-      typeof message.payload?.obo_origin_channel_id === "string" && message.payload.obo_origin_channel_id.length > 0 &&
-      typeof (message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid) === "string" &&
-      // Security: only trust system hint from the configured grantor
-      Boolean(account.config.onBehalfOf) && message.from_uid === account.config.onBehalfOf
-    ) ? message.payload.obo_system_hint : undefined,
+    GroupSystemPrompt: groupSystemPrompt,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
