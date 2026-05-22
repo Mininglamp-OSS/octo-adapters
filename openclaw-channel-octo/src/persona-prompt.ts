@@ -195,7 +195,16 @@ export function initPersonaPromptCache(
   account: PersonaAccountInput,
   log?: ChannelLogSink,
 ): void {
-  if (!account.onBehalfOf) return;
+  if (!account.onBehalfOf) {
+    // PR#69 R4 (Jerry-Xin) Blocking 1: when an account is reconfigured
+    // from persona-clone (`onBehalfOf` set) to a regular bot (`onBehalfOf`
+    // cleared), a bare early return would leave the previous timer and
+    // cached hint in place, so the before_prompt_build hook would keep
+    // injecting the old grantor's persona prompt into a now-plain bot.
+    // Tear down any prior state for this accountId before bailing out.
+    stopPersonaPromptCache(account.accountId);
+    return;
+  }
 
   // Drop any pre-existing timer for this account so repeated calls
   // (hot reload, account reconfigure) don't leak intervals.
@@ -206,6 +215,19 @@ export function initPersonaPromptCache(
   // is still in flight will see a generation mismatch when it resolves
   // and bail out before mutating _cache.
   _bumpGeneration(account.accountId);
+
+  // PR#69 R4 (Jerry-Xin) Blocking 2: on reconfigure (e.g. grantor
+  // switched from A to B), the previous grantor's hint is still sitting
+  // in _cache. The new fetch we kick off below is async — until it
+  // resolves, getPersonaPromptForSession would keep serving the OLD
+  // grantor's prompt. Clear the cache eagerly so the hook fails safe
+  // (returns undefined → no persona injection) during the refetch
+  // window, rather than leaking stale identity into the new context.
+  _cache.delete(account.accountId);
+  // Allow the next successful fetch for this account to re-emit the
+  // one-shot "loaded" / "not active" info log, so operators can see the
+  // post-reconfigure state in logs.
+  _firstFetchLogged.delete(account.accountId);
 
   // Fire-and-forget initial fetch. We deliberately don't await
   // because account start should not block on persona init.

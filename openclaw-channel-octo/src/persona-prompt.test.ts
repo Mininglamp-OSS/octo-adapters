@@ -406,6 +406,109 @@ describe("generation guard (abort in-flight fetches)", () => {
   });
 });
 
+describe("cache lifecycle on reconfigure (PR#69 R4 Jerry-Xin)", () => {
+  // Blocking 1: persona → regular bot must not leave a stale hint behind.
+  it("clears the cached hint when the account is reconfigured to drop onBehalfOf", async () => {
+    // 1. Seed the cache as a persona-clone.
+    mockFetchOnce({
+      has_grant: true,
+      grantor_uid: "u_admin",
+      grantor_name: "Admin",
+      persona_prompt: "old persona",
+      active: true,
+    });
+    const personaAccount = {
+      accountId: "bot_switch",
+      apiUrl: "http://api",
+      botToken: "bf_x",
+      onBehalfOf: "u_admin",
+    };
+    await refreshPersonaPromptCache(personaAccount);
+    expect(getPersonaPromptForSession("bot_switch")).toContain("old persona");
+
+    // Also start the refresh loop (mirrors the real channel-start path).
+    mockFetchOnce({ has_grant: false });
+    initPersonaPromptCache(personaAccount);
+    expect(getRegisteredPersonaAccountIds()).toContain("bot_switch");
+
+    // 2. Reconfigure: same accountId, but onBehalfOf cleared (now a plain bot).
+    initPersonaPromptCache({
+      accountId: "bot_switch",
+      apiUrl: "http://api",
+      botToken: "bf_x",
+      // onBehalfOf intentionally omitted
+    });
+
+    // 3. The old persona hint must be gone — before this fix, the early
+    //    return left _cache untouched and the before_prompt_build hook
+    //    would keep injecting "old persona" into the now-regular bot.
+    expect(getPersonaPromptForSession("bot_switch")).toBeUndefined();
+    // And the timer must be torn down so we don't keep polling either.
+    expect(getRegisteredPersonaAccountIds()).not.toContain("bot_switch");
+  });
+
+  // Blocking 2: re-init with a different grantor must not serve the old
+  // grantor's hint during the new fetch's in-flight window.
+  it("returns undefined during the refetch window when re-init switches grantor", async () => {
+    // Seed cache with grantor A's hint.
+    mockFetchOnce({
+      has_grant: true,
+      grantor_uid: "u_alice",
+      grantor_name: "Alice",
+      persona_prompt: "alice voice",
+      active: true,
+    });
+    await refreshPersonaPromptCache({
+      accountId: "bot_regrant",
+      apiUrl: "http://api",
+      botToken: "bf_x",
+      onBehalfOf: "u_alice",
+    });
+    expect(getPersonaPromptForSession("bot_regrant")).toContain("alice voice");
+
+    // Re-init with grantor B, but hold the new fetch open so we can
+    // observe the in-flight window.
+    let resolveNew!: (v: unknown) => void;
+    const pending = new Promise((res) => {
+      resolveNew = res;
+    });
+    global.fetch = vi.fn().mockImplementation(() => pending) as unknown as typeof fetch;
+
+    initPersonaPromptCache({
+      accountId: "bot_regrant",
+      apiUrl: "http://api",
+      botToken: "bf_x",
+      onBehalfOf: "u_bob",
+    });
+
+    // Before this fix, _cache.get("bot_regrant") still returned Alice's
+    // hint during the gap. Now it must be cleared eagerly so the hook
+    // fails safe (no persona injection) until the new fetch completes.
+    expect(getPersonaPromptForSession("bot_regrant")).toBeUndefined();
+
+    // Resolve with grantor B's grant — cache should now reflect B.
+    resolveNew({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        has_grant: true,
+        grantor_uid: "u_bob",
+        grantor_name: "Bob",
+        persona_prompt: "bob voice",
+        active: true,
+      }),
+      text: async () => "",
+    });
+    await vi.waitFor(() => {
+      expect(getPersonaPromptForSession("bot_regrant")).toContain("bob voice");
+    });
+    expect(getPersonaPromptForSession("bot_regrant")).not.toContain("alice voice");
+
+    stopPersonaPromptCache("bot_regrant");
+  });
+});
+
 describe("getRegisteredPersonaAccountIds", () => {
   it("returns the accountIds of accounts that called initPersonaPromptCache", async () => {
     // Initial fetch is fire-and-forget; stub fetch so it can't reach the network.
