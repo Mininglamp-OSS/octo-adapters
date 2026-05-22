@@ -35,6 +35,7 @@ import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds, writeGroupMdToDisk } from "./group-md.js";
 import { registerOwnerUid } from "./owner-registry.js";
 import { preloadGroupMemberCache, getGroupMembersFromCache } from "./member-cache.js";
+import { initPersonaPromptCache, stopPersonaPromptCache } from "./persona-prompt.js";
 import path from "node:path";
 import os from "node:os";
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
@@ -792,6 +793,20 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
         log,
       }).catch(() => {});
 
+      // Start persona_prompt cache refresh loop for persona-clone bots
+      // (GH octo-adapters#68). No-op for regular bots. Polls
+      // GET /v1/bot/obo-grant so persona_prompt edits propagate without
+      // requiring a fan-out copy or process restart.
+      initPersonaPromptCache(
+        {
+          accountId: account.accountId,
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken!,
+          onBehalfOf: account.config.onBehalfOf,
+        },
+        log,
+      );
+
       // Prefetch GROUP.md and group members for all groups (fire-and-forget)
       const groupMdCache = getOrCreateGroupMdCache(account.accountId);
       (async () => {
@@ -1081,6 +1096,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           socket.disconnect();
           if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
           if (cooldownReconnectTimer) { clearTimeout(cooldownReconnectTimer); cooldownReconnectTimer = null; }
+          stopPersonaPromptCache(account.accountId);
           ctx.setStatus({
             accountId: account.accountId,
             running: false,

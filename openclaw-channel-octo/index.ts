@@ -13,6 +13,7 @@ import { dmworkPlugin } from "./src/channel.js";
 import { setDmworkRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
 import { pendingInboundContext } from "./src/inbound.js";
+import { getPersonaPromptForSession } from "./src/persona-prompt.js";
 import {
   inProcessConfigReader,
   runDoctorChecks,
@@ -286,6 +287,17 @@ const plugin: {
           if (pending.memberListPrefix) sections.push(pending.memberListPrefix);
           if (pending.historyPrefix) sections.push(pending.historyPrefix);
         }
+      }
+
+      // 3. Persona prompt (GH octo-adapters#68) — for persona-clone bots
+      // (account.config.onBehalfOf set), pull the active persona_prompt
+      // from the per-account cache and prepend it. The cache is hydrated
+      // by initPersonaPromptCache() in channel.ts; when this bot is not
+      // a persona clone, the lookup returns undefined and we skip.
+      const accountIdForPersona = (ctx as { accountId?: string }).accountId;
+      if (accountIdForPersona) {
+        const personaHint = getPersonaPromptForSession(accountIdForPersona);
+        if (personaHint) sections.push(personaHint);
       }
 
       if (sections.length === 0) return;

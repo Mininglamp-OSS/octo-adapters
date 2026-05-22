@@ -640,6 +640,69 @@ export async function deleteVoiceContext(params: {
   });
 }
 
+// ---- OBO Grant API (persona clone introspection) ----
+
+/**
+ * Bot-side view of its own OBO grant — used by persona clones to fetch
+ * the active `persona_prompt` so it can be injected into the LLM system
+ * prompt via the before_prompt_build hook (GH octo-adapters#68).
+ *
+ * Returned by GET /v1/bot/obo-grant (octo-server YUJ-1762). The bot is
+ * identified by its botToken; the server resolves the grant where this
+ * bot is the grantee.
+ */
+export interface BotOboGrant {
+  /** False / absent when the bot has no active grant (regular non-persona bot). */
+  has_grant: boolean;
+  grantor_uid?: string;
+  grantor_name?: string;
+  persona_prompt?: string;
+  /** Whether the grant is currently active (mode != "paused" & not revoked). */
+  active?: boolean;
+}
+
+/**
+ * GET /v1/bot/obo-grant — fetch this bot's own OBO grant info.
+ *
+ * Returns null when:
+ *  - the bot has no grant (404)
+ *  - the server reports has_grant=false
+ *  - the response is malformed
+ *
+ * Throws on transport / 5xx errors so the caller's retry-on-next-tick
+ * cadence (see persona-prompt.ts) can decide whether to log and skip.
+ */
+export async function getBotOboGrant(params: {
+  apiUrl: string;
+  botToken: string;
+}): Promise<BotOboGrant | null> {
+  const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/obo-grant`;
+  const resp = await fetch(url, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${params.botToken}` },
+    signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+  });
+  // 404 = no grant for this bot (regular bot, not a persona clone).
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(
+      `Bot API GET /v1/bot/obo-grant failed (${resp.status}): ${text || resp.statusText}`,
+    );
+  }
+  const raw = (await resp.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!raw || typeof raw !== "object") return null;
+  const hasGrant = raw.has_grant === true;
+  if (!hasGrant) return null;
+  return {
+    has_grant: true,
+    grantor_uid: typeof raw.grantor_uid === "string" ? raw.grantor_uid : undefined,
+    grantor_name: typeof raw.grantor_name === "string" ? raw.grantor_name : undefined,
+    persona_prompt: typeof raw.persona_prompt === "string" ? raw.persona_prompt : undefined,
+    active: raw.active === true,
+  };
+}
+
 /** Decoded payload from base64 message content */
 interface SyncMessagePayload {
   type?: number;
