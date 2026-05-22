@@ -1579,6 +1579,77 @@ export async function handleInboundMessage(params: {
   const commandBody = resolveCommandBody(rawBody, isGroup, isExplicitBotMention);
   const commandAuthorized = resolveCommandAuthorized(isGroup, isOwner(account.accountId, message.from_uid), isExplicitBotMention);
 
+  // OBO v2 detection + relevance filter (R10): Must run BEFORE
+  // finalizeInboundContext / recordInboundSession so that irrelevant
+  // OBO v2 messages (e.g. AI-only fan-out) do not leak any state —
+  // including `obo_system_hint` as GroupSystemPrompt — into the bot's
+  // DM session with the grantor. Mirrors the group-path early-return at
+  // ~L1300 (non-mention group messages return before session is recorded).
+  const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+  const oboV2OriginChannelType = message.payload?.obo_origin_channel_type;
+  const oboV2RespondAs = message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+  const grantorUid = account.config.onBehalfOf;
+  const isOBOv2 = Boolean(
+    typeof oboV2OriginChannel === "string" &&
+    oboV2OriginChannel.length > 0 &&
+    typeof oboV2RespondAs === "string" &&
+    oboV2RespondAs.length > 0 &&
+    // Security: only trust OBO v2 fields when the message is sent by the
+    // configured grantor. Without this, any user able to put obo_* fields in
+    // their payload could trick the bot into replying in another channel as
+    // somebody else's persona.
+    grantorUid && message.from_uid === grantorUid
+  );
+
+  if (!isOBOv2 && typeof oboV2OriginChannel === "string" && oboV2OriginChannel.length > 0) {
+    log?.warn?.(`octo: OBO v2 payload rejected — from_uid=${message.from_uid} is not configured grantor ${grantorUid ?? "(none)"}`);
+  }
+
+  // OBO v2 relevance filter: when the fan-out message is @AI-only (mention.ais=1
+  // but no grantor mention, no @所有人), the persona clone should NOT respond.
+  // @AI targets AI bots directly, not humans or their persona clones.
+  //
+  // Mirrors the group-path semantics (see ~L1223/L1230): when
+  // `account.config.ignoreMentionAll=true`, broadcast-style mentions
+  // (`mention.humans=1`, `mention.all=1`) must NOT be treated as relevant for
+  // the persona clone. Explicit grantor UID mentions remain relevant
+  // regardless of `ignoreMentionAll`, because they target the grantor
+  // identity directly rather than the broadcast group.
+  //
+  // CRITICAL (R10): this filter MUST run before finalizeInboundContext /
+  // recordInboundSession — otherwise an irrelevant OBO v2 message would
+  // already have been persisted to the bot's DM session with the grantor,
+  // including any `obo_system_hint` as GroupSystemPrompt.
+  if (isOBOv2) {
+    const origMention = message.payload?.mention;
+    const origAis = origMention?.ais === true || origMention?.ais === 1;
+    const origHumans = origMention?.humans === true || origMention?.humans === 1;
+    const origAll = origMention?.all === true || origMention?.all === 1;
+    const origUids: string[] = Array.isArray(origMention?.uids) ? origMention.uids : [];
+    // Use the trusted configured grantor (account.config.onBehalfOf) for the
+    // explicit-mention relevance check, mirroring the group path. This is
+    // also what `effectiveOnBehalfOf` resolves to below; `oboV2RespondAs`
+    // from the payload is for diagnostic logging only.
+    const grantorInUids = typeof grantorUid === "string" && grantorUid.length > 0
+      && origUids.includes(grantorUid);
+    const ignoreBroadcast = account.config.ignoreMentionAll === true;
+    const broadcastRelevant = (!ignoreBroadcast) && (origHumans || origAll);
+    // No-mention fallback: when the payload carries no mention information at
+    // all (no ais, no humans, no all, no uids), treat the message as relevant
+    // (plain group/DM chatter the persona should see). Tightened to exclude
+    // broadcasts so that an `ignoreMentionAll`-gated humans/all does not
+    // re-enable relevance via this fallback.
+    const noMentionFallback = !origAis && !origHumans && !origAll && origUids.length === 0;
+    const isRelevantToPersona = broadcastRelevant || grantorInUids || noMentionFallback;
+    if (!isRelevantToPersona) {
+      log?.info?.(`octo: OBO v2 skipped — message not relevant to persona (ais=${origAis} humans=${origHumans} all=${origAll} grantorInUids=${grantorInUids} ignoreMentionAll=${ignoreBroadcast})`);
+      // Mirror group-path early-return: do NOT call finalizeInboundContext /
+      // recordInboundSession, so no DM session record (and no GroupSystemPrompt)
+      // is persisted for irrelevant OBO v2 fan-out messages.
+      return;
+    }
+  }
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,
@@ -1640,62 +1711,15 @@ export async function handleInboundMessage(params: {
   // go to the origin GROUP channel (not the DM), with `on_behalf_of` set to
   // `obo_respond_as` (the grantor). This way the bot replies in the group as
   // the grantor, not in DM.
-  const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
-  const oboV2OriginChannelType = message.payload?.obo_origin_channel_type;
-  const oboV2RespondAs = message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
-  const grantorUid = account.config.onBehalfOf;
-  const isOBOv2 = Boolean(
-    typeof oboV2OriginChannel === "string" &&
-    oboV2OriginChannel.length > 0 &&
-    typeof oboV2RespondAs === "string" &&
-    oboV2RespondAs.length > 0 &&
-    // Security: only trust OBO v2 fields when the message is sent by the
-    // configured grantor. Without this, any user able to put obo_* fields in
-    // their payload could trick the bot into replying in another channel as
-    // somebody else's persona.
-    grantorUid && message.from_uid === grantorUid
-  );
-
-  if (!isOBOv2 && typeof oboV2OriginChannel === "string" && oboV2OriginChannel.length > 0) {
-    log?.warn?.(`octo: OBO v2 payload rejected — from_uid=${message.from_uid} is not configured grantor ${grantorUid ?? "(none)"}`);
-  }
-
-  // OBO v2 relevance filter: when the fan-out message is @AI-only (mention.ais=1
-  // but no grantor mention, no @所有人), the persona clone should NOT respond.
-  // @AI targets AI bots directly, not humans or their persona clones.
   //
-  // Mirrors the group-path semantics (see ~L1223/L1230): when
-  // `account.config.ignoreMentionAll=true`, broadcast-style mentions
-  // (`mention.humans=1`, `mention.all=1`) must NOT be treated as relevant for
-  // the persona clone. Explicit grantor UID mentions remain relevant
-  // regardless of `ignoreMentionAll`, because they target the grantor
-  // identity directly rather than the broadcast group.
-  if (isOBOv2) {
-    const origMention = message.payload?.mention;
-    const origAis = origMention?.ais === true || origMention?.ais === 1;
-    const origHumans = origMention?.humans === true || origMention?.humans === 1;
-    const origAll = origMention?.all === true || origMention?.all === 1;
-    const origUids: string[] = Array.isArray(origMention?.uids) ? origMention.uids : [];
-    // Use the trusted configured grantor (account.config.onBehalfOf) for the
-    // explicit-mention relevance check, mirroring the group path. This is
-    // also what `effectiveOnBehalfOf` resolves to below; `oboV2RespondAs`
-    // from the payload is for diagnostic logging only.
-    const grantorInUids = typeof grantorUid === "string" && grantorUid.length > 0
-      && origUids.includes(grantorUid);
-    const ignoreBroadcast = account.config.ignoreMentionAll === true;
-    const broadcastRelevant = (!ignoreBroadcast) && (origHumans || origAll);
-    // No-mention fallback: when the payload carries no mention information at
-    // all (no ais, no humans, no all, no uids), treat the message as relevant
-    // (plain group/DM chatter the persona should see). Tightened to exclude
-    // broadcasts so that an `ignoreMentionAll`-gated humans/all does not
-    // re-enable relevance via this fallback.
-    const noMentionFallback = !origAis && !origHumans && !origAll && origUids.length === 0;
-    const isRelevantToPersona = broadcastRelevant || grantorInUids || noMentionFallback;
-    if (!isRelevantToPersona) {
-      log?.info?.(`octo: OBO v2 skipped — message not relevant to persona (ais=${origAis} humans=${origHumans} all=${origAll} grantorInUids=${grantorInUids} ignoreMentionAll=${ignoreBroadcast})`);
-      return;
-    }
-  }
+  // Detection (`isOBOv2`) and the relevance filter that gates an early-return
+  // have already run BEFORE finalizeInboundContext / recordInboundSession
+  // (see R10 fix above) so that irrelevant OBO v2 fan-out messages do not
+  // leak `obo_system_hint` (as GroupSystemPrompt) into the bot's DM session.
+  // The reply-routing variables below (`replyChannelId`, `replyChannelType`,
+  // `effectiveOnBehalfOf`) are derived here using the previously-computed
+  // `isOBOv2`, `oboV2OriginChannel`, `oboV2OriginChannelType`, and
+  // `oboV2RespondAs`.
 
   let replyChannelId: string;
   let replyChannelType: ChannelType;

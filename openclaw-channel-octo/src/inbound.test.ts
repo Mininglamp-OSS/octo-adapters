@@ -2388,3 +2388,257 @@ describe("OBO v2 relevance filter + ignoreMentionAll (PR#61 R8)", () => {
     ).toBe(false);
   });
 });
+
+/**
+ * Tests for OBO v2 detection + relevance filter ordering (PR#61 R10).
+ *
+ * Jerry-Xin + lml2468 R10 found: at d46efad8, `recordInboundSession` was
+ * fired BEFORE the OBO v2 relevance filter, so irrelevant OBO v2 fan-out
+ * messages (e.g. AI-only) were already persisted to the bot's DM session
+ * with the grantor — including any `obo_system_hint` from the payload as
+ * GroupSystemPrompt. This violated the group-path early-return contract
+ * (~inbound.ts:1300), where non-mention group messages return BEFORE
+ * finalizeInboundContext / recordInboundSession.
+ *
+ * The fix moves the `isOBOv2` computation and the relevance filter
+ * BEFORE finalizeInboundContext / recordInboundSession in inbound.ts.
+ * These tests guard against regressing the ordering.
+ */
+describe("OBO v2 detection + filter ordering vs recordInboundSession (PR#61 R10)", () => {
+  type ObovPayload = {
+    obo_origin_channel_id?: string;
+    obo_origin_channel_type?: number;
+    obo_respond_as?: string;
+    obo_grantor_uid?: string;
+    obo_system_hint?: string;
+    mention?: {
+      ais?: boolean | number;
+      humans?: boolean | number;
+      all?: boolean | number;
+      uids?: string[];
+    };
+  };
+  type Account = { onBehalfOf?: string; ignoreMentionAll?: boolean };
+  type Message = { from_uid: string; payload?: ObovPayload };
+
+  type Sinks = {
+    recordInboundSession: ReturnType<typeof vi.fn>;
+    finalizeInboundContext: ReturnType<typeof vi.fn>;
+  };
+
+  /**
+   * Mirrors the post-fix control flow at inbound.ts (~L1582-L1700):
+   * 1) compute `isOBOv2` BEFORE finalizeInboundContext
+   * 2) run the relevance filter BEFORE finalizeInboundContext
+   * 3) early-return WITHOUT recordInboundSession for irrelevant OBO v2
+   * 4) only then call finalizeInboundContext + recordInboundSession
+   */
+  function simulateInbound(
+    message: Message,
+    account: Account,
+    sinks: Sinks,
+  ): { dispatched: boolean; rejected: boolean; skipped: boolean } {
+    const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+    const oboV2RespondAs =
+      message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+    const grantorUid = account.onBehalfOf;
+    const isOBOv2 = Boolean(
+      typeof oboV2OriginChannel === "string" &&
+      oboV2OriginChannel.length > 0 &&
+      typeof oboV2RespondAs === "string" &&
+      oboV2RespondAs.length > 0 &&
+      grantorUid &&
+      message.from_uid === grantorUid,
+    );
+
+    let rejected = false;
+    if (
+      !isOBOv2 &&
+      typeof oboV2OriginChannel === "string" &&
+      oboV2OriginChannel.length > 0
+    ) {
+      rejected = true;
+    }
+
+    if (isOBOv2) {
+      const m = message.payload?.mention;
+      const ais = m?.ais === true || m?.ais === 1;
+      const humans = m?.humans === true || m?.humans === 1;
+      const all = m?.all === true || m?.all === 1;
+      const uids: string[] = Array.isArray(m?.uids) ? m!.uids! : [];
+      const grantorInUids =
+        typeof grantorUid === "string" &&
+        grantorUid.length > 0 &&
+        uids.includes(grantorUid);
+      const ignoreBroadcast = account.ignoreMentionAll === true;
+      const broadcastRelevant = !ignoreBroadcast && (humans || all);
+      const noMentionFallback =
+        !ais && !humans && !all && uids.length === 0;
+      const relevant = broadcastRelevant || grantorInUids || noMentionFallback;
+      if (!relevant) {
+        // Early return BEFORE finalizeInboundContext / recordInboundSession.
+        return { dispatched: false, rejected, skipped: true };
+      }
+    }
+
+    // Only relevant messages reach the persistence path.
+    sinks.finalizeInboundContext({
+      // OBO v2 payloads injected obo_system_hint as GroupSystemPrompt before
+      // the fix; with the fix this code path is only reached when relevant.
+      GroupSystemPrompt:
+        isOBOv2 && typeof message.payload?.obo_system_hint === "string"
+          ? message.payload.obo_system_hint
+          : undefined,
+    });
+    sinks.recordInboundSession();
+    return { dispatched: true, rejected, skipped: false };
+  }
+
+  const grantorUid = "admin";
+  const otherUid = "alice";
+  const baseAccount: Account = { onBehalfOf: grantorUid, ignoreMentionAll: true };
+
+  function makeSinks(): Sinks {
+    return {
+      recordInboundSession: vi.fn(),
+      finalizeInboundContext: vi.fn(),
+    };
+  }
+
+  it("irrelevant OBO v2 (mention.ais=1, ignoreMentionAll=true) → recordInboundSession is NOT called", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: grantorUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "You are admin's persona clone.",
+        mention: { ais: 1 },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    expect(result.skipped).toBe(true);
+    expect(result.dispatched).toBe(false);
+    // Critical regression guard: no session record, no system-hint persistence.
+    expect(sinks.recordInboundSession).not.toHaveBeenCalled();
+    expect(sinks.finalizeInboundContext).not.toHaveBeenCalled();
+  });
+
+  it("irrelevant OBO v2 (mention.humans=1 + ignoreMentionAll=true broadcast suppressed) → recordInboundSession is NOT called", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: grantorUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "You are admin's persona clone.",
+        mention: { humans: 1, ais: 1 },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    expect(result.skipped).toBe(true);
+    expect(sinks.recordInboundSession).not.toHaveBeenCalled();
+    expect(sinks.finalizeInboundContext).not.toHaveBeenCalled();
+  });
+
+  it("relevant OBO v2 (explicit grantor uid mention) → recordInboundSession IS called and GroupSystemPrompt is persisted", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: grantorUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "You are admin's persona clone.",
+        mention: { ais: 1, uids: [grantorUid] },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    expect(result.skipped).toBe(false);
+    expect(result.dispatched).toBe(true);
+    expect(sinks.finalizeInboundContext).toHaveBeenCalledTimes(1);
+    expect(sinks.recordInboundSession).toHaveBeenCalledTimes(1);
+    const ctx = sinks.finalizeInboundContext.mock.calls[0][0];
+    expect(ctx.GroupSystemPrompt).toBe("You are admin's persona clone.");
+  });
+
+  it("non-OBO v2 (forged obo fields from non-grantor sender) → recordInboundSession IS called as plain DM (warn logged), no GroupSystemPrompt", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: otherUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "trying to inject system prompt",
+        mention: { ais: 1 },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    // Non-grantor sender → not OBO v2 → relevance filter does not apply, so
+    // it goes to recordInboundSession as a normal DM. But the obo_system_hint
+    // must NOT leak as GroupSystemPrompt (sender is not the grantor).
+    expect(result.rejected).toBe(true);
+    expect(result.dispatched).toBe(true);
+    expect(sinks.recordInboundSession).toHaveBeenCalledTimes(1);
+    const ctx = sinks.finalizeInboundContext.mock.calls[0][0];
+    expect(ctx.GroupSystemPrompt).toBeUndefined();
+  });
+
+  /**
+   * Source-ordering regression guard: read inbound.ts and verify that the
+   * `recordInboundSession` call is AFTER the OBO v2 relevance-filter early
+   * return. This is the structural invariant R10 enforces — if a future
+   * patch reorders the calls back to the buggy d46efad8 layout, this test
+   * fails immediately.
+   */
+  it("source-order invariant: recordInboundSession appears AFTER the OBO v2 relevance-filter early return", () => {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const path = require("node:path") as typeof import("node:path");
+    const src = fs.readFileSync(
+      path.join(__dirname, "inbound.ts"),
+      "utf8",
+    );
+
+    const lines = src.split("\n");
+    // First `if (isOBOv2)` block in the inbound function gates the early
+    // return that R10 introduces.
+    let firstIsObovBlockLine = -1;
+    let firstReturnAfterIsObov = -1;
+    let recordInboundSessionLine = -1;
+    let finalizeInboundContextLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (firstIsObovBlockLine < 0 && /^\s*if\s*\(\s*isOBOv2\s*\)/.test(line)) {
+        firstIsObovBlockLine = i;
+      }
+      if (
+        firstIsObovBlockLine >= 0 &&
+        firstReturnAfterIsObov < 0 &&
+        /^\s*return;\s*$/.test(line) &&
+        i > firstIsObovBlockLine
+      ) {
+        firstReturnAfterIsObov = i;
+      }
+      if (
+        finalizeInboundContextLine < 0 &&
+        /finalizeInboundContext\(/.test(line)
+      ) {
+        finalizeInboundContextLine = i;
+      }
+      if (
+        recordInboundSessionLine < 0 &&
+        /recordInboundSession\(/.test(line)
+      ) {
+        recordInboundSessionLine = i;
+      }
+    }
+
+    expect(firstIsObovBlockLine).toBeGreaterThan(0);
+    expect(firstReturnAfterIsObov).toBeGreaterThan(firstIsObovBlockLine);
+    expect(finalizeInboundContextLine).toBeGreaterThan(firstReturnAfterIsObov);
+    expect(recordInboundSessionLine).toBeGreaterThan(finalizeInboundContextLine);
+  });
+});
