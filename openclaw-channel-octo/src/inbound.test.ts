@@ -2162,3 +2162,195 @@ describe("OBO v2 effective identity authority (PR#61 R5)", () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * Tests for OBO v2 relevance filter + ignoreMentionAll (PR#61 R8 / lml2468 R2).
+ *
+ * The OBO v2 path at inbound.ts:~L1653 decides whether a fan-out payload from
+ * the configured grantor is "relevant" to the persona clone. Broadcast-style
+ * mentions (`mention.humans=1`, `mention.all=1`) must respect the account's
+ * `ignoreMentionAll` flag, mirroring the group-path semantics at
+ * inbound.ts:1223 / 1230. Explicit grantor UID mentions are NOT broadcasts —
+ * they target the grantor identity directly and remain relevant regardless
+ * of `ignoreMentionAll`.
+ */
+describe("OBO v2 relevance filter + ignoreMentionAll (PR#61 R8)", () => {
+  type MentionPayload = {
+    ais?: boolean | number;
+    humans?: boolean | number;
+    all?: boolean | number;
+    uids?: string[];
+  };
+  type Opts = {
+    grantorUid: string;
+    ignoreMentionAll?: boolean;
+  };
+
+  // Mirrors the OBO v2 relevance filter at inbound.ts (post-fix).
+  function isRelevantToPersona(
+    mention: MentionPayload | undefined,
+    opts: Opts,
+  ): boolean {
+    const origAis = mention?.ais === true || mention?.ais === 1;
+    const origHumans = mention?.humans === true || mention?.humans === 1;
+    const origAll = mention?.all === true || mention?.all === 1;
+    const origUids: string[] = Array.isArray(mention?.uids) ? mention!.uids! : [];
+    const grantorInUids =
+      typeof opts.grantorUid === "string" &&
+      opts.grantorUid.length > 0 &&
+      origUids.includes(opts.grantorUid);
+    const ignoreBroadcast = opts.ignoreMentionAll === true;
+    const broadcastRelevant = !ignoreBroadcast && (origHumans || origAll);
+    const noMentionFallback =
+      !origAis && !origHumans && !origAll && origUids.length === 0;
+    return broadcastRelevant || grantorInUids || noMentionFallback;
+  }
+
+  // Baseline: defaults (no ignoreMentionAll) still work as before.
+  it("mention.humans=1 + ignoreMentionAll unset → relevant (broadcast through)", () => {
+    expect(
+      isRelevantToPersona({ humans: 1 }, { grantorUid: "admin" }),
+    ).toBe(true);
+  });
+
+  it("mention.all=1 + ignoreMentionAll unset → relevant (legacy broadcast)", () => {
+    expect(
+      isRelevantToPersona({ all: 1 }, { grantorUid: "admin" }),
+    ).toBe(true);
+  });
+
+  // Core fix: broadcasts are gated by ignoreMentionAll.
+  it("mention.humans=1 + ignoreMentionAll=true → NOT relevant (no typing/text/media)", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.humans=true + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: true },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.all=1 + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { all: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.all=true + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { all: true },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("both humans+all set + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: 1, all: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  // Explicit grantor mention bypasses the broadcast gate.
+  it("explicit grantor uid mention + ignoreMentionAll=true → still relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { uids: ["admin"] },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  it("explicit grantor uid mention + humans=1 + ignoreMentionAll=true → relevant (uid wins)", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: 1, uids: ["admin"] },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  // @AI-only (mention.ais=1) without humans/all/grantor mention is never
+  // relevant to the persona clone — independent of ignoreMentionAll.
+  it("mention.ais=1 only + ignoreMentionAll=true → NOT relevant (@AI not for persona)", () => {
+    expect(
+      isRelevantToPersona(
+        { ais: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.ais=1 + humans=1 + ignoreMentionAll=true → NOT relevant (broadcast gated, ais alone is not for persona)", () => {
+    expect(
+      isRelevantToPersona(
+        { ais: 1, humans: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.ais=1 + grantor uid + ignoreMentionAll=true → relevant (explicit grantor uid wins)", () => {
+    expect(
+      isRelevantToPersona(
+        { ais: 1, uids: ["admin"] },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  // No mentions at all (plain group message) — still relevant. Mirrors the
+  // existing pre-fix behavior for the no-mention fallback.
+  it("no mention payload + ignoreMentionAll=true → relevant (no-mention fallback)", () => {
+    expect(
+      isRelevantToPersona(
+        undefined,
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  it("empty mention object + ignoreMentionAll=true → relevant (no-mention fallback)", () => {
+    expect(
+      isRelevantToPersona(
+        {},
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  // Symmetry check with the group-path semantics tests above (~L172-185).
+  it("group-path parity: ignoreMentionAll=true suppresses humans broadcast for persona clone", () => {
+    // Group path: shouldRespond({ humans: 1 }, { onBehalfOf, ignoreMentionAll: true }) === false
+    // OBO v2 path: must reach the same conclusion.
+    expect(
+      isRelevantToPersona(
+        { humans: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("group-path parity: ignoreMentionAll=true suppresses all broadcast for persona clone", () => {
+    expect(
+      isRelevantToPersona(
+        { all: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+});

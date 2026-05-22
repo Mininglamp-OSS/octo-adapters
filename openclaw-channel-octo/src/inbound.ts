@@ -1650,16 +1650,36 @@ export async function handleInboundMessage(params: {
   // OBO v2 relevance filter: when the fan-out message is @AI-only (mention.ais=1
   // but no grantor mention, no @所有人), the persona clone should NOT respond.
   // @AI targets AI bots directly, not humans or their persona clones.
+  //
+  // Mirrors the group-path semantics (see ~L1223/L1230): when
+  // `account.config.ignoreMentionAll=true`, broadcast-style mentions
+  // (`mention.humans=1`, `mention.all=1`) must NOT be treated as relevant for
+  // the persona clone. Explicit grantor UID mentions remain relevant
+  // regardless of `ignoreMentionAll`, because they target the grantor
+  // identity directly rather than the broadcast group.
   if (isOBOv2) {
     const origMention = message.payload?.mention;
     const origAis = origMention?.ais === true || origMention?.ais === 1;
     const origHumans = origMention?.humans === true || origMention?.humans === 1;
     const origAll = origMention?.all === true || origMention?.all === 1;
     const origUids: string[] = Array.isArray(origMention?.uids) ? origMention.uids : [];
-    const grantorInUids = typeof oboV2RespondAs === "string" && origUids.includes(oboV2RespondAs);
-    const isRelevantToPersona = origHumans || origAll || grantorInUids || (!origAis && origUids.length === 0);
+    // Use the trusted configured grantor (account.config.onBehalfOf) for the
+    // explicit-mention relevance check, mirroring the group path. This is
+    // also what `effectiveOnBehalfOf` resolves to below; `oboV2RespondAs`
+    // from the payload is for diagnostic logging only.
+    const grantorInUids = typeof grantorUid === "string" && grantorUid.length > 0
+      && origUids.includes(grantorUid);
+    const ignoreBroadcast = account.config.ignoreMentionAll === true;
+    const broadcastRelevant = (!ignoreBroadcast) && (origHumans || origAll);
+    // No-mention fallback: when the payload carries no mention information at
+    // all (no ais, no humans, no all, no uids), treat the message as relevant
+    // (plain group/DM chatter the persona should see). Tightened to exclude
+    // broadcasts so that an `ignoreMentionAll`-gated humans/all does not
+    // re-enable relevance via this fallback.
+    const noMentionFallback = !origAis && !origHumans && !origAll && origUids.length === 0;
+    const isRelevantToPersona = broadcastRelevant || grantorInUids || noMentionFallback;
     if (!isRelevantToPersona) {
-      log?.info?.(`octo: OBO v2 skipped — message not relevant to persona (ais=${origAis} humans=${origHumans} all=${origAll} grantorInUids=${grantorInUids})`);
+      log?.info?.(`octo: OBO v2 skipped — message not relevant to persona (ais=${origAis} humans=${origHumans} all=${origAll} grantorInUids=${grantorInUids} ignoreMentionAll=${ignoreBroadcast})`);
       return;
     }
   }
