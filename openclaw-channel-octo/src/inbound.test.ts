@@ -74,6 +74,157 @@ describe("mention.all detection", () => {
 });
 
 /**
+ * Tests for mention.humans + persona clone (onBehalfOf) gating.
+ *
+ * Plan X: mention.humans=1 means @所有人 (human-only notification).
+ * Regular bots should NOT respond. Persona clone bots (onBehalfOf configured)
+ * SHOULD respond because they act on behalf of a human who is part of @所有人.
+ */
+describe("mention.humans + persona clone gating", () => {
+  function isMentionHumans(mention?: MentionPayload): boolean {
+    const raw = mention?.humans;
+    return raw === true || raw === 1;
+  }
+
+  function shouldRespond(mention: MentionPayload | undefined, opts: { onBehalfOf?: string; ignoreMentionAll?: boolean }): boolean {
+    const mentionAllRaw = mention?.all;
+    const mentionAll = mentionAllRaw === true || mentionAllRaw === 1;
+    const mentionAisRaw = mention?.ais;
+    const mentionAis = mentionAisRaw === true || mentionAisRaw === 1;
+    const mentionHumans = isMentionHumans(mention);
+    const isPersonaClone = Boolean(opts.onBehalfOf);
+    // Mirrors the production gating in src/inbound.ts (group path, PR#61 R9):
+    // when ignoreMentionAll=true and the payload carries broadcast flags
+    // (all=1 or humans=1), the whole payload is treated as broadcast and
+    // suppressed — even if `ais=1` is also set. Pure `{ais:1}` still bypasses.
+    const isBroadcast = mentionAll || mentionHumans;
+    const suppressedByIgnore = opts.ignoreMentionAll === true && isBroadcast;
+    return !suppressedByIgnore && (mentionAll || mentionAis || (mentionHumans && isPersonaClone));
+  }
+
+  // Helper to determine reply identity: returns "grantor" or "self"
+  function replyIdentity(mention: MentionPayload | undefined, opts: { onBehalfOf?: string; ignoreMentionAll?: boolean; botUidMentioned?: boolean }): "grantor" | "self" {
+    const mentionAllRaw = mention?.all;
+    const mentionAll = mentionAllRaw === true || mentionAllRaw === 1;
+    const mentionHumans = isMentionHumans(mention);
+    const isPersonaClone = Boolean(opts.onBehalfOf);
+    const isExplicitBotMention = Boolean(opts.botUidMentioned);
+    const isHumanBroadcast = (!opts.ignoreMentionAll && mentionHumans) || (!opts.ignoreMentionAll && mentionAll);
+    const triggered = isHumanBroadcast && isPersonaClone && !isExplicitBotMention;
+    return triggered ? "grantor" : "self";
+  }
+
+  it("persona clone bot should respond to mention.humans=1", () => {
+    expect(shouldRespond({ humans: 1 }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  it("persona clone bot should respond to mention.humans=true", () => {
+    expect(shouldRespond({ humans: true }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  it("regular bot should NOT respond to mention.humans=1", () => {
+    expect(shouldRespond({ humans: 1 }, {})).toBe(false);
+  });
+
+  it("regular bot should NOT respond to mention.humans=true", () => {
+    expect(shouldRespond({ humans: true }, {})).toBe(false);
+  });
+
+  it("persona clone bot should still respond to mention.ais=1", () => {
+    expect(shouldRespond({ ais: 1 }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  it("regular bot should respond to mention.ais=1", () => {
+    expect(shouldRespond({ ais: 1 }, {})).toBe(true);
+  });
+
+  it("mention.humans=0 should NOT trigger persona clone", () => {
+    expect(shouldRespond({ humans: 0 }, { onBehalfOf: "admin" })).toBe(false);
+  });
+
+  it("mention.humans=1 + ais=1 should trigger both types", () => {
+    expect(shouldRespond({ humans: 1, ais: 1 }, { onBehalfOf: "admin" })).toBe(true);
+    expect(shouldRespond({ humans: 1, ais: 1 }, {})).toBe(true); // ais=1 triggers regular bot
+  });
+
+  it("legacy all=1 should trigger persona clone (via mentionAll path)", () => {
+    expect(shouldRespond({ all: 1 }, { onBehalfOf: "admin" })).toBe(true);
+  });
+
+  // Identity tests
+  it("@所有人 (humans=1) → persona clone replies as grantor", () => {
+    expect(replyIdentity({ humans: 1 }, { onBehalfOf: "admin" })).toBe("grantor");
+  });
+
+  it("legacy @所有人 (all=1, server rewrite to {all:1,ais:1}) → persona clone replies as grantor", () => {
+    expect(replyIdentity({ all: 1, ais: 1 }, { onBehalfOf: "admin" })).toBe("grantor");
+  });
+
+  it("@所有AI (ais=1 only) → persona clone replies as self", () => {
+    expect(replyIdentity({ ais: 1 }, { onBehalfOf: "admin" })).toBe("self");
+  });
+
+  it("direct @james mention → persona clone replies as self", () => {
+    expect(replyIdentity({ humans: 1 }, { onBehalfOf: "admin", botUidMentioned: true })).toBe("self");
+  });
+
+  it("regular bot always replies as self regardless of mention type", () => {
+    expect(replyIdentity({ humans: 1 }, {})).toBe("self");
+    expect(replyIdentity({ all: 1 }, {})).toBe("self");
+    expect(replyIdentity({ ais: 1 }, {})).toBe("self");
+  });
+
+  // ignoreMentionAll gating — covers mention.humans (Plan X) in addition to mention.all
+  it("persona clone + ignoreMentionAll=true + mention.humans=1 → NOT mentioned", () => {
+    expect(shouldRespond({ humans: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.humans=true → NOT mentioned", () => {
+    expect(shouldRespond({ humans: true }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.humans=1 → reply identity stays self (no human broadcast)", () => {
+    expect(replyIdentity({ humans: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe("self");
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.all=1 → reply identity stays self", () => {
+    expect(replyIdentity({ all: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe("self");
+  });
+
+  it("persona clone + ignoreMentionAll=true + mention.ais=1 → still mentioned (ais bypasses gate)", () => {
+    expect(shouldRespond({ ais: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(true);
+  });
+
+  // PR#61 R9 / YUJ-1662: legacy @everyone payload `{all:1, ais:1}` must NOT
+  // bypass ignoreMentionAll via the `ais` flag. Mixed broadcast+AI payloads
+  // are treated as broadcast and suppressed when ignoreMentionAll=true.
+  it("R9: regular bot + ignoreMentionAll=true + {all:1, ais:1} → NOT mentioned (broadcast suppresses ais)", () => {
+    expect(shouldRespond({ all: 1, ais: 1 }, { ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: persona clone + ignoreMentionAll=true + {all:1, ais:1} → NOT mentioned", () => {
+    expect(shouldRespond({ all: 1, ais: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: regular bot + ignoreMentionAll=true + {humans:1, ais:1} → NOT mentioned (broadcast suppresses ais)", () => {
+    expect(shouldRespond({ humans: 1, ais: 1 }, { ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: persona clone + ignoreMentionAll=true + {humans:1, ais:1} → NOT mentioned", () => {
+    expect(shouldRespond({ humans: 1, ais: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: regular bot + ignoreMentionAll=true + pure {ais:1} → SHOULD respond (AI-only is not broadcast)", () => {
+    expect(shouldRespond({ ais: 1 }, { ignoreMentionAll: true })).toBe(true);
+  });
+
+  it("R9: ignoreMentionAll=false + {all:1, ais:1} → mentioned (no suppression when flag off)", () => {
+    expect(shouldRespond({ all: 1, ais: 1 }, {})).toBe(true);
+    expect(shouldRespond({ all: 1, ais: 1 }, { onBehalfOf: "admin" })).toBe(true);
+  });
+});
+
+/**
  * Tests for historyPromptTemplate configuration.
  *
  * The template supports placeholders:
@@ -1839,5 +1990,655 @@ describe("inbound message_seq cutoff tracking", () => {
     // If a stale message somehow gets processed, cutoff stays at 300
     recordCutoff(map, sessionId, 150, true);
     expect(map.get(sessionId)).toBe(300);
+  });
+});
+
+/**
+ * Tests for OBO v2 sender identity validation (GH#63).
+ *
+ * Mirrors the isOBOv2 detection logic in inbound.ts. Only payloads sent by
+ * the configured grantor (account.config.onBehalfOf) should be honored;
+ * arbitrary senders inserting obo_origin_channel_id / obo_respond_as fields
+ * must be ignored, otherwise they could trick the persona clone into
+ * replying in another channel as the grantor.
+ */
+describe("OBO v2 sender identity validation (GH#63)", () => {
+  type OboPayload = {
+    obo_origin_channel_id?: unknown;
+    obo_origin_channel_type?: unknown;
+    obo_respond_as?: unknown;
+    obo_grantor_uid?: unknown;
+  };
+  type FakeMessage = { from_uid: string; payload?: OboPayload };
+  type FakeAccount = { config: { onBehalfOf?: string } };
+  type WarnSink = { warn: (msg: string) => void };
+
+  // Mirrors the validation block at inbound.ts:1624-1642
+  function detectOBOv2(
+    message: FakeMessage,
+    account: FakeAccount,
+    log?: WarnSink,
+  ): boolean {
+    const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+    const oboV2RespondAs =
+      message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+    const grantorUid = account.config.onBehalfOf;
+    const isOBOv2 = Boolean(
+      typeof oboV2OriginChannel === "string" &&
+        (oboV2OriginChannel as string).length > 0 &&
+        typeof oboV2RespondAs === "string" &&
+        (oboV2RespondAs as string).length > 0 &&
+        grantorUid &&
+        message.from_uid === grantorUid,
+    );
+    if (
+      !isOBOv2 &&
+      typeof oboV2OriginChannel === "string" &&
+      (oboV2OriginChannel as string).length > 0
+    ) {
+      log?.warn(
+        `octo: OBO v2 payload rejected — from_uid=${message.from_uid} is not configured grantor ${grantorUid ?? "(none)"}`,
+      );
+    }
+    return isOBOv2;
+  }
+
+  it("OBO v2 from configured grantor → isOBOv2=true, no warn", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_origin_channel_type: ChannelType.Group,
+          obo_respond_as: "admin",
+        },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("OBO v2 from non-grantor sender → isOBOv2=false, warn logged", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "mallory",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_origin_channel_type: ChannelType.Group,
+          obo_respond_as: "admin",
+        },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("OBO v2 payload rejected");
+    expect(warn.mock.calls[0][0]).toContain("from_uid=mallory");
+    expect(warn.mock.calls[0][0]).toContain("admin");
+  });
+
+  it("OBO v2 with no onBehalfOf configured → OBO v2 disabled, warn logged", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_origin_channel_type: ChannelType.Group,
+          obo_respond_as: "admin",
+        },
+      },
+      { config: {} },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("(none)");
+  });
+
+  it("no OBO payload → isOBOv2=false, no warn (nothing to reject)", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      { from_uid: "alice", payload: {} },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("OBO v2 with obo_grantor_uid fallback from grantor → isOBOv2=true", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: {
+          obo_origin_channel_id: "group_xyz",
+          obo_grantor_uid: "admin",
+        },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(true);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("OBO v2 missing obo_respond_as / obo_grantor_uid → isOBOv2=false, warn logged", () => {
+    const warn = vi.fn();
+    const ok = detectOBOv2(
+      {
+        from_uid: "admin",
+        payload: { obo_origin_channel_id: "group_xyz" },
+      },
+      { config: { onBehalfOf: "admin" } },
+      { warn },
+    );
+    expect(ok).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Tests for OBO v2 effective identity authority (PR#61 R5).
+ *
+ * In the isOBOv2 branch of inbound.ts (~L1685), `effectiveOnBehalfOf` is the
+ * identity we use as `on_behalf_of` for replies/typing. It MUST come from the
+ * trusted `account.config.onBehalfOf`, not from the payload field
+ * `obo_respond_as` (which is attacker-controllable in transit). When the two
+ * disagree, we keep the configured grantor and emit a warn for visibility.
+ */
+describe("OBO v2 effective identity authority (PR#61 R5)", () => {
+  type WarnSink = { warn: (msg: string) => void; info?: (msg: string) => void };
+
+  // Mirrors the assignment at inbound.ts:1685 (post-fix).
+  function resolveEffectiveOnBehalfOf(
+    oboV2RespondAs: string | undefined,
+    configuredGrantor: string,
+    log?: WarnSink,
+  ): string {
+    const effective = configuredGrantor; // trusted source
+    if (oboV2RespondAs !== effective) {
+      log?.warn(
+        `octo: OBO v2 payload respondAs=${oboV2RespondAs} differs from configured grantor=${effective} — using configured grantor`,
+      );
+    }
+    return effective;
+  }
+
+  it("payload respondAs matches configured grantor → no warn, uses configured", () => {
+    const warn = vi.fn();
+    const eff = resolveEffectiveOnBehalfOf("admin", "admin", { warn });
+    expect(eff).toBe("admin");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("payload respondAs differs from configured grantor → warn, uses configured", () => {
+    const warn = vi.fn();
+    const eff = resolveEffectiveOnBehalfOf("evil-spoofed-uid", "admin", { warn });
+    // Authority is configured grantor, never the payload value.
+    expect(eff).toBe("admin");
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("payload respondAs=evil-spoofed-uid");
+    expect(warn.mock.calls[0][0]).toContain("configured grantor=admin");
+    expect(warn.mock.calls[0][0]).toContain("using configured grantor");
+  });
+
+  it("payload respondAs missing → warn, still uses configured grantor", () => {
+    const warn = vi.fn();
+    const eff = resolveEffectiveOnBehalfOf(undefined, "admin", { warn });
+    expect(eff).toBe("admin");
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Tests for OBO v2 relevance filter + ignoreMentionAll (PR#61 R8 / lml2468 R2).
+ *
+ * The OBO v2 path at inbound.ts:~L1653 decides whether a fan-out payload from
+ * the configured grantor is "relevant" to the persona clone. Broadcast-style
+ * mentions (`mention.humans=1`, `mention.all=1`) must respect the account's
+ * `ignoreMentionAll` flag, mirroring the group-path semantics at
+ * inbound.ts:1223 / 1230. Explicit grantor UID mentions are NOT broadcasts —
+ * they target the grantor identity directly and remain relevant regardless
+ * of `ignoreMentionAll`.
+ */
+describe("OBO v2 relevance filter + ignoreMentionAll (PR#61 R8)", () => {
+  type MentionPayload = {
+    ais?: boolean | number;
+    humans?: boolean | number;
+    all?: boolean | number;
+    uids?: string[];
+  };
+  type Opts = {
+    grantorUid: string;
+    ignoreMentionAll?: boolean;
+  };
+
+  // Mirrors the OBO v2 relevance filter at inbound.ts (post-fix).
+  function isRelevantToPersona(
+    mention: MentionPayload | undefined,
+    opts: Opts,
+  ): boolean {
+    const origAis = mention?.ais === true || mention?.ais === 1;
+    const origHumans = mention?.humans === true || mention?.humans === 1;
+    const origAll = mention?.all === true || mention?.all === 1;
+    const origUids: string[] = Array.isArray(mention?.uids) ? mention!.uids! : [];
+    const grantorInUids =
+      typeof opts.grantorUid === "string" &&
+      opts.grantorUid.length > 0 &&
+      origUids.includes(opts.grantorUid);
+    const ignoreBroadcast = opts.ignoreMentionAll === true;
+    const broadcastRelevant = !ignoreBroadcast && (origHumans || origAll);
+    const noMentionFallback =
+      !origAis && !origHumans && !origAll && origUids.length === 0;
+    return broadcastRelevant || grantorInUids || noMentionFallback;
+  }
+
+  // Baseline: defaults (no ignoreMentionAll) still work as before.
+  it("mention.humans=1 + ignoreMentionAll unset → relevant (broadcast through)", () => {
+    expect(
+      isRelevantToPersona({ humans: 1 }, { grantorUid: "admin" }),
+    ).toBe(true);
+  });
+
+  it("mention.all=1 + ignoreMentionAll unset → relevant (legacy broadcast)", () => {
+    expect(
+      isRelevantToPersona({ all: 1 }, { grantorUid: "admin" }),
+    ).toBe(true);
+  });
+
+  // Core fix: broadcasts are gated by ignoreMentionAll.
+  it("mention.humans=1 + ignoreMentionAll=true → NOT relevant (no typing/text/media)", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.humans=true + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: true },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.all=1 + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { all: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.all=true + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { all: true },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("both humans+all set + ignoreMentionAll=true → NOT relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: 1, all: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  // Explicit grantor mention bypasses the broadcast gate.
+  it("explicit grantor uid mention + ignoreMentionAll=true → still relevant", () => {
+    expect(
+      isRelevantToPersona(
+        { uids: ["admin"] },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  it("explicit grantor uid mention + humans=1 + ignoreMentionAll=true → relevant (uid wins)", () => {
+    expect(
+      isRelevantToPersona(
+        { humans: 1, uids: ["admin"] },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  // @AI-only (mention.ais=1) without humans/all/grantor mention is never
+  // relevant to the persona clone — independent of ignoreMentionAll.
+  it("mention.ais=1 only + ignoreMentionAll=true → NOT relevant (@AI not for persona)", () => {
+    expect(
+      isRelevantToPersona(
+        { ais: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.ais=1 + humans=1 + ignoreMentionAll=true → NOT relevant (broadcast gated, ais alone is not for persona)", () => {
+    expect(
+      isRelevantToPersona(
+        { ais: 1, humans: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("mention.ais=1 + grantor uid + ignoreMentionAll=true → relevant (explicit grantor uid wins)", () => {
+    expect(
+      isRelevantToPersona(
+        { ais: 1, uids: ["admin"] },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  // No mentions at all (plain group message) — still relevant. Mirrors the
+  // existing pre-fix behavior for the no-mention fallback.
+  it("no mention payload + ignoreMentionAll=true → relevant (no-mention fallback)", () => {
+    expect(
+      isRelevantToPersona(
+        undefined,
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  it("empty mention object + ignoreMentionAll=true → relevant (no-mention fallback)", () => {
+    expect(
+      isRelevantToPersona(
+        {},
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(true);
+  });
+
+  // Symmetry check with the group-path semantics tests above (~L172-185).
+  it("group-path parity: ignoreMentionAll=true suppresses humans broadcast for persona clone", () => {
+    // Group path: shouldRespond({ humans: 1 }, { onBehalfOf, ignoreMentionAll: true }) === false
+    // OBO v2 path: must reach the same conclusion.
+    expect(
+      isRelevantToPersona(
+        { humans: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+
+  it("group-path parity: ignoreMentionAll=true suppresses all broadcast for persona clone", () => {
+    expect(
+      isRelevantToPersona(
+        { all: 1 },
+        { grantorUid: "admin", ignoreMentionAll: true },
+      ),
+    ).toBe(false);
+  });
+});
+
+/**
+ * Tests for OBO v2 detection + relevance filter ordering (PR#61 R10).
+ *
+ * Jerry-Xin + lml2468 R10 found: at d46efad8, `recordInboundSession` was
+ * fired BEFORE the OBO v2 relevance filter, so irrelevant OBO v2 fan-out
+ * messages (e.g. AI-only) were already persisted to the bot's DM session
+ * with the grantor — including any `obo_system_hint` from the payload as
+ * GroupSystemPrompt. This violated the group-path early-return contract
+ * (~inbound.ts:1300), where non-mention group messages return BEFORE
+ * finalizeInboundContext / recordInboundSession.
+ *
+ * The fix moves the `isOBOv2` computation and the relevance filter
+ * BEFORE finalizeInboundContext / recordInboundSession in inbound.ts.
+ * These tests guard against regressing the ordering.
+ */
+describe("OBO v2 detection + filter ordering vs recordInboundSession (PR#61 R10)", () => {
+  type ObovPayload = {
+    obo_origin_channel_id?: string;
+    obo_origin_channel_type?: number;
+    obo_respond_as?: string;
+    obo_grantor_uid?: string;
+    obo_system_hint?: string;
+    mention?: {
+      ais?: boolean | number;
+      humans?: boolean | number;
+      all?: boolean | number;
+      uids?: string[];
+    };
+  };
+  type Account = { onBehalfOf?: string; ignoreMentionAll?: boolean };
+  type Message = { from_uid: string; payload?: ObovPayload };
+
+  type Sinks = {
+    recordInboundSession: ReturnType<typeof vi.fn>;
+    finalizeInboundContext: ReturnType<typeof vi.fn>;
+  };
+
+  /**
+   * Mirrors the post-fix control flow at inbound.ts (~L1582-L1700):
+   * 1) compute `isOBOv2` BEFORE finalizeInboundContext
+   * 2) run the relevance filter BEFORE finalizeInboundContext
+   * 3) early-return WITHOUT recordInboundSession for irrelevant OBO v2
+   * 4) only then call finalizeInboundContext + recordInboundSession
+   */
+  function simulateInbound(
+    message: Message,
+    account: Account,
+    sinks: Sinks,
+  ): { dispatched: boolean; rejected: boolean; skipped: boolean } {
+    const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+    const oboV2RespondAs =
+      message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+    const grantorUid = account.onBehalfOf;
+    const isOBOv2 = Boolean(
+      typeof oboV2OriginChannel === "string" &&
+      oboV2OriginChannel.length > 0 &&
+      typeof oboV2RespondAs === "string" &&
+      oboV2RespondAs.length > 0 &&
+      grantorUid &&
+      message.from_uid === grantorUid,
+    );
+
+    let rejected = false;
+    if (
+      !isOBOv2 &&
+      typeof oboV2OriginChannel === "string" &&
+      oboV2OriginChannel.length > 0
+    ) {
+      rejected = true;
+    }
+
+    if (isOBOv2) {
+      const m = message.payload?.mention;
+      const ais = m?.ais === true || m?.ais === 1;
+      const humans = m?.humans === true || m?.humans === 1;
+      const all = m?.all === true || m?.all === 1;
+      const uids: string[] = Array.isArray(m?.uids) ? m!.uids! : [];
+      const grantorInUids =
+        typeof grantorUid === "string" &&
+        grantorUid.length > 0 &&
+        uids.includes(grantorUid);
+      const ignoreBroadcast = account.ignoreMentionAll === true;
+      const broadcastRelevant = !ignoreBroadcast && (humans || all);
+      const noMentionFallback =
+        !ais && !humans && !all && uids.length === 0;
+      const relevant = broadcastRelevant || grantorInUids || noMentionFallback;
+      if (!relevant) {
+        // Early return BEFORE finalizeInboundContext / recordInboundSession.
+        return { dispatched: false, rejected, skipped: true };
+      }
+    }
+
+    // Only relevant messages reach the persistence path.
+    sinks.finalizeInboundContext({
+      // OBO v2 payloads injected obo_system_hint as GroupSystemPrompt before
+      // the fix; with the fix this code path is only reached when relevant.
+      GroupSystemPrompt:
+        isOBOv2 && typeof message.payload?.obo_system_hint === "string"
+          ? message.payload.obo_system_hint
+          : undefined,
+    });
+    sinks.recordInboundSession();
+    return { dispatched: true, rejected, skipped: false };
+  }
+
+  const grantorUid = "admin";
+  const otherUid = "alice";
+  const baseAccount: Account = { onBehalfOf: grantorUid, ignoreMentionAll: true };
+
+  function makeSinks(): Sinks {
+    return {
+      recordInboundSession: vi.fn(),
+      finalizeInboundContext: vi.fn(),
+    };
+  }
+
+  it("irrelevant OBO v2 (mention.ais=1, ignoreMentionAll=true) → recordInboundSession is NOT called", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: grantorUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "You are admin's persona clone.",
+        mention: { ais: 1 },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    expect(result.skipped).toBe(true);
+    expect(result.dispatched).toBe(false);
+    // Critical regression guard: no session record, no system-hint persistence.
+    expect(sinks.recordInboundSession).not.toHaveBeenCalled();
+    expect(sinks.finalizeInboundContext).not.toHaveBeenCalled();
+  });
+
+  it("irrelevant OBO v2 (mention.humans=1 + ignoreMentionAll=true broadcast suppressed) → recordInboundSession is NOT called", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: grantorUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "You are admin's persona clone.",
+        mention: { humans: 1, ais: 1 },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    expect(result.skipped).toBe(true);
+    expect(sinks.recordInboundSession).not.toHaveBeenCalled();
+    expect(sinks.finalizeInboundContext).not.toHaveBeenCalled();
+  });
+
+  it("relevant OBO v2 (explicit grantor uid mention) → recordInboundSession IS called and GroupSystemPrompt is persisted", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: grantorUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "You are admin's persona clone.",
+        mention: { ais: 1, uids: [grantorUid] },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    expect(result.skipped).toBe(false);
+    expect(result.dispatched).toBe(true);
+    expect(sinks.finalizeInboundContext).toHaveBeenCalledTimes(1);
+    expect(sinks.recordInboundSession).toHaveBeenCalledTimes(1);
+    const ctx = sinks.finalizeInboundContext.mock.calls[0][0];
+    expect(ctx.GroupSystemPrompt).toBe("You are admin's persona clone.");
+  });
+
+  it("non-OBO v2 (forged obo fields from non-grantor sender) → recordInboundSession IS called as plain DM (warn logged), no GroupSystemPrompt", () => {
+    const sinks = makeSinks();
+    const message: Message = {
+      from_uid: otherUid,
+      payload: {
+        obo_origin_channel_id: "g_origin",
+        obo_origin_channel_type: ChannelType.Group,
+        obo_respond_as: grantorUid,
+        obo_system_hint: "trying to inject system prompt",
+        mention: { ais: 1 },
+      },
+    };
+    const result = simulateInbound(message, baseAccount, sinks);
+    // Non-grantor sender → not OBO v2 → relevance filter does not apply, so
+    // it goes to recordInboundSession as a normal DM. But the obo_system_hint
+    // must NOT leak as GroupSystemPrompt (sender is not the grantor).
+    expect(result.rejected).toBe(true);
+    expect(result.dispatched).toBe(true);
+    expect(sinks.recordInboundSession).toHaveBeenCalledTimes(1);
+    const ctx = sinks.finalizeInboundContext.mock.calls[0][0];
+    expect(ctx.GroupSystemPrompt).toBeUndefined();
+  });
+
+  /**
+   * Source-ordering regression guard: read inbound.ts and verify that the
+   * `recordInboundSession` call is AFTER the OBO v2 relevance-filter early
+   * return. This is the structural invariant R10 enforces — if a future
+   * patch reorders the calls back to the buggy d46efad8 layout, this test
+   * fails immediately.
+   */
+  it("source-order invariant: recordInboundSession appears AFTER the OBO v2 relevance-filter early return", () => {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const path = require("node:path") as typeof import("node:path");
+    const src = fs.readFileSync(
+      path.join(__dirname, "inbound.ts"),
+      "utf8",
+    );
+
+    const lines = src.split("\n");
+    // First `if (isOBOv2)` block in the inbound function gates the early
+    // return that R10 introduces.
+    let firstIsObovBlockLine = -1;
+    let firstReturnAfterIsObov = -1;
+    let recordInboundSessionLine = -1;
+    let finalizeInboundContextLine = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (firstIsObovBlockLine < 0 && /^\s*if\s*\(\s*isOBOv2\s*\)/.test(line)) {
+        firstIsObovBlockLine = i;
+      }
+      if (
+        firstIsObovBlockLine >= 0 &&
+        firstReturnAfterIsObov < 0 &&
+        /^\s*return;\s*$/.test(line) &&
+        i > firstIsObovBlockLine
+      ) {
+        firstReturnAfterIsObov = i;
+      }
+      if (
+        finalizeInboundContextLine < 0 &&
+        /finalizeInboundContext\(/.test(line)
+      ) {
+        finalizeInboundContextLine = i;
+      }
+      if (
+        recordInboundSessionLine < 0 &&
+        /recordInboundSession\(/.test(line)
+      ) {
+        recordInboundSessionLine = i;
+      }
+    }
+
+    expect(firstIsObovBlockLine).toBeGreaterThan(0);
+    expect(firstReturnAfterIsObov).toBeGreaterThan(firstIsObovBlockLine);
+    expect(finalizeInboundContextLine).toBeGreaterThan(firstReturnAfterIsObov);
+    expect(recordInboundSessionLine).toBeGreaterThan(finalizeInboundContextLine);
   });
 });

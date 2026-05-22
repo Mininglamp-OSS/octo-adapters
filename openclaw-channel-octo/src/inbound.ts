@@ -66,9 +66,10 @@ export async function uploadAndSendMedia(params: {
   botToken: string;
   channelId: string;
   channelType: ChannelType;
+  onBehalfOf?: string;
   log?: ChannelLogSink;
 }): Promise<SendMessageResult | undefined> {
-  const { mediaUrl, apiUrl, botToken, channelId, channelType, log } = params;
+  const { mediaUrl, apiUrl, botToken, channelId, channelType, onBehalfOf, log } = params;
 
   const { createReadStream: fsCreateReadStream, statSync: fsStatSync, createWriteStream: fsCreateWriteStream } = await import("node:fs");
   const { basename, join: pathJoin } = await import("node:path");
@@ -173,6 +174,7 @@ export async function uploadAndSendMedia(params: {
       size: fileSize,
       width,
       height,
+      ...(onBehalfOf ? { onBehalfOf } : {}),
     });
     return result;
   } finally {
@@ -1200,12 +1202,51 @@ export async function handleInboundMessage(params: {
   // Compute mention flags — separate "reply gating" from "command gating"
   let isMentioned = false;
   let isExplicitBotMention = false;
+  let triggeredByMentionHumans = false;
   if (isGroup) {
     const mentionUids = extractMentionUids(message.payload?.mention);
     const mentionAllRaw = message.payload?.mention?.all;
     const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionUids.includes(botUid);
+    // mention.ais=1 means @AI / @所有AI — bots should respond
+    const mentionAisRaw = message.payload?.mention?.ais;
+    const mentionAis: boolean = mentionAisRaw === true || mentionAisRaw === 1;
+    // mention.humans=1 means @所有人 (Plan X) — only persona-clone bots respond,
+    // because they act on behalf of a human who IS part of @所有人.
+    // Regular bots without onBehalfOf stay silent.
+    const mentionHumansRaw = message.payload?.mention?.humans;
+    const mentionHumans: boolean = mentionHumansRaw === true || mentionHumansRaw === 1;
+    const isPersonaClone = Boolean(account.config.onBehalfOf);
+    const grantorUid = account.config.onBehalfOf;
+    // Persona clone: when the GRANTOR is @mentioned, treat it as a mention
+    // for the bot too (the bot acts on the grantor's behalf).
+    const grantorMentioned: boolean = !!(isPersonaClone && grantorUid && mentionUids.includes(grantorUid));
+    // Broadcast suppression (PR#61 R9 / YUJ-1662):
+    // When `ignoreMentionAll=true`, a legacy `@everyone` payload arrives as `{all:1, ais:1}`
+    // (server rewrites @所有人 to include ais=1 so AIs are also covered). Treating that as a
+    // pure AI mention would let `mentionAis` bypass `ignoreMentionAll`, which is wrong:
+    // the user's intent is "no broadcast → bot stays silent". So when broadcast flags
+    // (`all` or `humans`) are present, the whole payload is treated as broadcast and
+    // suppressed by `ignoreMentionAll`. Pure `{ais:1}` (no `all`, no `humans`) is still
+    // a deliberate AI-only mention and continues to trigger the bot.
+    // Explicit bot UID and grantor mention always work regardless of `ignoreMentionAll`.
+    const isBroadcast = mentionAll || mentionHumans;
+    const suppressedByIgnore = account.config.ignoreMentionAll && isBroadcast;
+    isMentioned = (!suppressedByIgnore && (mentionAll || mentionAis || (mentionHumans && isPersonaClone)))
+      || mentionUids.includes(botUid)
+      || grantorMentioned;
     isExplicitBotMention = mentionUids.includes(botUid);
+    // Track whether the bot was triggered as the grantor's proxy.
+    // When true, persona clone replies as the grantor (admin), not as itself.
+    // Covers: @admin (grantor uid mentioned), @所有人 (mention.humans=1),
+    // legacy @所有人 (mention.all=1). @所有AI (ais=1 only) and direct @james
+    // mentions should still respond as the bot itself.
+    const isHumanBroadcast = (!account.config.ignoreMentionAll && mentionHumans) || (!account.config.ignoreMentionAll && mentionAll);
+    triggeredByMentionHumans = !!(isHumanBroadcast || grantorMentioned) && isPersonaClone && !isExplicitBotMention;
+
+    // Debug: log mention flags for troubleshooting persona clone routing
+    if (isPersonaClone) {
+      log?.debug?.(`octo: [MENTION-DEBUG] mentionAll=${mentionAll} mentionAis=${mentionAis} mentionHumans=${mentionHumans} isExplicitBot=${isExplicitBotMention} isHumanBroadcast=${isHumanBroadcast} triggeredAsGrantor=${triggeredByMentionHumans} isMentioned=${isMentioned}`);
+    }
 
     // Defensive fallback: if payload.mention is missing/empty but the message
     // text contains @botName, treat it as a mention.  This covers old senders
@@ -1538,6 +1579,77 @@ export async function handleInboundMessage(params: {
   const commandBody = resolveCommandBody(rawBody, isGroup, isExplicitBotMention);
   const commandAuthorized = resolveCommandAuthorized(isGroup, isOwner(account.accountId, message.from_uid), isExplicitBotMention);
 
+  // OBO v2 detection + relevance filter (R10): Must run BEFORE
+  // finalizeInboundContext / recordInboundSession so that irrelevant
+  // OBO v2 messages (e.g. AI-only fan-out) do not leak any state —
+  // including `obo_system_hint` as GroupSystemPrompt — into the bot's
+  // DM session with the grantor. Mirrors the group-path early-return at
+  // ~L1300 (non-mention group messages return before session is recorded).
+  const oboV2OriginChannel = message.payload?.obo_origin_channel_id;
+  const oboV2OriginChannelType = message.payload?.obo_origin_channel_type;
+  const oboV2RespondAs = message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid;
+  const grantorUid = account.config.onBehalfOf;
+  const isOBOv2 = Boolean(
+    typeof oboV2OriginChannel === "string" &&
+    oboV2OriginChannel.length > 0 &&
+    typeof oboV2RespondAs === "string" &&
+    oboV2RespondAs.length > 0 &&
+    // Security: only trust OBO v2 fields when the message is sent by the
+    // configured grantor. Without this, any user able to put obo_* fields in
+    // their payload could trick the bot into replying in another channel as
+    // somebody else's persona.
+    grantorUid && message.from_uid === grantorUid
+  );
+
+  if (!isOBOv2 && typeof oboV2OriginChannel === "string" && oboV2OriginChannel.length > 0) {
+    log?.warn?.(`octo: OBO v2 payload rejected — from_uid=${message.from_uid} is not configured grantor ${grantorUid ?? "(none)"}`);
+  }
+
+  // OBO v2 relevance filter: when the fan-out message is @AI-only (mention.ais=1
+  // but no grantor mention, no @所有人), the persona clone should NOT respond.
+  // @AI targets AI bots directly, not humans or their persona clones.
+  //
+  // Mirrors the group-path semantics (see ~L1223/L1230): when
+  // `account.config.ignoreMentionAll=true`, broadcast-style mentions
+  // (`mention.humans=1`, `mention.all=1`) must NOT be treated as relevant for
+  // the persona clone. Explicit grantor UID mentions remain relevant
+  // regardless of `ignoreMentionAll`, because they target the grantor
+  // identity directly rather than the broadcast group.
+  //
+  // CRITICAL (R10): this filter MUST run before finalizeInboundContext /
+  // recordInboundSession — otherwise an irrelevant OBO v2 message would
+  // already have been persisted to the bot's DM session with the grantor,
+  // including any `obo_system_hint` as GroupSystemPrompt.
+  if (isOBOv2) {
+    const origMention = message.payload?.mention;
+    const origAis = origMention?.ais === true || origMention?.ais === 1;
+    const origHumans = origMention?.humans === true || origMention?.humans === 1;
+    const origAll = origMention?.all === true || origMention?.all === 1;
+    const origUids: string[] = Array.isArray(origMention?.uids) ? origMention.uids : [];
+    // Use the trusted configured grantor (account.config.onBehalfOf) for the
+    // explicit-mention relevance check, mirroring the group path. This is
+    // also what `effectiveOnBehalfOf` resolves to below; `oboV2RespondAs`
+    // from the payload is for diagnostic logging only.
+    const grantorInUids = typeof grantorUid === "string" && grantorUid.length > 0
+      && origUids.includes(grantorUid);
+    const ignoreBroadcast = account.config.ignoreMentionAll === true;
+    const broadcastRelevant = (!ignoreBroadcast) && (origHumans || origAll);
+    // No-mention fallback: when the payload carries no mention information at
+    // all (no ais, no humans, no all, no uids), treat the message as relevant
+    // (plain group/DM chatter the persona should see). Tightened to exclude
+    // broadcasts so that an `ignoreMentionAll`-gated humans/all does not
+    // re-enable relevance via this fallback.
+    const noMentionFallback = !origAis && !origHumans && !origAll && origUids.length === 0;
+    const isRelevantToPersona = broadcastRelevant || grantorInUids || noMentionFallback;
+    if (!isRelevantToPersona) {
+      log?.info?.(`octo: OBO v2 skipped — message not relevant to persona (ais=${origAis} humans=${origHumans} all=${origAll} grantorInUids=${grantorInUids} ignoreMentionAll=${ignoreBroadcast})`);
+      // Mirror group-path early-return: do NOT call finalizeInboundContext /
+      // recordInboundSession, so no DM session record (and no GroupSystemPrompt)
+      // is persisted for irrelevant OBO v2 fan-out messages.
+      return;
+    }
+  }
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
     BodyForAgent: body,
@@ -1565,7 +1677,19 @@ export async function handleInboundMessage(params: {
     MessageSid: String(message.message_id),
     Timestamp: message.timestamp ? message.timestamp * 1000 : undefined,
     GroupSubject: isGroup ? message.channel_id : undefined,
-    GroupSystemPrompt: undefined,
+    // OBO v2: inject obo_system_hint as GroupSystemPrompt ONLY when the message
+    // carries a valid OBO v2 envelope (obo_origin_channel_id + obo_respond_as)
+    // AND the sender is the configured grantor (onBehalfOf). Without the sender
+    // gate, a forged message from any uid could inject arbitrary system-level
+    // instructions into the LLM — the downstream OBO routing would be rejected,
+    // but the system prompt would already be in the session context.
+    GroupSystemPrompt: (
+      typeof message.payload?.obo_system_hint === "string" && message.payload.obo_system_hint.length > 0 &&
+      typeof message.payload?.obo_origin_channel_id === "string" && message.payload.obo_origin_channel_id.length > 0 &&
+      typeof (message.payload?.obo_respond_as ?? message.payload?.obo_grantor_uid) === "string" &&
+      // Security: only trust system hint from the configured grantor
+      Boolean(account.config.onBehalfOf) && message.from_uid === account.config.onBehalfOf
+    ) ? message.payload.obo_system_hint : undefined,
     Provider: CHANNEL_ID,
     Surface: CHANNEL_ID,
     OriginatingChannel: CHANNEL_ID,
@@ -1583,25 +1707,82 @@ export async function handleInboundMessage(params: {
 
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
 
-  const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
-  const replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
+  // OBO v2: when the payload carries `obo_origin_channel_id`, the reply should
+  // go to the origin GROUP channel (not the DM), with `on_behalf_of` set to
+  // `obo_respond_as` (the grantor). This way the bot replies in the group as
+  // the grantor, not in DM.
+  //
+  // Detection (`isOBOv2`) and the relevance filter that gates an early-return
+  // have already run BEFORE finalizeInboundContext / recordInboundSession
+  // (see R10 fix above) so that irrelevant OBO v2 fan-out messages do not
+  // leak `obo_system_hint` (as GroupSystemPrompt) into the bot's DM session.
+  // The reply-routing variables below (`replyChannelId`, `replyChannelType`,
+  // `effectiveOnBehalfOf`) are derived here using the previously-computed
+  // `isOBOv2`, `oboV2OriginChannel`, `oboV2OriginChannelType`, and
+  // `oboV2RespondAs`.
 
-  // 已读回执 + 正在输入 — fire-and-forget
-  log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${account.config.apiUrl}`);
-  const messageIds = message.message_id ? [message.message_id] : [];
-  sendReadReceipt({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType, messageIds })
-    .then(() => log?.info?.("octo: readReceipt sent OK"))
-    .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
-  sendTyping({ apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", channelId: replyChannelId, channelType: replyChannelType })
-    .then(() => log?.info?.("octo: typing sent OK"))
-    .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  let replyChannelId: string;
+  let replyChannelType: ChannelType;
+  let effectiveOnBehalfOf: string | undefined;
+
+  if (isOBOv2) {
+    const oboV2OriginFromUid = message.payload?.obo_origin_from_uid;
+    const resolvedChannelType = (typeof oboV2OriginChannelType === "number" ? oboV2OriginChannelType : ChannelType.Group) as ChannelType;
+    if (resolvedChannelType === ChannelType.DM) {
+      // DM: bot is only friends with the grantor, not the original sender.
+      // Reply to the original sender (bob) using on_behalf_of=grantor (admin).
+      // The channel is the original sender's uid — the server routes
+      // admin→bob DM via on_behalf_of, which bypasses the bot-friend gate.
+      replyChannelId = (typeof oboV2OriginFromUid === "string" && oboV2OriginFromUid.length > 0)
+        ? oboV2OriginFromUid
+        : oboV2OriginChannel as string;
+    } else {
+      // Group/Thread: reply to the origin group
+      replyChannelId = oboV2OriginChannel as string;
+    }
+    replyChannelType = resolvedChannelType;
+    // Security: always use the trusted account.config.onBehalfOf as the
+    // authoritative grantor identity. `oboV2RespondAs` comes from the payload
+    // and must not be trusted as the reply identity — it is kept only for
+    // logging/debug visibility. (`isOBOv2` above already guarantees
+    // account.config.onBehalfOf is non-empty.)
+    effectiveOnBehalfOf = account.config.onBehalfOf!;
+    if (oboV2RespondAs !== effectiveOnBehalfOf) {
+      log?.warn?.(`octo: OBO v2 payload respondAs=${oboV2RespondAs} differs from configured grantor=${effectiveOnBehalfOf} — using configured grantor`);
+    }
+    log?.info?.(`octo: OBO v2 detected — reply target=${replyChannelId} type=${replyChannelType} respondAs=${effectiveOnBehalfOf} payloadRespondAs=${oboV2RespondAs} originFrom=${oboV2OriginFromUid}`);
+  } else {
+    replyChannelId = isGroup ? message.channel_id! : message.from_uid;
+    replyChannelType = isGroup ? (message.channel_type ?? ChannelType.Group) : ChannelType.DM;
+    // Persona clone: only reply as grantor when triggered by @所有人 (mention.humans=1).
+    // When the bot is directly mentioned (@James, @AI), respond as itself.
+    effectiveOnBehalfOf = (isGroup && triggeredByMentionHumans && account.config.onBehalfOf) ? account.config.onBehalfOf : undefined;
+  }
 
   const apiUrl = account.config.apiUrl;
   const botToken = account.config.botToken ?? "";
 
+  // 已读回执 + 正在输入 — fire-and-forget
+  if (isOBOv2) {
+    // v2: send typing to origin group with grantor identity (skip readReceipt)
+    log?.info?.(`octo: OBO v2 — sending typing to origin group=${replyChannelId} as=${effectiveOnBehalfOf}`);
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, onBehalfOf: effectiveOnBehalfOf })
+      .then(() => log?.info?.("octo: OBO v2 typing sent OK"))
+      .catch((err) => log?.error?.(`octo: OBO v2 typing failed: ${String(err)}`));
+  } else {
+    log?.info?.(`octo: sending readReceipt+typing to channel=${replyChannelId} type=${replyChannelType} apiUrl=${apiUrl}`);
+    const messageIds = message.message_id ? [message.message_id] : [];
+    sendReadReceipt({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, messageIds })
+      .then(() => log?.info?.("octo: readReceipt sent OK"))
+      .catch((err) => log?.error?.(`octo: readReceipt failed: ${String(err)}`));
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) })
+      .then(() => log?.info?.(`octo: typing sent OK${effectiveOnBehalfOf ? ` (as ${effectiveOnBehalfOf})` : ""}`))
+      .catch((err) => log?.error?.(`octo: typing failed: ${String(err)}`));
+  }
+
   // Keep sending typing indicator while AI is processing
   const typingInterval = setInterval(() => {
-    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
+    sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType, ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}) }).catch(() => {});
   }, 5000);
 
   // Buffer text across streaming deliver calls; only send once after dispatcher finishes.
@@ -1720,6 +1901,7 @@ export async function handleInboundMessage(params: {
       ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
       ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
       mentionAll: hasAtAll || undefined,
+      ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
     });
     statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
     return result;
@@ -1756,6 +1938,7 @@ export async function handleInboundMessage(params: {
                 botToken: account.config.botToken ?? "",
                 channelId: replyChannelId,
                 channelType: replyChannelType,
+                ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
                 log,
               });
               sentMediaUrls.add(mediaUrl);
@@ -1798,6 +1981,7 @@ export async function handleInboundMessage(params: {
               channelId: replyChannelId,
               channelType: replyChannelType,
               content: "⚠️ 抱歉，处理您的消息时遇到了问题，请稍后重试。",
+              ...(effectiveOnBehalfOf ? { onBehalfOf: effectiveOnBehalfOf } : {}),
             });
           } catch (sendErr) {
             log?.error?.(`octo: failed to send error message: ${String(sendErr)}`);
@@ -1806,6 +1990,9 @@ export async function handleInboundMessage(params: {
       },
     });
   } finally {
+    // --- Debug: log dispatch outcome ---
+    log?.debug?.(`octo: [dispatch-result] replySucceeded=${replySucceeded} bufferedText=${deliverBuffer.lastText?.length ?? 0} textSent=${deliverBuffer.textSent} effectiveOBO=${effectiveOnBehalfOf ?? 'none'}`);
+
     // --- Final send: deliver buffered text if only blocks arrived (no final/tool) ---
     if (deliverBuffer.lastText && !deliverBuffer.textSent) {
       deliverBuffer.textSent = true;
