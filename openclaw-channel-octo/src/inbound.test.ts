@@ -93,7 +93,13 @@ describe("mention.humans + persona clone gating", () => {
     const mentionAis = mentionAisRaw === true || mentionAisRaw === 1;
     const mentionHumans = isMentionHumans(mention);
     const isPersonaClone = Boolean(opts.onBehalfOf);
-    return (!opts.ignoreMentionAll && mentionAll) || mentionAis || (mentionHumans && isPersonaClone && !opts.ignoreMentionAll);
+    // Mirrors the production gating in src/inbound.ts (group path, PR#61 R9):
+    // when ignoreMentionAll=true and the payload carries broadcast flags
+    // (all=1 or humans=1), the whole payload is treated as broadcast and
+    // suppressed — even if `ais=1` is also set. Pure `{ais:1}` still bypasses.
+    const isBroadcast = mentionAll || mentionHumans;
+    const suppressedByIgnore = opts.ignoreMentionAll === true && isBroadcast;
+    return !suppressedByIgnore && (mentionAll || mentionAis || (mentionHumans && isPersonaClone));
   }
 
   // Helper to determine reply identity: returns "grantor" or "self"
@@ -187,6 +193,34 @@ describe("mention.humans + persona clone gating", () => {
 
   it("persona clone + ignoreMentionAll=true + mention.ais=1 → still mentioned (ais bypasses gate)", () => {
     expect(shouldRespond({ ais: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(true);
+  });
+
+  // PR#61 R9 / YUJ-1662: legacy @everyone payload `{all:1, ais:1}` must NOT
+  // bypass ignoreMentionAll via the `ais` flag. Mixed broadcast+AI payloads
+  // are treated as broadcast and suppressed when ignoreMentionAll=true.
+  it("R9: regular bot + ignoreMentionAll=true + {all:1, ais:1} → NOT mentioned (broadcast suppresses ais)", () => {
+    expect(shouldRespond({ all: 1, ais: 1 }, { ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: persona clone + ignoreMentionAll=true + {all:1, ais:1} → NOT mentioned", () => {
+    expect(shouldRespond({ all: 1, ais: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: regular bot + ignoreMentionAll=true + {humans:1, ais:1} → NOT mentioned (broadcast suppresses ais)", () => {
+    expect(shouldRespond({ humans: 1, ais: 1 }, { ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: persona clone + ignoreMentionAll=true + {humans:1, ais:1} → NOT mentioned", () => {
+    expect(shouldRespond({ humans: 1, ais: 1 }, { onBehalfOf: "admin", ignoreMentionAll: true })).toBe(false);
+  });
+
+  it("R9: regular bot + ignoreMentionAll=true + pure {ais:1} → SHOULD respond (AI-only is not broadcast)", () => {
+    expect(shouldRespond({ ais: 1 }, { ignoreMentionAll: true })).toBe(true);
+  });
+
+  it("R9: ignoreMentionAll=false + {all:1, ais:1} → mentioned (no suppression when flag off)", () => {
+    expect(shouldRespond({ all: 1, ais: 1 }, {})).toBe(true);
+    expect(shouldRespond({ all: 1, ais: 1 }, { onBehalfOf: "admin" })).toBe(true);
   });
 });
 

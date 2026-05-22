@@ -1220,7 +1220,20 @@ export async function handleInboundMessage(params: {
     // Persona clone: when the GRANTOR is @mentioned, treat it as a mention
     // for the bot too (the bot acts on the grantor's behalf).
     const grantorMentioned: boolean = !!(isPersonaClone && grantorUid && mentionUids.includes(grantorUid));
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionAis || mentionUids.includes(botUid) || (mentionHumans && isPersonaClone && !account.config.ignoreMentionAll) || grantorMentioned;
+    // Broadcast suppression (PR#61 R9 / YUJ-1662):
+    // When `ignoreMentionAll=true`, a legacy `@everyone` payload arrives as `{all:1, ais:1}`
+    // (server rewrites @所有人 to include ais=1 so AIs are also covered). Treating that as a
+    // pure AI mention would let `mentionAis` bypass `ignoreMentionAll`, which is wrong:
+    // the user's intent is "no broadcast → bot stays silent". So when broadcast flags
+    // (`all` or `humans`) are present, the whole payload is treated as broadcast and
+    // suppressed by `ignoreMentionAll`. Pure `{ais:1}` (no `all`, no `humans`) is still
+    // a deliberate AI-only mention and continues to trigger the bot.
+    // Explicit bot UID and grantor mention always work regardless of `ignoreMentionAll`.
+    const isBroadcast = mentionAll || mentionHumans;
+    const suppressedByIgnore = account.config.ignoreMentionAll && isBroadcast;
+    isMentioned = (!suppressedByIgnore && (mentionAll || mentionAis || (mentionHumans && isPersonaClone)))
+      || mentionUids.includes(botUid)
+      || grantorMentioned;
     isExplicitBotMention = mentionUids.includes(botUid);
     // Track whether the bot was triggered as the grantor's proxy.
     // When true, persona clone replies as the grantor (admin), not as itself.
