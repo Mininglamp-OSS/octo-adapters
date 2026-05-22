@@ -29,6 +29,42 @@ import { randomUUID } from "node:crypto";
 // handleInboundMessage writes here; the hook reads and clears per sessionKey.
 export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
 
+// Per-(account, session) registry. The before_prompt_build hook receives
+// ctx.sessionKey but not ctx.accountId, so we record on every inbound message
+// (right next to pendingInboundContext.set) the fact that some accountId has
+// been seen on a given sessionKey. Persona-prompt injection (GH
+// octo-adapters#68) depends on this — without it, getPersonaPromptForSession
+// can never be called with the correct accountId from the hook.
+//
+// 🔴 Multi-account isolation (PR#69 R3, Jerry-Xin):
+// The map is keyed by the COMPOSITE `${accountId}:${sessionKey}`, NOT by
+// `sessionKey` alone. Two distinct bot accounts (e.g. a persona clone and a
+// regular bot, or two persona clones) running on the same OpenClaw node can
+// legitimately share the same `sessionKey` — OpenClaw routes per-account but
+// the resulting session keys can collide. Keying only by `sessionKey` means
+// the second account's inbound `.set` overwrites the first, and the hook
+// then attaches the wrong account's persona prompt — a cross-account
+// identity leak.
+//
+// With the composite key, both accounts get separate entries and the hook
+// resolves persona identity by iterating the registered persona accounts
+// and checking `sessionAccountMap.has(buildSessionAccountKey(candidate, ctx.sessionKey))`.
+// If exactly one persona account matches we use it; on 0 or >1 matches we
+// fail safe to "no persona injection" rather than risk attaching the wrong
+// identity.
+//
+// Lifetime: entries are kept (not deleted) so the hook works on every prompt
+// build for the session, not just the first one after an inbound message.
+// Sessions are bounded by accounts, so the map size is bounded by
+// (active accounts × active session keys per account) — no unbounded growth
+// in practice.
+export const sessionAccountMap = new Map<string, string>();
+
+/** Build the composite key used to record `(accountId, sessionKey)` pairs. */
+export function buildSessionAccountKey(accountId: string, sessionKey: string): string {
+  return `${accountId}:${sessionKey}`;
+}
+
 export type DmworkStatusSink = (patch: {
   lastInboundAt?: number;
   lastOutboundAt?: number;
@@ -1564,6 +1600,13 @@ export async function handleInboundMessage(params: {
   if (historyPrefix || memberListPrefix) {
     pendingInboundContext.set(route.sessionKey, { historyPrefix, memberListPrefix });
   }
+
+  // Record (accountId, sessionKey) so the before_prompt_build hook can
+  // resolve persona identity from ctx.sessionKey (hook ctx does not expose
+  // accountId). The composite key is required for multi-account isolation —
+  // see the doc comment on sessionAccountMap above.
+  // Required by persona-prompt injection (GH octo-adapters#68).
+  sessionAccountMap.set(buildSessionAccountKey(account.accountId, route.sessionKey), account.accountId);
 
   const finalBody = quotePrefix ? (quotePrefix + rawBody) : rawBody;
 

@@ -12,7 +12,8 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { dmworkPlugin } from "./src/channel.js";
 import { setDmworkRuntime } from "./src/runtime.js";
 import { getGroupMdForPrompt } from "./src/group-md.js";
-import { pendingInboundContext } from "./src/inbound.js";
+import { pendingInboundContext, sessionAccountMap, buildSessionAccountKey } from "./src/inbound.js";
+import { resolvePersonaHintForSession } from "./src/persona-prompt.js";
 import {
   inProcessConfigReader,
   runDoctorChecks,
@@ -269,12 +270,19 @@ const plugin: {
 
     console.log('[octo] registering before_prompt_build hook');
     api.on('before_prompt_build', (_event, ctx) => {
-      const sections: string[] = [];
+      // Sections destined for the user-prompt context block (group MD,
+      // member list, inbound history). These belong to the conversation
+      // surface, not the LLM's system identity.
+      const contextSections: string[] = [];
+      // Sections destined for the LLM system prompt (persona identity).
+      // System-level identity instructions must NOT live in the user-prompt
+      // prefix or the model can treat them as quotable content.
+      const systemSections: string[] = [];
 
       // 1. Group/Thread MD — wrapped in [GROUP CONTEXT] block
       const groupMdContent = getGroupMdForPrompt(ctx);
       if (groupMdContent) {
-        sections.push(`[GROUP CONTEXT]\n${groupMdContent}\n[/GROUP CONTEXT]`);
+        contextSections.push(`[GROUP CONTEXT]\n${groupMdContent}\n[/GROUP CONTEXT]`);
       }
 
       // 2. Inbound context (member list + history) — outside [GROUP CONTEXT], keeps original format
@@ -283,13 +291,46 @@ const plugin: {
         const pending = pendingInboundContext.get(sessionKey);
         if (pending) {
           pendingInboundContext.delete(sessionKey);
-          if (pending.memberListPrefix) sections.push(pending.memberListPrefix);
-          if (pending.historyPrefix) sections.push(pending.historyPrefix);
+          if (pending.memberListPrefix) contextSections.push(pending.memberListPrefix);
+          if (pending.historyPrefix) contextSections.push(pending.historyPrefix);
         }
       }
 
-      if (sections.length === 0) return;
-      return { prependContext: sections.join('\n\n') };
+      // 3. Persona prompt (GH octo-adapters#68) — for persona-clone bots
+      // (account.config.onBehalfOf set), pull the active persona_prompt
+      // from the per-account cache and prepend it to the SYSTEM prompt.
+      // The cache is hydrated by initPersonaPromptCache() in channel.ts;
+      // when this bot is not a persona clone, the lookup returns undefined
+      // and we skip.
+      //
+      // The hook ctx does not expose accountId, so we cannot key the
+      // persona cache by sessionKey alone — two persona-clone bots
+      // running on the same node can legitimately share a sessionKey
+      // (OpenClaw routes per-account but session keys can collide).
+      // Keying sessionAccountMap only by sessionKey lets a later inbound
+      // overwrite an earlier one and the hook then attaches the WRONG
+      // account's persona prompt — a cross-account identity leak called
+      // out in PR#69 R3 (Jerry-Xin).
+      //
+      // Fix: sessionAccountMap is composite-keyed by
+      // `${accountId}:${sessionKey}` (see inbound.ts). The resolver
+      // iterates every registered persona account and asks
+      // sessionAccountMap whether it has been seen on this sessionKey.
+      // On 0 / >1 matches we fail safe to "no persona injection".
+      const personaHint = sessionKey
+        ? resolvePersonaHintForSession({
+            sessionKey,
+            hasAccountSession: (accountId, sk) =>
+              sessionAccountMap.has(buildSessionAccountKey(accountId, sk)),
+          })
+        : undefined;
+      if (personaHint) systemSections.push(personaHint);
+
+      if (contextSections.length === 0 && systemSections.length === 0) return;
+      return {
+        ...(contextSections.length > 0 ? { prependContext: contextSections.join('\n\n') } : {}),
+        ...(systemSections.length > 0 ? { prependSystemContext: systemSections.join('\n\n') } : {}),
+      };
     });
   },
 };
