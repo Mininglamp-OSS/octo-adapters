@@ -17,6 +17,7 @@ import {
   resolveCommandBody,
   resolveCommandAuthorized,
   pendingInboundContext,
+  sessionAccountMap,
   segmentHistoryEntries,
   type ResolveFileResult,
 } from "./inbound.js";
@@ -1309,6 +1310,36 @@ describe("pendingInboundContext", () => {
     pendingInboundContext.set(key, { historyPrefix: "new", memberListPrefix: "ml" });
     expect(pendingInboundContext.get(key)?.historyPrefix).toBe("new");
     expect(pendingInboundContext.get(key)?.memberListPrefix).toBe("ml");
+  });
+});
+
+describe("sessionAccountMap", () => {
+  beforeEach(() => {
+    sessionAccountMap.clear();
+  });
+
+  it("should store and retrieve accountId by sessionKey", () => {
+    const key = "octo:group:abc";
+    sessionAccountMap.set(key, "bot_account_1");
+    expect(sessionAccountMap.get(key)).toBe("bot_account_1");
+  });
+
+  it("should keep separate entries for different sessionKeys", () => {
+    sessionAccountMap.set("k1", "acct_a");
+    sessionAccountMap.set("k2", "acct_b");
+    expect(sessionAccountMap.get("k1")).toBe("acct_a");
+    expect(sessionAccountMap.get("k2")).toBe("acct_b");
+  });
+
+  it("should overwrite on repeated set for same sessionKey", () => {
+    const key = "octo:dm:reroute";
+    sessionAccountMap.set(key, "acct_old");
+    sessionAccountMap.set(key, "acct_new");
+    expect(sessionAccountMap.get(key)).toBe("acct_new");
+  });
+
+  it("returns undefined for unknown sessionKey", () => {
+    expect(sessionAccountMap.get("nope")).toBeUndefined();
   });
 });
 

@@ -55,6 +55,27 @@ const _cache = new Map<string, PersonaCacheEntry>();
 const _timers = new Map<string, NodeJS.Timeout>();
 /** Track which accounts have already logged their first successful fetch. */
 const _firstFetchLogged = new Set<string>();
+/**
+ * Per-account generation counter. Bumped on every init/stop so that any
+ * in-flight refresh fetch can detect that it has been superseded and bail
+ * out before writing stale data into _cache.
+ *
+ * Without this guard, an account stop/reconfigure that races with an
+ * in-flight `getBotOboGrant` call would let the old fetch resolve later
+ * and overwrite the cleared cache (or replace the next account's fresh
+ * hint). See PR#69 review.
+ */
+const _generation = new Map<string, number>();
+
+function _bumpGeneration(accountId: string): number {
+  const next = (_generation.get(accountId) ?? 0) + 1;
+  _generation.set(accountId, next);
+  return next;
+}
+
+function _currentGeneration(accountId: string): number {
+  return _generation.get(accountId) ?? 0;
+}
 
 /**
  * Override the refresh interval (ms). Intended for tests; production
@@ -101,12 +122,22 @@ export function composePersonaHint(grant: BotOboGrant): string | undefined {
  * Fetch the latest grant once and update the cache. Failures are
  * swallowed (logged) so a transient server hiccup never blocks
  * message processing — the next tick will retry.
+ *
+ * Each call captures the current generation token for the account.
+ * If `stopPersonaPromptCache` or `initPersonaPromptCache` runs while
+ * the fetch is in flight (bumping the generation), the post-fetch
+ * branches bail out instead of writing the now-stale grant into the
+ * cache. This prevents stop → in-flight resolve → cache resurrected
+ * races, and also covers reconfigure (old account token still fetches,
+ * resolves late, would otherwise overwrite the freshly-initialised
+ * cache entry with stale data).
  */
 export async function refreshPersonaPromptCache(
   account: PersonaAccountInput,
   log?: ChannelLogSink,
 ): Promise<void> {
   if (!account.onBehalfOf) return;
+  const myGeneration = _currentGeneration(account.accountId);
   let grant: BotOboGrant | null;
   try {
     grant = await getBotOboGrant({
@@ -114,11 +145,19 @@ export async function refreshPersonaPromptCache(
       botToken: account.botToken,
     });
   } catch (err) {
+    // Even logging on a superseded fetch is noise — but skipping it
+    // could mask real failures. Keep the warn but suppress cache writes.
+    if (_currentGeneration(account.accountId) !== myGeneration) return;
     log?.warn?.(
       `octo: persona_prompt fetch failed for ${account.accountId}: ${err instanceof Error ? err.message : String(err)}`,
     );
     return;
   }
+
+  // Drop this result if the account was stopped or reconfigured while
+  // the fetch was outstanding. Without this check, a stale grant could
+  // overwrite the cleared cache or the next init's fresh entry.
+  if (_currentGeneration(account.accountId) !== myGeneration) return;
 
   const hint = grant ? composePersonaHint(grant) : undefined;
   const prev = _cache.get(account.accountId);
@@ -163,6 +202,11 @@ export function initPersonaPromptCache(
   const existing = _timers.get(account.accountId);
   if (existing) clearInterval(existing);
 
+  // Bump generation so any fetch from a previous init/start-cycle that
+  // is still in flight will see a generation mismatch when it resolves
+  // and bail out before mutating _cache.
+  _bumpGeneration(account.accountId);
+
   // Fire-and-forget initial fetch. We deliberately don't await
   // because account start should not block on persona init.
   void refreshPersonaPromptCache(account, log);
@@ -180,6 +224,9 @@ export function initPersonaPromptCache(
  * Called when the account is shut down or reconfigured.
  */
 export function stopPersonaPromptCache(accountId: string): void {
+  // Bump generation BEFORE clearing state so any fetch that resolves
+  // after this point sees the mismatch and skips its cache write.
+  _bumpGeneration(accountId);
   const timer = _timers.get(accountId);
   if (timer) clearInterval(timer);
   _timers.delete(accountId);
@@ -211,5 +258,6 @@ export function _resetPersonaPromptCacheForTests(): void {
   _timers.clear();
   _cache.clear();
   _firstFetchLogged.clear();
+  _generation.clear();
   _refreshIntervalMs = DEFAULT_REFRESH_INTERVAL_MS;
 }

@@ -289,3 +289,117 @@ describe("initPersonaPromptCache (timer behavior)", () => {
     stopPersonaPromptCache("bot_repeat");
   });
 });
+
+describe("generation guard (abort in-flight fetches)", () => {
+  beforeEach(() => {
+    setPersonaPromptRefreshIntervalMs(60_000);
+  });
+
+  it("drops a stale in-flight fetch when stopPersonaPromptCache runs first", async () => {
+    // Hold the fetch open until we trigger its resolution.
+    let resolveFetch!: (v: unknown) => void;
+    const pending = new Promise((res) => {
+      resolveFetch = res;
+    });
+    global.fetch = vi.fn().mockImplementation(() => pending) as unknown as typeof fetch;
+
+    const account = {
+      accountId: "bot_race",
+      apiUrl: "http://api",
+      botToken: "bf_x",
+      onBehalfOf: "u_admin",
+    };
+
+    const inflight = refreshPersonaPromptCache(account);
+
+    // Simulate "account stopped while fetch is in flight"
+    stopPersonaPromptCache("bot_race");
+
+    // Now let the original fetch resolve with a non-empty grant.
+    resolveFetch({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        has_grant: true,
+        grantor_uid: "u_admin",
+        grantor_name: "Admin",
+        persona_prompt: "stale",
+        active: true,
+      }),
+      text: async () => "",
+    });
+
+    await inflight;
+
+    // The stale fetch must NOT resurrect the cleared cache.
+    expect(getPersonaPromptForSession("bot_race")).toBeUndefined();
+  });
+
+  it("drops a stale in-flight fetch when initPersonaPromptCache runs first (reconfigure)", async () => {
+    // First fetch hangs forever (until we resolve it).
+    let resolveFirst!: (v: unknown) => void;
+    const firstPending = new Promise((res) => {
+      resolveFirst = res;
+    });
+    // Second fetch resolves immediately with a fresh grant.
+    const secondResponse = {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        has_grant: true,
+        grantor_uid: "u_admin",
+        grantor_name: "Admin",
+        persona_prompt: "fresh",
+        active: true,
+      }),
+      text: async () => "",
+    };
+
+    const fetchSpy = vi
+      .fn()
+      .mockImplementationOnce(() => firstPending)
+      .mockResolvedValue(secondResponse);
+    global.fetch = fetchSpy as unknown as typeof fetch;
+
+    const account = {
+      accountId: "bot_reconf",
+      apiUrl: "http://api",
+      botToken: "bf_x",
+      onBehalfOf: "u_admin",
+    };
+
+    // Kick off the first in-flight fetch via the explicit refresh API
+    // (initPersonaPromptCache's timer would otherwise complicate the test).
+    const stale = refreshPersonaPromptCache(account);
+
+    // Simulate reconfigure: bump generation, immediate fetch with new grant.
+    initPersonaPromptCache(account);
+    // Wait for the fresh fetch to populate the cache.
+    await vi.waitFor(() => {
+      expect(getPersonaPromptForSession("bot_reconf")).toContain("fresh");
+    });
+
+    // Now the original fetch resolves with a different (stale) grant.
+    resolveFirst({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        has_grant: true,
+        grantor_uid: "u_admin",
+        grantor_name: "Admin",
+        persona_prompt: "stale",
+        active: true,
+      }),
+      text: async () => "",
+    });
+    await stale;
+
+    // Fresh entry must survive — stale fetch was superseded.
+    expect(getPersonaPromptForSession("bot_reconf")).toContain("fresh");
+
+    stopPersonaPromptCache("bot_reconf");
+  });
+});

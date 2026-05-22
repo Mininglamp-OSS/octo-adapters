@@ -29,6 +29,19 @@ import { randomUUID } from "node:crypto";
 // handleInboundMessage writes here; the hook reads and clears per sessionKey.
 export const pendingInboundContext = new Map<string, { historyPrefix: string; memberListPrefix: string }>();
 
+// Per-session accountId map. The before_prompt_build hook receives ctx.sessionKey
+// but not ctx.accountId, so we record the binding here on every inbound message
+// (right next to pendingInboundContext.set) and the hook resolves accountId by
+// looking up sessionKey. Persona-prompt injection (GH octo-adapters#68) depends
+// on this mapping — without it, getPersonaPromptForSession can never be called
+// with the correct accountId from the hook.
+//
+// Lifetime: entries are kept (not deleted) so the hook works on every prompt
+// build for the session, not just the first one after an inbound message.
+// Sessions are bounded by accounts, so the map size is bounded by the active
+// session count per account — no unbounded growth in practice.
+export const sessionAccountMap = new Map<string, string>();
+
 export type DmworkStatusSink = (patch: {
   lastInboundAt?: number;
   lastOutboundAt?: number;
@@ -1564,6 +1577,11 @@ export async function handleInboundMessage(params: {
   if (historyPrefix || memberListPrefix) {
     pendingInboundContext.set(route.sessionKey, { historyPrefix, memberListPrefix });
   }
+
+  // Record sessionKey → accountId so the before_prompt_build hook can resolve
+  // accountId from ctx.sessionKey (hook ctx does not expose accountId).
+  // Required by persona-prompt injection (GH octo-adapters#68).
+  sessionAccountMap.set(route.sessionKey, account.accountId);
 
   const finalBody = quotePrefix ? (quotePrefix + rawBody) : rawBody;
 
