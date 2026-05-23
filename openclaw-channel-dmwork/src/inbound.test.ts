@@ -22,53 +22,78 @@ import { extractMentionUids } from "./mention-utils.js";
 import { existsSync, unlinkSync, readFileSync } from "node:fs";
 
 /**
- * Tests for mention.all detection logic.
+ * Tests for the mention-trigger logic used in inbound.ts.
  *
- * The API can return mention.all as either:
- * - boolean `true` (newer API versions)
- * - number `1` (older API versions / WuKongIM native format)
+ * The dmwork backend signals "this message should ping the AI bot" via two
+ * payload fields:
+ * - `mention.uids[]`: explicit list of mentioned UIDs (bot replies if its own
+ *   uid is included).
+ * - `mention.ais`: "@AIs" flag, meaning the message targets every AI bot in
+ *   the group. May arrive as boolean `true` (newer API) or numeric `1`
+ *   (older API / WuKongIM native format) — both must be honored.
  *
- * Both should be treated as "mention all".
+ * Plain `@all` / `@所有人` (`mention.all`) is intentionally NOT a trigger:
+ * humans broadcasting to the room shouldn't wake every bot.
  */
-describe("mention.all detection", () => {
-  // Helper to simulate the detection logic from inbound.ts
-  function isMentionAll(mention?: MentionPayload): boolean {
-    const mentionAllRaw = mention?.all;
-    return mentionAllRaw === true || mentionAllRaw === 1;
+describe("mention trigger logic (mentionAis + uids)", () => {
+  // Helper that mirrors the isMentioned computation from inbound.ts
+  function isMentioned(mention: MentionPayload | undefined, botUid: string): boolean {
+    const mentionUids = extractMentionUids(mention);
+    const mentionAisRaw = mention?.ais;
+    const mentionAis: boolean = mentionAisRaw === true || mentionAisRaw === 1;
+    return mentionAis || mentionUids.includes(botUid);
   }
 
-  it("should detect mention.all when all is boolean true", () => {
-    const mention: MentionPayload = { all: true };
-    expect(isMentionAll(mention)).toBe(true);
-  });
+  const BOT_UID = "bot_123";
 
-  it("should detect mention.all when all is numeric 1", () => {
+  it("should NOT trigger when only mention.all is set ({all: 1})", () => {
     const mention: MentionPayload = { all: 1 };
-    expect(isMentionAll(mention)).toBe(true);
+    expect(isMentioned(mention, BOT_UID)).toBe(false);
   });
 
-  it("should NOT detect mention.all when all is false", () => {
-    const mention: MentionPayload = { all: false as unknown as boolean | number };
-    expect(isMentionAll(mention)).toBe(false);
+  it("should NOT trigger when only mention.all is set ({all: true})", () => {
+    const mention: MentionPayload = { all: true };
+    expect(isMentioned(mention, BOT_UID)).toBe(false);
   });
 
-  it("should NOT detect mention.all when all is 0", () => {
-    const mention: MentionPayload = { all: 0 };
-    expect(isMentionAll(mention)).toBe(false);
+  it("should trigger when mention.ais is numeric 1", () => {
+    const mention: MentionPayload = { ais: 1 };
+    expect(isMentioned(mention, BOT_UID)).toBe(true);
   });
 
-  it("should NOT detect mention.all when all is undefined", () => {
-    const mention: MentionPayload = { uids: ["user1"] };
-    expect(isMentionAll(mention)).toBe(false);
+  it("should trigger when mention.ais is boolean true", () => {
+    const mention: MentionPayload = { ais: true };
+    expect(isMentioned(mention, BOT_UID)).toBe(true);
   });
 
-  it("should NOT detect mention.all when mention is undefined", () => {
-    expect(isMentionAll(undefined)).toBe(false);
+  it("should trigger via mention.ais even when mention.all is also set", () => {
+    const mention: MentionPayload = { ais: 1, all: 1 };
+    expect(isMentioned(mention, BOT_UID)).toBe(true);
   });
 
-  it("should NOT detect mention.all when all is a different number", () => {
-    const mention: MentionPayload = { all: 2 };
-    expect(isMentionAll(mention)).toBe(false);
+  it("should trigger when mention.uids contains the bot uid", () => {
+    const mention: MentionPayload = { uids: [BOT_UID] };
+    expect(isMentioned(mention, BOT_UID)).toBe(true);
+  });
+
+  it("should NOT trigger for an unrelated 'humans' field", () => {
+    const mention = { humans: 1 } as unknown as MentionPayload;
+    expect(isMentioned(mention, BOT_UID)).toBe(false);
+  });
+
+  it("should NOT trigger for an empty mention payload", () => {
+    expect(isMentioned({}, BOT_UID)).toBe(false);
+  });
+
+  it("should NOT trigger when mention is undefined", () => {
+    expect(isMentioned(undefined, BOT_UID)).toBe(false);
+  });
+
+  it("should NOT trigger when mention.ais is false / 0 and uids omit the bot", () => {
+    expect(isMentioned({ ais: false as unknown as boolean | number }, BOT_UID)).toBe(false);
+    expect(isMentioned({ ais: 0 }, BOT_UID)).toBe(false);
+    expect(isMentioned({ ais: 2 }, BOT_UID)).toBe(false);
+    expect(isMentioned({ uids: ["someone_else"] }, BOT_UID)).toBe(false);
   });
 });
 

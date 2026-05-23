@@ -1181,9 +1181,9 @@ export async function handleInboundMessage(params: {
   let isExplicitBotMention = false;
   if (isGroup) {
     const mentionUids = extractMentionUids(message.payload?.mention);
-    const mentionAllRaw = message.payload?.mention?.all;
-    const mentionAll: boolean = mentionAllRaw === true || mentionAllRaw === 1;
-    isMentioned = (!account.config.ignoreMentionAll && mentionAll) || mentionUids.includes(botUid);
+    const mentionAisRaw = message.payload?.mention?.ais;
+    const mentionAis: boolean = mentionAisRaw === true || mentionAisRaw === 1;
+    isMentioned = mentionAis || mentionUids.includes(botUid);
     isExplicitBotMention = mentionUids.includes(botUid);
 
     // Defensive fallback: if payload.mention is missing/empty but the message
