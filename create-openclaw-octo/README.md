@@ -1,10 +1,13 @@
-# openclaw-channel-octo
+# create-openclaw-octo
 
-Octo channel plugin for OpenClaw. Connects via WuKongIM WebSocket for real-time messaging.
+CLI tools for the [OpenClaw Octo channel plugin](https://github.com/Mininglamp-OSS/openclaw-channel-octo).
 
-> **v1.0.0+**: This package was renamed from `openclaw-channel-dmwork`.
-> Users on the legacy plugin should run `npx -y openclaw-channel-octo install`,
-> which detects and migrates existing dmwork configuration automatically.
+> **What this package is**: a thin CLI (`install` / `bind` / `quickstart` / `doctor` / `uninstall` / `remove-account`) that manages installation, configuration, and diagnostics for the Octo channel plugin.
+>
+> **What this package is NOT**: it does not contain the plugin source itself. The plugin lives in its own repository at [Mininglamp-OSS/openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-channel-octo) and is distributed via ClawHub.
+
+> **Renamed from `openclaw-channel-octo`** (npm).
+> The old npm package name has been replaced by `create-openclaw-octo`. The legacy npm name will print a redirect notice; please use `npx -y create-openclaw-octo ...` going forward.
 
 Repository: https://github.com/Mininglamp-OSS/octo-adapters
 
@@ -21,11 +24,11 @@ to configure a bot account, or `quickstart` for batch creation across all
 your agents.
 
 ```bash
-# 1. Install the plugin
-npx -y openclaw-channel-octo install
+# 1. Install the plugin (downloads from ClawHub, performs legacy migration if needed)
+npx -y create-openclaw-octo install
 
 # 2. Bind a bot to an agent
-npx -y openclaw-channel-octo bind \
+npx -y create-openclaw-octo bind \
   --bot-token bf_your_token_here \
   --api-url https://your-server.example/api \
   --account-id my_bot \
@@ -36,44 +39,43 @@ npx -y openclaw-channel-octo bind \
 
 - `--force`: reinstall even if already installed
 - `--from <spec>`: install from a local tarball or alternate `openclaw plugins install` spec (pre-publish local testing)
-- `--dev` / `--next`: deprecated in v2.0.0+ (ClawHub installs use a single channel; use `--from` for pre-release testing)
 
 ## CLI Commands
 
 ```bash
 # Install/update the plugin (no bot config)
-npx -y openclaw-channel-octo install
+npx -y create-openclaw-octo install
 
 # Bind a bot to an agent (writes channels.octo + bindings(channel=octo))
-npx -y openclaw-channel-octo bind --bot-token <T> --api-url <U> --account-id <ID> --agent <agent>
+npx -y create-openclaw-octo bind --bot-token <T> --api-url <U> --account-id <ID> --agent <agent>
 
 # Batch-create one bot per agent and bind them all
-npx -y openclaw-channel-octo quickstart --api-key <user-api-key> --api-url <U>
+npx -y create-openclaw-octo quickstart --api-key <user-api-key> --api-url <U>
 
 # Update the plugin to the latest version
-npx -y openclaw-channel-octo update
+npx -y create-openclaw-octo update
 
 # Diagnose plugin health
-npx -y openclaw-channel-octo doctor
+npx -y create-openclaw-octo doctor
 
 # Uninstall (removes plugin + all bot configs under channels.octo)
-npx -y openclaw-channel-octo uninstall
+npx -y create-openclaw-octo uninstall
 
 # Remove a single bot account (only touches channels.octo)
-npx -y openclaw-channel-octo remove-account --account-id my_bot
+npx -y create-openclaw-octo remove-account --account-id my_bot
 ```
 
-### OpenClaw internal commands
+## Legacy / migration
 
-After installation, these commands are available inside OpenClaw:
+Users on older installations will be auto-migrated on first `install`:
 
-```
-/octo_doctor              # Check plugin status and connectivity
-/octo_doctor my_bot       # Check a specific account
-```
+| Detected state | Action |
+|---|---|
+| ClawHub octo (current) | No-op or version update |
+| npm 1.0.0 (`openclaw-channel-octo`) | Migrate to ClawHub install; preserve `channels.octo.accounts` |
+| dmwork 0.6.x (`openclaw-channel-dmwork` / `dmwork`) | Migrate channel ID `dmwork` → `octo`; rewrite bindings; preserve bot accounts |
 
-The legacy `/dmwork_*` aliases keep working for one release cycle and emit a
-deprecation hint on every invocation. Prefer the `/octo_*` names.
+For non-`install` commands (`bind`, `quickstart`, etc.) running on a legacy plugin install, the CLI prints a clear upgrade prompt and exits — there is no silent legacy-write path. Run `install` once to migrate, then re-run the original command.
 
 ## Configuration
 
@@ -107,30 +109,7 @@ Configuration fields per account:
 - `requireMention` (optional): Only respond when @mentioned in groups
 - `historyLimit` (optional): Group chat history message limit (default: 20)
 
-## What it does
+## Reporting issues
 
-1. Registers the bot with the Octo server via REST API
-2. Connects to WuKongIM WebSocket for real-time message receiving
-3. Auto-reconnects on disconnection
-4. Sends a greeting to the bot owner on connect
-5. Dispatches incoming messages to OpenClaw's message handler
-6. Supports streaming responses (start/send/end), typing indicators, and read receipts
-
-## As an OpenClaw Plugin
-
-The `index.ts` exports a standard OpenClaw plugin object. When loaded by OpenClaw:
-
-- `register(api)` is called automatically
-- `api.runtime` is injected for logging and lifecycle management
-- `api.registerChannel()` registers the Octo channel plugin
-- `api.registerCommand()` registers `/octo_doctor` (and the legacy `/dmwork_doctor` alias)
-- Configuration is read from `channels.octo` in OpenClaw's config
-
-The plugin uses the `ChannelPlugin` SDK interface with support for:
-- Direct messages and group chats
-- Multi-account configuration via `channels.octo.accounts`
-- Config hot-reload on `channels.octo` prefix changes
-
-## Disconnect
-
-To disconnect the bot, send `/disconnect` to BotFather in Octo. This invalidates the current IM token and kicks the WebSocket connection.
+- CLI issues (install / bind / quickstart / doctor behavior): [octo-adapters](https://github.com/Mininglamp-OSS/octo-adapters/issues)
+- Plugin runtime issues (message routing, message delivery, group/DM logic): [openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-channel-octo/issues)
