@@ -45,8 +45,7 @@ jobs:
           # (skipped jobs count as passing for required-check branch protection).
           filters: |
             code:
-              - 'openclaw-channel-octo/**'
-              - 'openclaw-channel-dmwork/**'
+              - 'create-openclaw-octo/**'
               - 'package.json'
               - 'pnpm-lock.yaml'
               - '*.config.*'
@@ -62,9 +61,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - package: openclaw-channel-dmwork
-            install_cmd: npm ci
-          - package: openclaw-channel-octo
+          - package: create-openclaw-octo
             install_cmd: npm ci
     defaults:
       run:

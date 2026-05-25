@@ -1,24 +1,24 @@
-name: Publish Octo Dev
+name: Publish create-openclaw-octo Dev
 
-# Auto-publish a dev version to npm when openclaw-channel-octo/ changes land
+# Auto-publish a dev version to npm when create-openclaw-octo/ changes land
 # on main (typically via merged PR). Dev versions go to npm dist-tag `dev`.
 #
 # Version pattern: <package.json version>-dev.<short-sha>
-# Example: package.json `1.0.0-rc.1` + sha abc1234 → `1.0.0-rc.1-dev.abc1234`
+# Example: package.json `1.0.1` + sha abc1234 → `1.0.1-dev.abc1234`
 #
 # Each merge produces a unique version (sha differs), so re-publish conflicts
-# are impossible. Dev publishes only openclaw-channel-octo.
+# are impossible. Dev publishes only create-openclaw-octo.
 # (Stable/rc releases use publish-octo.yml.)
 #
 # Users install dev with:
-#   npx -y openclaw-channel-octo@dev install --dev
+#   npx -y create-openclaw-octo@dev install --dev
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'openclaw-channel-octo/**'
+      - 'create-openclaw-octo/**'
   # Manual override (e.g. force a dev publish without code change)
   workflow_dispatch:
     inputs:
@@ -36,7 +36,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PKG_DIR: openclaw-channel-octo
+  PKG_DIR: create-openclaw-octo
 
 jobs:
   test:
@@ -56,7 +56,7 @@ jobs:
       - run: npm run build
 
   publish_dev:
-    name: publish openclaw-channel-octo @dev
+    name: publish create-openclaw-octo @dev
     needs: test
     runs-on: ubuntu-latest
     defaults:
@@ -83,7 +83,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: npm version
         # Must run BEFORE build: prebuild writes package.json.version into
-        # src/version.ts, so the published tarball reports the correct version.
+        # cli/version.ts, so the published tarball reports the correct version.
         # --allow-same-version: defensive — dev versions carry a per-sha suffix
         # so they normally differ from package.json, but the flag costs nothing
         # and matches the equivalent step in publish-octo.yml.

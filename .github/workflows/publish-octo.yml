@@ -1,42 +1,39 @@
-name: Publish Octo
+name: Publish create-openclaw-octo
 
 # Triggered on package-scoped tag pushes:
-#   openclaw-channel-octo/v1.0.0
-#   openclaw-channel-octo/v1.0.0-rc.1
-#   openclaw-channel-octo/v1.0.0-beta.2
+#   create-openclaw-octo/v1.0.1
+#   create-openclaw-octo/v1.0.1-rc.1
+#   create-openclaw-octo/v1.0.1-beta.2
 #
 # The slash prefix is intentional — it scopes the tag to this package so that
-# future packages in the same repo (e.g. dmwork patches in
-# openclaw-channel-dmwork/, or other adapters) can each define their own
-# `<package>/v*` workflows without collision.
+# future adapters in the same repo can each define their own `<package>/v*`
+# workflows without collision.
 #
 # Also supports manual dispatch with a custom tag for dry-runs.
 #
 # Tag → npm dist-tag mapping:
-#   openclaw-channel-octo/v1.0.0       → @latest      (matches /^v\d+\.\d+\.\d+$/)
-#   openclaw-channel-octo/v1.0.0-rc.1  → @next        (any tag containing "-")
-#   openclaw-channel-octo/v1.0.0-beta  → @next
+#   create-openclaw-octo/v1.0.1       → @latest      (matches /^v\d+\.\d+\.\d+$/)
+#   create-openclaw-octo/v1.0.1-rc.1  → @next        (any tag containing "-")
+#   create-openclaw-octo/v1.0.1-beta  → @next
 #
 # Sequence:
 #   1. test          — npm ci + type-check + build + test
-#   2. publish_octo  — npm publish openclaw-channel-octo
+#   2. publish_octo  — npm publish create-openclaw-octo
 #
-# Note: no shim publish. openclaw-channel-dmwork is not republished as a
-# forwarder. Users migrating from dmwork should run:
-#   npx -y openclaw-channel-octo install
-# which handles legacy config migration automatically.
+# Note: the previous npm package name `openclaw-channel-octo` is published once
+# more as a redirect-only shim from the openclaw-channel-octo-redirect/ subdir
+# (separate workflow). New users go to `npx -y create-openclaw-octo`.
 
 on:
   push:
     tags:
-      # Package-scoped tags so other future packages in this repo (e.g.
-      # openclaw-channel-dmwork patches, hermes-channel-octo) don't trigger
-      # this workflow. Push as: openclaw-channel-octo/v1.0.0-rc.1
-      - 'openclaw-channel-octo/v*'
+      # Package-scoped tags so other future packages in this repo don't trigger
+      # this workflow. Push as: create-openclaw-octo/v1.0.1
+      - 'create-openclaw-octo/v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: "Version to publish (without leading v), e.g. 1.0.0-rc.1"
+        description: "Version to publish (without leading v), e.g. 1.0.1"
         required: true
         type: string
       dry_run:
@@ -50,7 +47,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PKG_DIR: openclaw-channel-octo
+  PKG_DIR: create-openclaw-octo
 
 jobs:
   test:
@@ -74,7 +71,7 @@ jobs:
         run: npm run build
 
   publish_octo:
-    name: publish openclaw-channel-octo
+    name: publish create-openclaw-octo
     needs: test
     runs-on: ubuntu-latest
     defaults:
@@ -88,7 +85,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - name: resolve version
         id: version
-        # Strip prefix `openclaw-channel-octo/v` from a push tag, or use the
+        # Strip prefix `create-openclaw-octo/v` from a push tag, or use the
         # workflow_dispatch `tag` input directly.
         # Output: VERSION (no prefix), DIST_TAG (next | latest), DRY_RUN (--dry-run | "")
         run: |
@@ -96,7 +93,7 @@ jobs:
             VERSION="${{ inputs.tag }}"
             DRY="${{ inputs.dry_run && '--dry-run' || '' }}"
           else
-            VERSION="${GITHUB_REF_NAME#openclaw-channel-octo/v}"
+            VERSION="${GITHUB_REF_NAME#create-openclaw-octo/v}"
             DRY=""
           fi
           if [[ "$VERSION" == *-* ]]; then
@@ -114,7 +111,7 @@ jobs:
         run: npm ci --ignore-scripts
       - name: npm version
         # Must run BEFORE build: prebuild script writes package.json.version
-        # into src/version.ts, which is bundled into the published tarball.
+        # into cli/version.ts, which is bundled into the published tarball.
         # --allow-same-version: when the tag matches the checked-in
         # package.json version (the normal case for rc/stable cuts),
         # `npm version` would otherwise exit with EBADCHANGE.
