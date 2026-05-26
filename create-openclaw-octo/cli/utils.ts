@@ -248,6 +248,21 @@ export function enforceHealthyClawHubInstall(): void {
         console.warn(`⚠  ${openclaw.reason}.`);
         console.warn("   Consider upgrading: npm i -g openclaw@latest\n");
       }
+      // Dual-active state: ClawHub octo healthy AND legacy npm
+      // openclaw-channel-octo still registered in cfg.plugins.entries. Both
+      // register channel id "octo", so any write under channels.octo here
+      // would land in a duplicated-channel state. Block and force the user
+      // to migrate first.
+      if (plugin.legacyNpmActive) {
+        printUpgradeNotice({
+          status: "block",
+          title: "Legacy npm openclaw-channel-octo is still registered alongside ClawHub octo",
+          body: "Both register channel \"octo\" — running this command would write into a duplicated-channel state. Migrate first:",
+          command: "npx -y create-openclaw-octo install --force",
+          followup: "Re-run your command after the migration completes.",
+        });
+        process.exit(1);
+      }
       if (plugin.npmResidue) {
         console.warn("⚠  Legacy npm plugin residue detected at ~/.openclaw/npm/node_modules/openclaw-channel-octo.");
         console.warn("   Clean up by re-running install: npx -y create-openclaw-octo install\n");
@@ -315,7 +330,10 @@ export function renderInstallStatusBanner(): string | null {
 
   switch (plugin.kind) {
     case "octo-clawhub":
-      if (plugin.npmResidue) {
+      if (plugin.legacyNpmActive) {
+        lines.push("✗ Legacy npm openclaw-channel-octo still registered alongside ClawHub octo");
+        lines.push("  Migrate: npx -y create-openclaw-octo install --force");
+      } else if (plugin.npmResidue) {
         lines.push("⚠ Legacy npm plugin residue at ~/.openclaw/npm/node_modules/openclaw-channel-octo");
         lines.push("  Clean up: npx -y create-openclaw-octo install");
       }

@@ -1017,7 +1017,12 @@ export function isHealthyInstall(pluginId: string = PLUGIN_ID): boolean {
  * state we surface as a warn but don't block on).
  */
 export type InstallState =
-  | { kind: "octo-clawhub"; version: string | null; npmResidue: boolean }
+  | {
+      kind: "octo-clawhub";
+      version: string | null;
+      npmResidue: boolean;
+      legacyNpmActive: boolean;
+    }
   | { kind: "octo-npm-legacy"; version: string | null }
   | { kind: "dmwork-legacy"; version: string | null }
   | { kind: "broken"; details: string }
@@ -1029,6 +1034,27 @@ function hasLegacyNpmResidue(): boolean {
   return existsSync(resolve(homedir(), LEGACY_NPM_RESIDUE_PATH));
 }
 
+/**
+ * Whether the legacy npm-installed `openclaw-channel-octo` is still registered
+ * in OpenClaw's plugin entries (i.e., OpenClaw still attempts to load it on
+ * startup). Both legacy npm v1.x and current ClawHub octo register channel
+ * id "octo", so a healthy ClawHub install plus a still-registered legacy npm
+ * install double-register the channel — install.ts treats this as a hard
+ * cleanup error after install. detectInstallState surfaces it before
+ * bind/quickstart/remove-account write any config so the user is prompted
+ * to migrate first instead of silently writing into a duplicated channel.
+ *
+ * Signal source: cfg.plugins.entries[NPM_PACKAGE_NAME]. Note that
+ * cfg.plugins.installs has been observed null on current OpenClaw schemas
+ * (install metadata moved into `plugins inspect <id> --json`), so installs
+ * cannot be used as a registration signal. Tracked in #82 for the broader
+ * detection-layer cleanup.
+ */
+function isLegacyNpmStillRegistered(): boolean {
+  const cfg = readConfigFromFile();
+  return Boolean(cfg?.plugins?.entries?.[NPM_PACKAGE_NAME]);
+}
+
 export function detectInstallState(): InstallState {
   // Priority order: ClawHub (target) → npm-legacy → dmwork-legacy → broken → none
   if (isHealthyInstall(PLUGIN_ID)) {
@@ -1037,6 +1063,7 @@ export function detectInstallState(): InstallState {
       kind: "octo-clawhub",
       version: state.version,
       npmResidue: hasLegacyNpmResidue(),
+      legacyNpmActive: isLegacyNpmStillRegistered(),
     };
   }
   if (isHealthyInstall(NPM_PACKAGE_NAME)) {

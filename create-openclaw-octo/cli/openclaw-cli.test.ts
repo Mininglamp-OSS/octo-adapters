@@ -680,6 +680,144 @@ describe("detectOpenClawState", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// detectInstallState — also kept BEFORE the `getConfigFilePathSafe` block for
+// the same `vi.doMock` re-binding reason called out at line 560.
+// ---------------------------------------------------------------------------
+
+describe("detectInstallState", () => {
+  // Helper: ClawHub octo present in cfg + extensions dir, with optional
+  // `legacyNpm` toggle to add cfg.plugins.entries["openclaw-channel-octo"]
+  // (the dual-active signal).
+  function setupOctoClawHub(opts: {
+    legacyNpmInEntries?: boolean;
+    legacyNpmInInstalls?: boolean;
+    npmDirResidue?: boolean;
+  }) {
+    return async () => {
+      const { existsSync, readFileSync } = await import("node:fs");
+      mockExecFileSync.mockImplementation((cmd, args) => {
+        const argsArr = args as string[];
+        if (argsArr[0] === "config" && argsArr[1] === "file") {
+          return "/home/user/.openclaw/openclaw.json";
+        }
+        if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+          // simulate old OpenClaw → fallback path inside isHealthyInstall
+          throw new Error("error: unknown command 'inspect'");
+        }
+        return "";
+      });
+      const cfg: any = {
+        plugins: {
+          entries: { octo: { enabled: true } },
+          installs: { octo: { version: "1.0.12", installPath: "~/.openclaw/extensions/octo" } },
+        },
+      };
+      if (opts.legacyNpmInEntries) {
+        cfg.plugins.entries["openclaw-channel-octo"] = { enabled: true };
+      }
+      if (opts.legacyNpmInInstalls) {
+        cfg.plugins.installs["openclaw-channel-octo"] = {
+          version: "1.0.0",
+          installPath: "~/.openclaw/npm/node_modules/openclaw-channel-octo",
+        };
+      }
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify(cfg));
+      vi.mocked(existsSync).mockImplementation((p: unknown) => {
+        const path = String(p);
+        if (path.endsWith("/extensions/octo")) return true;
+        if (path.endsWith(".openclaw/npm/node_modules/openclaw-channel-octo")) {
+          return Boolean(opts.npmDirResidue);
+        }
+        return false;
+      });
+    };
+  }
+
+  it("octo-clawhub healthy and clean (no residue, no legacy active)", async () => {
+    await setupOctoClawHub({})();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyNpmActive).toBe(false);
+      expect(state.npmResidue).toBe(false);
+      expect(state.version).toBe("1.0.12");
+    }
+  });
+
+  it("octo-clawhub with directory residue only — npmResidue=true, legacyNpmActive=false", async () => {
+    await setupOctoClawHub({ npmDirResidue: true })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.npmResidue).toBe(true);
+      expect(state.legacyNpmActive).toBe(false);
+    }
+  });
+
+  it("octo-clawhub with legacy npm still registered in cfg.entries — legacyNpmActive=true (BLOCK)", async () => {
+    await setupOctoClawHub({ legacyNpmInEntries: true, legacyNpmInInstalls: true })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyNpmActive).toBe(true);
+    }
+  });
+
+  it("octo-clawhub: legacyNpmActive takes precedence regardless of dir residue", async () => {
+    await setupOctoClawHub({
+      legacyNpmInEntries: true,
+      legacyNpmInInstalls: true,
+      npmDirResidue: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyNpmActive).toBe(true);
+      expect(state.npmResidue).toBe(true);
+    }
+  });
+
+  it("octo-npm-legacy when ClawHub octo absent and NPM_PACKAGE_NAME healthy", async () => {
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") {
+        return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    // No `octo` entry; only legacy npm is present
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { "openclaw-channel-octo": { enabled: true } },
+        installs: {
+          "openclaw-channel-octo": {
+            version: "1.0.0",
+            installPath: "~/.openclaw/extensions/openclaw-channel-octo",
+          },
+        },
+      },
+    }));
+    vi.mocked(existsSync).mockImplementation((p: unknown) =>
+      String(p).endsWith("/extensions/openclaw-channel-octo"),
+    );
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-npm-legacy");
+    if (state.kind === "octo-npm-legacy") {
+      expect(state.version).toBe("1.0.0");
+    }
+  });
+});
+
 describe("getConfigFilePathSafe (Windows relative path)", () => {
   it("should resolve Windows relative path .\\.\\.openclaw\\openclaw.json to homedir", async () => {
     vi.resetModules();
