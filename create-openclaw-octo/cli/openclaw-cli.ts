@@ -1022,6 +1022,7 @@ export type InstallState =
       version: string | null;
       npmResidue: boolean;
       legacyNpmActive: boolean;
+      legacyDmworkResidue: boolean;
     }
   | { kind: "octo-npm-legacy"; version: string | null }
   | { kind: "dmwork-legacy"; version: string | null }
@@ -1050,8 +1051,7 @@ function hasLegacyNpmResidue(): boolean {
  * cannot be used as a registration signal. Tracked in #82 for the broader
  * detection-layer cleanup.
  */
-function isLegacyNpmStillRegistered(): boolean {
-  const cfg = readConfigFromFile();
+function isLegacyNpmStillRegistered(cfg: Record<string, any> | null): boolean {
   return Boolean(cfg?.plugins?.entries?.[NPM_PACKAGE_NAME]);
 }
 
@@ -1059,11 +1059,19 @@ export function detectInstallState(): InstallState {
   // Priority order: ClawHub (target) → npm-legacy → dmwork-legacy → broken → none
   if (isHealthyInstall(PLUGIN_ID)) {
     const state = resolvePluginState(PLUGIN_ID);
+    const cfg = readConfigFromFile();
     return {
       kind: "octo-clawhub",
       version: state.version,
       npmResidue: hasLegacyNpmResidue(),
-      legacyNpmActive: isLegacyNpmStillRegistered(),
+      legacyNpmActive: isLegacyNpmStillRegistered(cfg),
+      // Mirror install.ts detectScenario priority: dmwork artifacts (plugin
+      // dir/entries/installs/allow + channels.dmwork + bindings(channel=dmwork))
+      // require a `rebrand` migration even when octo is otherwise healthy.
+      // Block the pre-flight in this state so the user is prompted to run
+      // install before bind/quickstart/remove-account write fresh
+      // channels.octo data over an unfinished dmwork→octo migration.
+      legacyDmworkResidue: hasLegacyPluginArtifacts(cfg),
     };
   }
   if (isHealthyInstall(NPM_PACKAGE_NAME)) {

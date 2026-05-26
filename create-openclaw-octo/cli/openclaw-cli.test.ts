@@ -693,6 +693,8 @@ describe("detectInstallState", () => {
     legacyNpmInEntries?: boolean;
     legacyNpmInInstalls?: boolean;
     npmDirResidue?: boolean;
+    dmworkChannel?: boolean;
+    dmworkBinding?: boolean;
   }) {
     return async () => {
       const { existsSync, readFileSync } = await import("node:fs");
@@ -722,6 +724,12 @@ describe("detectInstallState", () => {
           installPath: "~/.openclaw/npm/node_modules/openclaw-channel-octo",
         };
       }
+      if (opts.dmworkChannel) {
+        cfg.channels = { dmwork: { accounts: { "u1": {} } } };
+      }
+      if (opts.dmworkBinding) {
+        cfg.bindings = [{ match: { channel: "dmwork" }, accountId: "u1", agent: "main" }];
+      }
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify(cfg));
       vi.mocked(existsSync).mockImplementation((p: unknown) => {
         const path = String(p);
@@ -741,6 +749,7 @@ describe("detectInstallState", () => {
     expect(state.kind).toBe("octo-clawhub");
     if (state.kind === "octo-clawhub") {
       expect(state.legacyNpmActive).toBe(false);
+      expect(state.legacyDmworkResidue).toBe(false);
       expect(state.npmResidue).toBe(false);
       expect(state.version).toBe("1.0.12");
     }
@@ -779,6 +788,27 @@ describe("detectInstallState", () => {
     if (state.kind === "octo-clawhub") {
       expect(state.legacyNpmActive).toBe(true);
       expect(state.npmResidue).toBe(true);
+    }
+  });
+
+  it("octo-clawhub with dmwork channel residue — legacyDmworkResidue=true (BLOCK)", async () => {
+    await setupOctoClawHub({ dmworkChannel: true })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyDmworkResidue).toBe(true);
+      expect(state.legacyNpmActive).toBe(false);
+    }
+  });
+
+  it("octo-clawhub with dmwork binding residue — legacyDmworkResidue=true (BLOCK)", async () => {
+    await setupOctoClawHub({ dmworkBinding: true })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyDmworkResidue).toBe(true);
     }
   });
 

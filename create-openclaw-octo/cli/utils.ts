@@ -263,6 +263,20 @@ export function enforceHealthyClawHubInstall(): void {
         });
         process.exit(1);
       }
+      // dmwork → octo migration not finished. Mirrors install.ts detectScenario
+      // priority: dmwork plugin/channel/binding residue triggers `rebrand`
+      // even when octo is otherwise healthy. Block before bind/quickstart
+      // write fresh channels.octo data over the unfinished migration.
+      if (plugin.legacyDmworkResidue) {
+        printUpgradeNotice({
+          status: "block",
+          title: "Unfinished dmwork → octo migration detected",
+          body: "Legacy dmwork plugin or channel/binding residue is present alongside ClawHub octo. Run install to finish the migration:",
+          command: "npx -y create-openclaw-octo install",
+          followup: "Re-run your command after the migration completes.",
+        });
+        process.exit(1);
+      }
       if (plugin.npmResidue) {
         console.warn("⚠  Legacy npm plugin residue detected at ~/.openclaw/npm/node_modules/openclaw-channel-octo.");
         console.warn("   Clean up by re-running install: npx -y create-openclaw-octo install\n");
@@ -333,6 +347,9 @@ export function renderInstallStatusBanner(): string | null {
       if (plugin.legacyNpmActive) {
         lines.push("✗ Legacy npm openclaw-channel-octo still registered alongside ClawHub octo");
         lines.push("  Migrate: npx -y create-openclaw-octo install --force");
+      } else if (plugin.legacyDmworkResidue) {
+        lines.push("✗ Unfinished dmwork → octo migration (dmwork plugin/channel/binding residue)");
+        lines.push("  Run: npx -y create-openclaw-octo install");
       } else if (plugin.npmResidue) {
         lines.push("⚠ Legacy npm plugin residue at ~/.openclaw/npm/node_modules/openclaw-channel-octo");
         lines.push("  Clean up: npx -y create-openclaw-octo install");
