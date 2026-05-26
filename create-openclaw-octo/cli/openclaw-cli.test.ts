@@ -554,6 +554,132 @@ describe("resolvePluginState", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// compareOpenClawVersion — pure function, no mocks needed
+//
+// IMPORTANT: This block (and detectOpenClawState below) MUST stay before the
+// `getConfigFilePathSafe` block. That block uses `vi.doMock("node:child_process",
+// ...)` with a LOCAL mock fn, which permanently re-binds the module mock so the
+// global `mockExecFileSync` reference (set at the top of this file) no longer
+// reaches the openclaw-cli.js module instance after that. Tests below
+// `getConfigFilePathSafe` can't reliably control execFileSync via that ref.
+// ---------------------------------------------------------------------------
+
+describe("compareOpenClawVersion", () => {
+  it("returns 0 for equal versions", async () => {
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2026.4.15", "2026.4.15")).toBe(0);
+  });
+
+  it("returns -1 when a < b in patch", async () => {
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2026.4.14", "2026.4.15")).toBe(-1);
+  });
+
+  it("returns 1 when a > b in patch", async () => {
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2026.4.16", "2026.4.15")).toBe(1);
+  });
+
+  it("returns 1 when a > b in minor (major equal)", async () => {
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2026.5.0", "2026.4.99")).toBe(1);
+  });
+
+  it("returns 1 when a > b in major", async () => {
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2027.0.0", "2026.99.99")).toBe(1);
+  });
+
+  it("regression: double-digit minor is integer-compared, not lex-compared", async () => {
+    // Lexical compare would say "10" < "9". Integer compare says "10" > "9".
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2026.10.0", "2026.9.0")).toBe(1);
+    expect(compareOpenClawVersion("2026.9.0", "2026.10.0")).toBe(-1);
+  });
+
+  it("regression: double-digit patch is integer-compared, not lex-compared", async () => {
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2026.5.18", "2026.5.2")).toBe(1);
+    expect(compareOpenClawVersion("2026.5.2", "2026.5.18")).toBe(-1);
+  });
+
+  it("treats missing segments as 0", async () => {
+    const { compareOpenClawVersion } = await loadModule();
+    expect(compareOpenClawVersion("2026.5", "2026.5.0")).toBe(0);
+    expect(compareOpenClawVersion("2026", "2026.0.0")).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectOpenClawState — three tiers: block / warn / ok
+// ---------------------------------------------------------------------------
+
+describe("detectOpenClawState", () => {
+  it("block when openclaw is not on PATH (ENOENT)", async () => {
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("spawn openclaw ENOENT") as any;
+      err.code = "ENOENT";
+      throw err;
+    });
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("block");
+    if (state.kind === "block") {
+      expect(state.version).toBeNull();
+      expect(state.reason).toMatch(/not installed|not on PATH/i);
+    }
+  });
+
+  it("block when version < OPENCLAW_PEER_MIN (2026.4.15)", async () => {
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.3.10 (abc1234)\n" as any);
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("block");
+    if (state.kind === "block") {
+      expect(state.version).toBe("2026.3.10");
+      expect(state.reason).toContain("2026.3.10");
+      expect(state.reason).toContain("2026.4.15");
+    }
+  });
+
+  it("warn when peer-min <= version < recommended (2026.5.18)", async () => {
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.4.20 (abc1234)\n" as any);
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("warn");
+    if (state.kind === "warn") {
+      expect(state.version).toBe("2026.4.20");
+      expect(state.reason).toContain("2026.4.20");
+      expect(state.reason).toContain("2026.5.18");
+    }
+  });
+
+  it("warn at exact peer-min (boundary)", async () => {
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.4.15 (abc1234)\n" as any);
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("warn");
+  });
+
+  it("ok at exact recommended (boundary)", async () => {
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.5.18 (abc1234)\n" as any);
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("ok");
+    if (state.kind === "ok") {
+      expect(state.version).toBe("2026.5.18");
+    }
+  });
+
+  it("ok when version > recommended", async () => {
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2027.1.0 (abc1234)\n" as any);
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("ok");
+  });
+});
+
 describe("getConfigFilePathSafe (Windows relative path)", () => {
   it("should resolve Windows relative path .\\.\\.openclaw\\openclaw.json to homedir", async () => {
     vi.resetModules();
