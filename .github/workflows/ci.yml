@@ -46,9 +46,6 @@ jobs:
           filters: |
             code:
               - 'create-openclaw-octo/**'
-              - 'package.json'
-              - 'pnpm-lock.yaml'
-              - '*.config.*'
               - '.github/workflows/**'
 
   build:

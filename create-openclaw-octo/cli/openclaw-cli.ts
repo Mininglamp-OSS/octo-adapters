@@ -1001,6 +1001,216 @@ export function isHealthyInstall(pluginId: string = PLUGIN_ID): boolean {
   return inspectOk || (hasDir && hasEntries && hasInstalls);
 }
 
+// ---------------------------------------------------------------------------
+// Plan A: install state + OpenClaw state detection (PR3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregated install state across the three known plugin ids:
+ *   - PLUGIN_ID            ("octo")              — current ClawHub install
+ *   - NPM_PACKAGE_NAME     ("openclaw-channel-octo") — legacy npm 1.0.0 install
+ *   - VERY_LEGACY_PLUGIN_ID ("dmwork")           — legacy dmwork 0.6.x install
+ *
+ * `octo-clawhub` additionally carries `npmResidue` indicating whether the
+ * deprecated `~/.openclaw/npm/node_modules/openclaw-channel-octo` directory
+ * is still present alongside a healthy ClawHub install (a partial-cleanup
+ * state we surface as a warn but don't block on).
+ */
+export type InstallState =
+  | {
+      kind: "octo-clawhub";
+      version: string | null;
+      npmResidue: boolean;
+      legacyNpmActive: boolean;
+      legacyDmworkResidue: boolean;
+    }
+  | { kind: "octo-npm-legacy"; version: string | null }
+  | { kind: "dmwork-legacy"; version: string | null }
+  | { kind: "broken"; details: string }
+  | { kind: "none" };
+
+const LEGACY_NPM_RESIDUE_PATH = ".openclaw/npm/node_modules/openclaw-channel-octo";
+
+function hasLegacyNpmResidue(): boolean {
+  return existsSync(resolve(homedir(), LEGACY_NPM_RESIDUE_PATH));
+}
+
+/**
+ * Whether the legacy npm-installed `openclaw-channel-octo` is still registered
+ * in OpenClaw's plugin entries (i.e., OpenClaw still attempts to load it on
+ * startup). Both legacy npm v1.x and current ClawHub octo register channel
+ * id "octo", so a healthy ClawHub install plus a still-registered legacy npm
+ * install double-register the channel — install.ts treats this as a hard
+ * cleanup error after install. detectInstallState surfaces it before
+ * bind/quickstart/remove-account write any config so the user is prompted
+ * to migrate first instead of silently writing into a duplicated channel.
+ *
+ * Signal source: cfg.plugins.entries[NPM_PACKAGE_NAME]. Note that
+ * cfg.plugins.installs has been observed null on current OpenClaw schemas
+ * (install metadata moved into `plugins inspect <id> --json`), so installs
+ * cannot be used as a registration signal. Tracked in #82 for the broader
+ * detection-layer cleanup.
+ */
+function isLegacyNpmStillRegistered(cfg: Record<string, any> | null): boolean {
+  return Boolean(cfg?.plugins?.entries?.[NPM_PACKAGE_NAME]);
+}
+
+export function detectInstallState(): InstallState {
+  // Priority order: ClawHub (target) → npm-legacy → dmwork-legacy → broken → none
+  if (isHealthyInstall(PLUGIN_ID)) {
+    const state = resolvePluginState(PLUGIN_ID);
+    const cfg = readConfigFromFile();
+    return {
+      kind: "octo-clawhub",
+      version: state.version,
+      npmResidue: hasLegacyNpmResidue(),
+      legacyNpmActive: isLegacyNpmStillRegistered(cfg),
+      // Mirror install.ts detectScenario priority: very-legacy `dmwork`
+      // artefacts (highest priority → `legacy-to-octo` migration) AND
+      // intermediate `openclaw-channel-dmwork` rebrand artefacts (next
+      // priority → `rebrand` migration) both require install to finish
+      // the migration even when octo is otherwise healthy. Block the
+      // pre-flight in either state so the user is prompted to run install
+      // before bind/quickstart/remove-account write fresh channels.octo
+      // data over an unfinished migration.
+      legacyDmworkResidue:
+        hasVeryLegacyPluginArtifacts(cfg) || hasLegacyPluginArtifacts(cfg),
+    };
+  }
+  if (isHealthyInstall(NPM_PACKAGE_NAME)) {
+    return {
+      kind: "octo-npm-legacy",
+      version: resolvePluginState(NPM_PACKAGE_NAME).version,
+    };
+  }
+  // Belt-and-suspenders for the npm 1.0.0 case: `isHealthyInstall` returns
+  // true only when `plugins inspect` works OR the install lives under
+  // `extensions/<id>/`. But v1 npm plugins live under
+  // `~/.openclaw/npm/node_modules/openclaw-channel-octo`, and on very old
+  // OpenClaw runtimes that don't support `plugins inspect`, the first check
+  // misses and this branch would mis-classify the install as "broken".
+  // If the config has matching entries/installs AND the npm path exists on
+  // disk, treat it as a legit legacy npm install.
+  {
+    const cfg = readConfigFromFile();
+    const hasEntries = Boolean(cfg?.plugins?.entries?.[NPM_PACKAGE_NAME]);
+    const hasInstalls = Boolean(cfg?.plugins?.installs?.[NPM_PACKAGE_NAME]);
+    if (hasEntries && hasInstalls && hasLegacyNpmResidue()) {
+      return {
+        kind: "octo-npm-legacy",
+        version: cfg?.plugins?.installs?.[NPM_PACKAGE_NAME]?.version ?? null,
+      };
+    }
+  }
+  // Dmwork-era: check BOTH the intermediate id (LEGACY_PLUGIN_ID =
+  // "openclaw-channel-dmwork") AND the very-legacy id (VERY_LEGACY_PLUGIN_ID
+  // = "dmwork"). Without the LEGACY_PLUGIN_ID check, the intermediate
+  // dmwork build would fall through to the "broken" classifier because its
+  // config entry IS recognised as a leftover but no isHealthyInstall passes.
+  if (isHealthyInstall(LEGACY_PLUGIN_ID)) {
+    return {
+      kind: "dmwork-legacy",
+      version: resolvePluginState(LEGACY_PLUGIN_ID).version,
+    };
+  }
+  if (isHealthyInstall(VERY_LEGACY_PLUGIN_ID)) {
+    return {
+      kind: "dmwork-legacy",
+      version: resolvePluginState(VERY_LEGACY_PLUGIN_ID).version,
+    };
+  }
+
+  // None of the three plugin ids are healthy. Surface "broken" only when
+  // there are leftover config entries pointing to one of them — otherwise
+  // it's a clean "not installed" state.
+  const cfg = readConfigFromFile();
+  const entries = cfg?.plugins?.entries ?? {};
+  const installs = cfg?.plugins?.installs ?? {};
+  const knownIds = [PLUGIN_ID, NPM_PACKAGE_NAME, LEGACY_PLUGIN_ID, VERY_LEGACY_PLUGIN_ID];
+  const leftovers = knownIds.filter((id) => entries[id] || installs[id]);
+  if (leftovers.length > 0) {
+    return {
+      kind: "broken",
+      details: `config references ${leftovers.join(", ")} but install is unhealthy`,
+    };
+  }
+  return { kind: "none" };
+}
+
+/**
+ * OpenClaw runtime version state.
+ *
+ *   block — `openclaw` not on PATH OR version < OPENCLAW_PEER_MIN
+ *   warn  — version is below recommended (still works but missing fixes)
+ *   ok    — version meets the recommended floor
+ */
+export type OpenClawState =
+  | { kind: "ok"; version: string }
+  | { kind: "warn"; version: string; reason: string }
+  | { kind: "block"; version: string | null; reason: string };
+
+/**
+ * Lower bound from package.json peerDependency. Below this the plugin
+ * literally cannot register — block.
+ */
+export const OPENCLAW_PEER_MIN = "2026.4.15";
+
+/**
+ * Recommended floor — version we test against, includes runtime fixes for
+ * issue #56 race conditions etc. Below this we warn but allow.
+ */
+export const OPENCLAW_RECOMMENDED = "2026.5.18";
+
+/**
+ * Compare two YYYY.M.PATCH-style versions per integer-segment ordering.
+ *
+ * NOT semver-compatible by design: OpenClaw's version scheme is date-based
+ * (`2026.4.15` is year.month.patch, not major.minor.patch in the SemVer
+ * sense), and a SemVer parser would mis-order things like `2026.10.0` vs
+ * `2026.9.0` (where `10 > 9` numerically but SemVer compares chunks
+ * differently with prereleases). Plain integer-by-segment is correct here.
+ *
+ * Returns -1 / 0 / 1.
+ */
+export function compareOpenClawVersion(a: string, b: string): -1 | 0 | 1 {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const va = pa[i] ?? 0;
+    const vb = pb[i] ?? 0;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+  }
+  return 0;
+}
+
+export function detectOpenClawState(): OpenClawState {
+  const v = getOpenClawVersion();
+  if (!v) {
+    return {
+      kind: "block",
+      version: null,
+      reason: "OpenClaw is not installed or not on PATH",
+    };
+  }
+  if (compareOpenClawVersion(v, OPENCLAW_PEER_MIN) < 0) {
+    return {
+      kind: "block",
+      version: v,
+      reason: `OpenClaw ${v} is too old (need >= ${OPENCLAW_PEER_MIN})`,
+    };
+  }
+  if (compareOpenClawVersion(v, OPENCLAW_RECOMMENDED) < 0) {
+    return {
+      kind: "warn",
+      version: v,
+      reason: `OpenClaw ${v} is older than recommended ${OPENCLAW_RECOMMENDED}`,
+    };
+  }
+  return { kind: "ok", version: v };
+}
+
 /**
  * Ensure `plugins.allow` exists and contains `pluginId`.
  *

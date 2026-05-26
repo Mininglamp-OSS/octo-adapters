@@ -10,7 +10,6 @@
  */
 
 import {
-  isHealthyInstall,
   readConfigFromFile,
   writeConfigAtomic,
   runOpenclaw,
@@ -19,7 +18,7 @@ import {
   CHANNEL_ID,
   RECOMMENDED_DM_SCOPE,
   ensureChannelConfigObject,
-  ensureOpenClawCompat,
+  enforceHealthyClawHubInstall,
 } from "./utils.js";
 
 export interface QuickstartOptions {
@@ -42,14 +41,8 @@ interface CreatedBot {
 }
 
 export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
-  ensureOpenClawCompat();
-
-  // 1. Pre-flight: plugin must be healthy
-  if (!isHealthyInstall()) {
-    console.error("Octo plugin is not installed or in an unhealthy state.");
-    console.error("Please run first: npx -y create-openclaw-octo install");
-    process.exit(1);
-  }
+  // 1. Pre-flight: enforce healthy ClawHub octo + recent OpenClaw (exits on legacy/missing/broken)
+  enforceHealthyClawHubInstall();
 
   // 2. Get all agents
   console.log("Fetching agent list...");

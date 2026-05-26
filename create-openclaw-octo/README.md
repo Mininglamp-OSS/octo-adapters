@@ -8,6 +8,8 @@ CLI tools for the [OpenClaw Octo channel plugin](https://github.com/Mininglamp-O
 
 > **Renamed from `openclaw-channel-octo`** (npm).
 > The old npm package name has been replaced by `create-openclaw-octo`. The legacy npm name will print a redirect notice; please use `npx -y create-openclaw-octo ...` going forward.
+>
+> If you previously installed the old name globally (`npm i -g openclaw-channel-octo`), the `openclaw-channel-octo` shim binary on your `$PATH` will not be updated by the rename. Remove it with `npm uninstall -g openclaw-channel-octo` and switch to the `npx -y create-openclaw-octo ...` workflow above. (No global install of the new name is needed; `npx` always fetches the latest.)
 
 Repository: https://github.com/Mininglamp-OSS/octo-adapters
 

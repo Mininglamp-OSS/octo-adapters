@@ -5,7 +5,6 @@
  */
 
 import {
-  isHealthyInstall,
   readConfigFromFile,
   writeConfigAtomic,
 } from "./openclaw-cli.js";
@@ -13,7 +12,7 @@ import {
   CHANNEL_ID,
   RECOMMENDED_DM_SCOPE,
   ensureChannelConfigObject,
-  ensureOpenClawCompat,
+  enforceHealthyClawHubInstall,
   validateAccountId,
 } from "./utils.js";
 
@@ -25,14 +24,8 @@ export interface BindOptions {
 }
 
 export async function runBind(opts: BindOptions): Promise<void> {
-  ensureOpenClawCompat();
-
-  // 1. Pre-flight: plugin must be healthy
-  if (!isHealthyInstall()) {
-    console.error("Octo plugin is not installed or in an unhealthy state.");
-    console.error("Please run first: npx -y create-openclaw-octo install");
-    process.exit(1);
-  }
+  // 1. Pre-flight: enforce healthy ClawHub octo + recent OpenClaw (exits on legacy/missing/broken)
+  enforceHealthyClawHubInstall();
 
   // 2. Validate params
   if (!opts.botToken.startsWith("bf_")) {
