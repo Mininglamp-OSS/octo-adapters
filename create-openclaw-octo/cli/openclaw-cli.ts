@@ -1069,21 +1069,28 @@ export function detectScenario(): UpgradeScenario {
 export function isHealthyInstall(pluginId: string = PLUGIN_ID): boolean {
   const inspectOk = Boolean(pluginsInspect(pluginId)?.plugin);
   if (inspectOk) return true;
-  // Fallback for OpenClaw runtimes without `plugins inspect`. The original
-  // fallback also AND'd with cfg.plugins.installs[id], but that field has
-  // been observed null on current OpenClaw schemas (install metadata moved
-  // into `plugins inspect <id> --json`), making the term effectively dead.
-  // Drop it; require dir + entries to call the install healthy.
+  // Fallback for OpenClaw runtimes without `plugins inspect`. Kept aligned
+  // with the 3-artifact healthy definition used by detectScenario() and
+  // cleanupBrokenInstall() so the pre-flight, install-time, and cleanup
+  // paths agree on what counts as healthy. The `cfg.plugins.installs[id]`
+  // term has been observed null on current OpenClaw schemas (install
+  // metadata moved into `plugins inspect <id>`), but the inspect short-
+  // circuit above already covers those runtimes — so the apparent
+  // dead-code on modern OpenClaw is the cost of staying consistent with
+  // the other classifiers. Tightening that across all classifiers in one
+  // shot is tracked as a follow-up to #82 ("3-artifact → 2-artifact" move
+  // requires updating detectScenario / cleanupBrokenInstall / etc.).
   // Note: this fallback is still extensions-layout only — npm-installed
   // legacy plugins (LEGACY_PLUGIN_ID, NPM_PACKAGE_NAME) will return false
   // here. detectInstallState catches that via listLoadedPlugins() +
-  // cfg.plugins.entries instead, so isHealthyInstall is only the source
-  // of truth for ClawHub/extensions-layout ids.
+  // cfg.plugins.entries instead, so isHealthyInstall remains the source
+  // of truth only for ClawHub/extensions-layout ids.
   const cfg = readConfigFromFile();
   const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
   const hasDir = existsSync(resolve(extDir, pluginId));
   const hasEntries = Boolean(cfg?.plugins?.entries?.[pluginId]);
-  return hasDir && hasEntries;
+  const hasInstalls = Boolean(cfg?.plugins?.installs?.[pluginId]);
+  return hasDir && hasEntries && hasInstalls;
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,15 +1192,23 @@ export function detectInstallState(): InstallState {
       version: resolvePluginState(NPM_PACKAGE_NAME).version,
     };
   }
-  // Belt-and-suspenders for the npm 1.0.0 case on old OpenClaw runtimes
-  // that don't support `plugins inspect`. Two paths to detect a registered
-  // legacy npm install:
-  //   (a) `plugins list --json` reports the id (modern OpenClaw)
-  //   (b) cfg.plugins.entries[id] AND the npm-layout install dir exists
-  //       (older OpenClaw without `plugins list`)
+  // Belt-and-suspenders for the npm 1.0.0 case. Two paths classify the
+  // install as octo-npm-legacy:
+  //   (a) `plugins list --json` reports the id (modern OpenClaw) — the
+  //       runtime registry is authoritative; no extra disk probe needed.
+  //   (b) cfg.plugins.entries[id] AND the npm-layout install directory
+  //       exists (old OpenClaw without `plugins list --json`). Both
+  //       artefacts are required: a stale entry with no dir on disk is
+  //       residue (broken classifier territory), not an active install.
   // We don't gate on cfg.plugins.installs[id] because that field has
   // been observed null on current OpenClaw schemas.
-  if (isPluginRegistered(NPM_PACKAGE_NAME, list, cfg)) {
+  const npmLegacyActiveViaList =
+    list.supported && list.plugins.some((p) => p.id === NPM_PACKAGE_NAME);
+  const npmLegacyActiveViaCfgFallback =
+    !list.supported &&
+    Boolean(cfg?.plugins?.entries?.[NPM_PACKAGE_NAME]) &&
+    hasLegacyNpmResidue();
+  if (npmLegacyActiveViaList || npmLegacyActiveViaCfgFallback) {
     return {
       kind: "octo-npm-legacy",
       version: cfg?.plugins?.installs?.[NPM_PACKAGE_NAME]?.version ?? null,

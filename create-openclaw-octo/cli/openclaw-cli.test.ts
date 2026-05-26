@@ -1050,6 +1050,46 @@ describe("detectInstallState", () => {
       expect(state.version).toBe("1.0.0");
     }
   });
+
+  it("broken when only cfg.entries.openclaw-channel-octo is stale (no dir, list unsupported)", async () => {
+    // Regression for PR #83 review: a stale cfg.plugins.entries entry left
+    // behind by an incomplete uninstall on an old OpenClaw runtime should
+    // classify as `broken` (so doctor --fix cleans it up), NOT
+    // `octo-npm-legacy` (which would prompt the user to migrate a plugin
+    // that isn't actually installed). Modern OpenClaw uses `plugins list
+    // --json` as the authoritative active-set, but the older fallback
+    // path must AND cfg.entries with the npm-layout install dir.
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") {
+        return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        throw new Error("error: unknown command 'list'");
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    // cfg has stale entries.openclaw-channel-octo but no extensions dir
+    // and no npm/node_modules dir — the plugin was uninstalled but the
+    // entry never got cleaned up.
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { "openclaw-channel-octo": { enabled: true } },
+      },
+    }));
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("broken");
+    if (state.kind === "broken") {
+      expect(state.details).toContain("openclaw-channel-octo");
+    }
+  });
 });
 
 describe("getConfigFilePathSafe (Windows relative path)", () => {
