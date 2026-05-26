@@ -107,7 +107,7 @@ export interface InstallOptions {
    * and pass it here so the migration's pluginsInstall step doesn't try to
    * fetch a package from ClawHub yet.
    *
-   *   node bin/octo.js install --from ./openclaw-channel-octo-2.0.0-rc.1.tgz
+   *   node bin/octo.js install --from ./create-openclaw-octo-2.0.0-rc.1.tgz
    *
    * When set, --dev and --next are ignored. Update-scenario version comparison
    * is also skipped (tarball install is unconditional).
@@ -309,7 +309,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       console.warn(
         `Warning: detected legacy ${NPM_PACKAGE_NAME} but ClawHub octo install did not verify as healthy.\n` +
         `Legacy plugin left in place to preserve current functionality.\n` +
-        `Re-run \`npx openclaw-channel-octo install\` after addressing the install issue.`,
+        `Re-run \`npx create-openclaw-octo install\` after addressing the install issue.`,
       );
     }
   }

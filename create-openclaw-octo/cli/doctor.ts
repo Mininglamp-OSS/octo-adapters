@@ -246,7 +246,7 @@ export async function runDoctorChecks(params: {
         name: "Plugin enabled",
         status: "WARN",
         detail:
-          "No — installed but disabled. Run `openclaw-channel-octo doctor --fix` " +
+          "No — installed but disabled. Run `create-openclaw-octo doctor --fix` " +
           `or \`openclaw plugins enable ${PLUGIN_ID}\`.`,
       });
     }

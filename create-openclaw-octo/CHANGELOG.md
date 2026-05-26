@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1] - 2026-05-26
+
+### Changed
+
+- **npm package renamed**: `openclaw-channel-octo` → `create-openclaw-octo`.
+  The old npm name will publish one final redirect-only version that prints
+  `Use \`npx -y create-openclaw-octo\` instead` and exits.
+- **Repository now CLI-only**: plugin runtime source (`src/`, `index.ts`,
+  `openclaw.plugin.json`, `skills/`) removed. The plugin lives at
+  [Mininglamp-OSS/openclaw-channel-octo](https://github.com/Mininglamp-OSS/openclaw-channel-octo)
+  and is distributed via ClawHub. This package is purely the CLI manager.
+- **Subdir renamed in monorepo**: `octo-adapters/openclaw-channel-octo/` →
+  `octo-adapters/create-openclaw-octo/`.
+- **Constants inlined**: `src/constants.ts` and `src/version.ts` moved to
+  `cli/constants.ts` and `cli/version.ts` (CLI-local, no cross-tree imports).
+- **prebuild script** now writes to `cli/version.ts` (was `src/version.ts`).
+
+### Removed
+
+- Plugin runtime dependencies (`axios`, `cos-nodejs-sdk-v5`, `crypto-js`,
+  `curve25519-js`, `md5-typescript`, `ws`) — CLI only needs `commander`.
+- `peerDependencies` on `openclaw` — CLI spawns `openclaw` via execFileSync,
+  not via require/import, so peer-dep declaration is unnecessary.
+- `main` / `types` / `exports` from `package.json` — no programmatic API.
+- `files` array no longer ships `skills/` or `openclaw.plugin.json`.
+
 ## [1.0.0] - 2026-05-15
 
 Initial product-rebranded release. Forked from `openclaw-channel-dmwork@0.6.x`

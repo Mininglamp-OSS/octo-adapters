@@ -30,7 +30,7 @@ export async function runBind(opts: BindOptions): Promise<void> {
   // 1. Pre-flight: plugin must be healthy
   if (!isHealthyInstall()) {
     console.error("Octo plugin is not installed or in an unhealthy state.");
-    console.error("Please run first: npx -y openclaw-channel-octo install");
+    console.error("Please run first: npx -y create-openclaw-octo install");
     process.exit(1);
   }
 
