@@ -1065,13 +1065,16 @@ export function detectInstallState(): InstallState {
       version: state.version,
       npmResidue: hasLegacyNpmResidue(),
       legacyNpmActive: isLegacyNpmStillRegistered(cfg),
-      // Mirror install.ts detectScenario priority: dmwork artifacts (plugin
-      // dir/entries/installs/allow + channels.dmwork + bindings(channel=dmwork))
-      // require a `rebrand` migration even when octo is otherwise healthy.
-      // Block the pre-flight in this state so the user is prompted to run
-      // install before bind/quickstart/remove-account write fresh
-      // channels.octo data over an unfinished dmwork→octo migration.
-      legacyDmworkResidue: hasLegacyPluginArtifacts(cfg),
+      // Mirror install.ts detectScenario priority: very-legacy `dmwork`
+      // artefacts (highest priority → `legacy-to-octo` migration) AND
+      // intermediate `openclaw-channel-dmwork` rebrand artefacts (next
+      // priority → `rebrand` migration) both require install to finish
+      // the migration even when octo is otherwise healthy. Block the
+      // pre-flight in either state so the user is prompted to run install
+      // before bind/quickstart/remove-account write fresh channels.octo
+      // data over an unfinished migration.
+      legacyDmworkResidue:
+        hasVeryLegacyPluginArtifacts(cfg) || hasLegacyPluginArtifacts(cfg),
     };
   }
   if (isHealthyInstall(NPM_PACKAGE_NAME)) {

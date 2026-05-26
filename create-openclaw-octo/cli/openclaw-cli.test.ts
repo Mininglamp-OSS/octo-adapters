@@ -695,6 +695,8 @@ describe("detectInstallState", () => {
     npmDirResidue?: boolean;
     dmworkChannel?: boolean;
     dmworkBinding?: boolean;
+    veryLegacyDmworkInEntries?: boolean;
+    veryLegacyDmworkInInstalls?: boolean;
   }) {
     return async () => {
       const { existsSync, readFileSync } = await import("node:fs");
@@ -729,6 +731,15 @@ describe("detectInstallState", () => {
       }
       if (opts.dmworkBinding) {
         cfg.bindings = [{ match: { channel: "dmwork" }, accountId: "u1", agent: "main" }];
+      }
+      if (opts.veryLegacyDmworkInEntries) {
+        cfg.plugins.entries["dmwork"] = { enabled: true };
+      }
+      if (opts.veryLegacyDmworkInInstalls) {
+        cfg.plugins.installs["dmwork"] = {
+          version: "0.5.21",
+          installPath: "~/.openclaw/extensions/dmwork",
+        };
       }
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify(cfg));
       vi.mocked(existsSync).mockImplementation((p: unknown) => {
@@ -809,6 +820,26 @@ describe("detectInstallState", () => {
     expect(state.kind).toBe("octo-clawhub");
     if (state.kind === "octo-clawhub") {
       expect(state.legacyDmworkResidue).toBe(true);
+    }
+  });
+
+  it("octo-clawhub with very-legacy `dmwork` plugin entries — legacyDmworkResidue=true (BLOCK)", async () => {
+    // Regression for the `hasVeryLegacyPluginArtifacts` precedence —
+    // detectScenario() in install.ts treats `dmwork` (very-legacy id) as
+    // priority 1 (legacy-to-octo migration) above `openclaw-channel-dmwork`
+    // (intermediate id) at priority 2 (rebrand). The pre-flight must
+    // surface BOTH ids so a stale `dmwork` entry without channels.dmwork
+    // or bindings still blocks bind/quickstart/remove-account.
+    await setupOctoClawHub({
+      veryLegacyDmworkInEntries: true,
+      veryLegacyDmworkInInstalls: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyDmworkResidue).toBe(true);
+      expect(state.legacyNpmActive).toBe(false);
     }
   });
 
