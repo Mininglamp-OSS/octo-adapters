@@ -93,6 +93,171 @@ describe("pluginsInspect", () => {
   });
 });
 
+describe("listLoadedPlugins", () => {
+  it("parses plugins list --json output", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(JSON.stringify({
+      plugins: [
+        {
+          id: "octo",
+          status: "loaded",
+          enabled: true,
+          source: "/home/u/.openclaw/extensions/octo/dist/index.js",
+          origin: "global",
+          rootDir: "/home/u/.openclaw/extensions/octo",
+        },
+        {
+          id: "openclaw-channel-octo",
+          status: "loaded",
+          enabled: true,
+          source: "/home/u/.openclaw/npm/node_modules/openclaw-channel-octo/dist/index.js",
+          origin: "npm",
+          rootDir: "/home/u/.openclaw/npm/node_modules/openclaw-channel-octo",
+        },
+      ],
+    }));
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(true);
+    expect(result.plugins).toHaveLength(2);
+    expect(result.plugins[0].id).toBe("octo");
+    expect(result.plugins[1].id).toBe("openclaw-channel-octo");
+    expect(result.plugins[1].rootDir).toContain("npm/node_modules");
+  });
+
+  it("strips preceding log/banner noise before JSON parse", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(
+      "🦞 OpenClaw 2026.5.18\n" +
+        "[plugins] loading...\n" +
+        JSON.stringify({ plugins: [{ id: "octo", status: "loaded", enabled: true }] }),
+    );
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(true);
+    expect(result.plugins[0].id).toBe("octo");
+  });
+
+  it("tolerates trailing log noise after JSON object via brace-matching", async () => {
+    // Some OpenClaw runtimes emit warnings AFTER the JSON object (e.g.
+    // gateway shutdown warnings on subsequent commands). A naive
+    // `JSON.parse(out.slice(start))` would fail because the slice includes
+    // the trailing log lines; brace-matching extracts just the balanced
+    // top-level object.
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(
+      JSON.stringify({ plugins: [{ id: "octo", status: "loaded", enabled: true }] }) +
+        "\n[plugins] reload complete\n" +
+        "Warning: deprecated config key X\n",
+    );
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(true);
+    expect(result.plugins).toHaveLength(1);
+    expect(result.plugins[0].id).toBe("octo");
+  });
+
+  it("brace-matching handles strings containing curly braces correctly", async () => {
+    // Defense against a flawed brace-counter: source paths can contain
+    // literal "}" or "{" inside string values. The matcher must respect
+    // string boundaries so it doesn't terminate the object prematurely.
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(JSON.stringify({
+      plugins: [
+        { id: "octo", status: "loaded", enabled: true, source: "/path/with/{braces}/in/it" },
+      ],
+    }));
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(true);
+    expect(result.plugins[0].source).toContain("{braces}");
+  });
+
+  it("identifies `unknown command` as unsupported (old OpenClaw)", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("error: unknown command 'list'") as any;
+      err.stderr = "error: unknown command 'list'";
+      throw err;
+    });
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.error).toBeNull();
+  });
+
+  it("reports a real error (e.g. EACCES) via `error` field, not unsupported", async () => {
+    // Distinguishes "old OpenClaw doesn't recognise the subcommand"
+    // (supported=false, error=null) from genuine errors (config corruption,
+    // permission, plugin load crash) where the runtime cannot reliably
+    // tell us what's loaded.
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("EACCES: permission denied") as any;
+      err.stderr = "EACCES: permission denied";
+      throw err;
+    });
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/permission denied/i);
+  });
+
+  it("reports parse failure via `error`, not as old-runtime", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue("usage: openclaw plugins list ...");
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/no JSON|JSON/);
+  });
+
+  it("reports supported=false on old OpenClaw without `plugins list --json`", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      throw new Error("error: unknown command 'list'");
+    });
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.plugins).toEqual([]);
+  });
+
+  it("reports supported=false when output is not JSON", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue("usage: openclaw plugins list ...");
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/no JSON/);
+  });
+
+  it("reports supported=false when JSON has no plugins array", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(JSON.stringify({ unexpected: "shape" }));
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/missing.*plugins.*array/i);
+  });
+
+  it("filters out entries with missing id", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(JSON.stringify({
+      plugins: [
+        { id: "octo", status: "loaded", enabled: true },
+        { /* no id */ status: "loaded" },
+        { id: "", status: "loaded" },
+      ],
+    }));
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(true);
+    expect(result.plugins).toHaveLength(1);
+    expect(result.plugins[0].id).toBe("octo");
+  });
+});
+
 describe("getOpenClawVersion", () => {
   it("should extract version from openclaw --version output", async () => {
     const { getOpenClawVersion } = await loadModule();
@@ -697,13 +862,44 @@ describe("detectInstallState", () => {
     dmworkBinding?: boolean;
     veryLegacyDmworkInEntries?: boolean;
     veryLegacyDmworkInInstalls?: boolean;
+    /**
+     * When true, `openclaw plugins list --json` returns a parseable
+     * payload containing octo + any of the optional `*InList` ids.
+     * When false (default), the command throws — simulating an old
+     * OpenClaw runtime that doesn't support `plugins list --json` and
+     * exercising the cfg.entries fallback path inside isPluginRegistered.
+     */
+    pluginsListSupported?: boolean;
+    legacyNpmInList?: boolean;
+    legacyDmworkInList?: boolean;
+    veryLegacyDmworkInList?: boolean;
   }) {
     return async () => {
       const { existsSync, readFileSync } = await import("node:fs");
+      const mkListEntry = (id: string) => ({
+        id,
+        status: "loaded",
+        enabled: true,
+        source: `/home/user/.openclaw/extensions/${id}/dist/index.js`,
+        origin: "global",
+        rootDir: `/home/user/.openclaw/extensions/${id}`,
+      });
+      const listPayload = (() => {
+        if (!opts.pluginsListSupported) return null;
+        const plugins = [mkListEntry("octo")];
+        if (opts.legacyNpmInList) plugins.push(mkListEntry("openclaw-channel-octo"));
+        if (opts.legacyDmworkInList) plugins.push(mkListEntry("openclaw-channel-dmwork"));
+        if (opts.veryLegacyDmworkInList) plugins.push(mkListEntry("dmwork"));
+        return JSON.stringify({ plugins });
+      })();
       mockExecFileSync.mockImplementation((cmd, args) => {
         const argsArr = args as string[];
         if (argsArr[0] === "config" && argsArr[1] === "file") {
           return "/home/user/.openclaw/openclaw.json";
+        }
+        if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+          if (listPayload) return listPayload;
+          throw new Error("error: unknown command 'list'");
         }
         if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
           // simulate old OpenClaw → fallback path inside isHealthyInstall
@@ -843,12 +1039,71 @@ describe("detectInstallState", () => {
     }
   });
 
+  // ── plugins list --json signal path (#82 detection-layer refactor) ──
+
+  it("octo-clawhub: legacyNpmActive sourced from `plugins list --json` (cfg.entries empty)", async () => {
+    // Modern OpenClaw reports the legacy npm openclaw-channel-octo through
+    // `plugins list --json`. Even when cfg.plugins.entries doesn't yet
+    // reflect it (e.g. stale cfg snapshot vs runtime), the list signal is
+    // the authoritative source.
+    await setupOctoClawHub({
+      pluginsListSupported: true,
+      legacyNpmInList: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyNpmActive).toBe(true);
+    }
+  });
+
+  it("octo-clawhub: legacyDmworkResidue sourced from `plugins list --json` (LEGACY_PLUGIN_ID)", async () => {
+    // Modern OpenClaw with intermediate dmwork id (`openclaw-channel-dmwork`)
+    // active. The list signal catches it without depending on
+    // `extensions/<id>` directory probing — important because dmwork
+    // legacy is npm-installed (lives under npm/node_modules/<id>).
+    await setupOctoClawHub({
+      pluginsListSupported: true,
+      legacyDmworkInList: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyDmworkResidue).toBe(true);
+      expect(state.legacyNpmActive).toBe(false);
+    }
+  });
+
+  it("octo-clawhub: legacyDmworkResidue sourced from `plugins list --json` (VERY_LEGACY_PLUGIN_ID)", async () => {
+    // Modern OpenClaw with very-legacy `dmwork` id active. Mirrors
+    // detectScenario()'s priority-1 bucket through the list signal.
+    await setupOctoClawHub({
+      pluginsListSupported: true,
+      veryLegacyDmworkInList: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyDmworkResidue).toBe(true);
+      expect(state.legacyNpmActive).toBe(false);
+    }
+  });
+
   it("octo-npm-legacy when ClawHub octo absent and NPM_PACKAGE_NAME healthy", async () => {
     const { existsSync, readFileSync } = await import("node:fs");
     mockExecFileSync.mockImplementation((cmd, args) => {
       const argsArr = args as string[];
       if (argsArr[0] === "config" && argsArr[1] === "file") {
         return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        // Old OpenClaw — not supported (caller falls back to cfg.entries)
+        const e = new Error("error: unknown command 'list'") as any;
+        e.stderr = "error: unknown command 'list'";
+        throw e;
       }
       if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
         throw new Error("error: unknown command 'inspect'");
@@ -875,6 +1130,138 @@ describe("detectInstallState", () => {
     expect(state.kind).toBe("octo-npm-legacy");
     if (state.kind === "octo-npm-legacy") {
       expect(state.version).toBe("1.0.0");
+    }
+  });
+
+  it("dmwork-legacy: both ids registered → classifier picks VERY_LEGACY first (priority 1 in detectScenario)", async () => {
+    // Regression for codex review on PR #83: when both `dmwork`
+    // (VERY_LEGACY_PLUGIN_ID) and `openclaw-channel-dmwork`
+    // (LEGACY_PLUGIN_ID) are registered with no healthy octo present,
+    // detectInstallState must mirror detectScenario()'s priority and
+    // report the very-legacy id's version. Otherwise the pre-flight
+    // surfaces a different version than the migration install.ts will
+    // actually run (legacy-to-octo, not rebrand).
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") {
+        return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        return JSON.stringify({
+          plugins: [
+            { id: "dmwork", status: "loaded", enabled: true },
+            { id: "openclaw-channel-dmwork", status: "loaded", enabled: true },
+          ],
+        });
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { dmwork: { enabled: true }, "openclaw-channel-dmwork": { enabled: true } },
+        installs: {
+          dmwork: { version: "0.5.21", installPath: "~/.openclaw/extensions/dmwork" },
+          "openclaw-channel-dmwork": { version: "0.6.5", installPath: "~/.openclaw/npm/node_modules/openclaw-channel-dmwork" },
+        },
+      },
+    }));
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("dmwork-legacy");
+    if (state.kind === "dmwork-legacy") {
+      // Must pick the VERY_LEGACY (`dmwork`) version, not the LEGACY
+      // (`openclaw-channel-dmwork`) version — matches detectScenario()
+      // priority: `legacy-to-octo` migration runs first.
+      expect(state.version).toBe("0.5.21");
+    }
+  });
+
+  it("broken when only cfg.entries.openclaw-channel-octo is stale (no dir, list unsupported)", async () => {
+    // Regression for PR #83 review: a stale cfg.plugins.entries entry left
+    // behind by an incomplete uninstall on an old OpenClaw runtime should
+    // classify as `broken` (so doctor --fix cleans it up), NOT
+    // `octo-npm-legacy` (which would prompt the user to migrate a plugin
+    // that isn't actually installed). Modern OpenClaw uses `plugins list
+    // --json` as the authoritative active-set, but the older fallback
+    // path must AND cfg.entries with the npm-layout install dir.
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") {
+        return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        throw new Error("error: unknown command 'list'");
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    // cfg has stale entries.openclaw-channel-octo but no extensions dir
+    // and no npm/node_modules dir — the plugin was uninstalled but the
+    // entry never got cleaned up.
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { "openclaw-channel-octo": { enabled: true } },
+      },
+    }));
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("broken");
+    if (state.kind === "broken") {
+      expect(state.details).toContain("openclaw-channel-octo");
+    }
+  });
+
+  it("fail-closed when `plugins list --json` errors for a real reason (not unsupported)", async () => {
+    // Regression for codex review: when the OpenClaw runtime is in a
+    // failure state (config corruption, permission denied, plugin load
+    // crash, partial JSON), `plugins list --json` cannot reliably report
+    // what's loaded. Trusting cfg.entries alone risks silently allowing
+    // a dual-active state to slip through bind/quickstart/remove-account.
+    // detectInstallState must surface this as `broken` so the user is
+    // prompted to repair OpenClaw before any further config writes.
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") {
+        return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        const e = new Error("EACCES: permission denied") as any;
+        e.stderr = "EACCES: permission denied, open '/home/user/.openclaw/openclaw.json'";
+        throw e;
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    // Even with a healthy-looking cfg, the list-failed signal must
+    // dominate.
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { octo: { enabled: true } },
+        installs: { octo: { version: "1.0.12", installPath: "~/.openclaw/extensions/octo" } },
+      },
+    }));
+    vi.mocked(existsSync).mockReturnValue(true);
+
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("broken");
+    if (state.kind === "broken") {
+      expect(state.details).toMatch(/plugins list/);
+      expect(state.details).toMatch(/permission denied/i);
     }
   });
 });
