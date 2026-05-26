@@ -524,14 +524,23 @@ export interface PluginListEntry {
 
 export interface PluginListResult {
   /**
-   * True if OpenClaw produced parseable `plugins list --json` output.
-   * False ONLY when the runtime doesn't recognise the subcommand — i.e.
-   * `unknown command` / `unrecognized command` in stderr/stdout. Other
-   * failure modes (config corruption, permission denied, partial JSON,
-   * etc.) propagate as exceptions; callers should treat these as
-   * truly-unknown registry state and fail closed where it matters.
+   * True when OpenClaw produced parseable `plugins list --json` output.
+   * False when:
+   *   - the runtime doesn't recognise the subcommand (old OpenClaw —
+   *     `error` is null in this case; callers fall back to cfg.entries),
+   *   - OR the command failed for a real reason — config corruption,
+   *     permission denied, plugin load crash, partial/unparseable JSON
+   *     (`error` is non-null in this case; callers should fail-closed
+   *     rather than trust cfg.entries, because the OpenClaw runtime is
+   *     in a state where we cannot reliably know what is loaded).
    */
   supported: boolean;
+  /**
+   * Non-null when `supported` is false because of a real error (not
+   * "subcommand unknown"). Empty string is never used; null means
+   * "either the call succeeded, or the runtime is genuinely old."
+   */
+  error: string | null;
   plugins: PluginListEntry[];
 }
 
@@ -581,15 +590,6 @@ export function listLoadedPlugins(): PluginListResult {
       stdio: ["pipe", "pipe", "pipe"],
     });
   } catch (err) {
-    // Distinguish "old runtime doesn't know this subcommand" from real
-    // errors (config corruption, permission, etc.). Only the former
-    // gets `supported: false`; everything else also reports
-    // `supported: false` for now, but with empty plugins — callers
-    // should rely on cfg.plugins.entries fallback. Future: if we want
-    // to surface a "registry truly unknown" state to callers, add a
-    // third field here. For now, fail-closed by returning an empty
-    // registry; detection paths that OR against cfg.entries will still
-    // catch artefacts.
     const sources = [
       (err as any)?.stderr?.toString?.(),
       (err as any)?.stdout?.toString?.(),
@@ -598,24 +598,41 @@ export function listLoadedPlugins(): PluginListResult {
     ];
     const text = sources.filter(Boolean).join(" ");
     if (/unknown command|unrecognized command/i.test(text)) {
-      return { supported: false, plugins: [] };
+      // Old OpenClaw — caller falls back to cfg.entries.
+      return { supported: false, error: null, plugins: [] };
     }
-    // Real error (not "old runtime") — still report supported: false so
-    // detectInstallState falls back to cfg.entries, which is the safest
-    // course when we genuinely can't tell what's loaded.
-    return { supported: false, plugins: [] };
+    // Real error (permission, config corruption, plugin load crash, etc.).
+    // Surface it via `error` so detectInstallState can fail-closed instead
+    // of trusting cfg.entries, which may also be in an inconsistent state
+    // when the OpenClaw runtime is unhappy.
+    const errorMsg = text.slice(0, 200) || "unknown error";
+    return { supported: false, error: errorMsg, plugins: [] };
   }
   const cleaned = stripStdoutNoise(raw);
   const jsonStr = extractJsonObject(cleaned);
-  if (jsonStr === null) return { supported: false, plugins: [] };
+  if (jsonStr === null) {
+    return {
+      supported: false,
+      error: "no JSON object in `plugins list --json` output",
+      plugins: [],
+    };
+  }
   let data: any;
   try {
     data = JSON.parse(jsonStr);
-  } catch {
-    return { supported: false, plugins: [] };
+  } catch (err) {
+    return {
+      supported: false,
+      error: `JSON.parse failed: ${(err as Error)?.message ?? String(err)}`.slice(0, 200),
+      plugins: [],
+    };
   }
   if (!Array.isArray(data?.plugins)) {
-    return { supported: false, plugins: [] };
+    return {
+      supported: false,
+      error: "JSON output missing `plugins` array",
+      plugins: [],
+    };
   }
   const plugins: PluginListEntry[] = data.plugins
     .map((p: any) => ({
@@ -627,7 +644,7 @@ export function listLoadedPlugins(): PluginListResult {
       rootDir: typeof p?.rootDir === "string" ? p.rootDir : null,
     }))
     .filter((p: PluginListEntry) => p.id.length > 0);
-  return { supported: true, plugins };
+  return { supported: true, error: null, plugins };
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,6 +1246,20 @@ function isPluginRegistered(
 export function detectInstallState(): InstallState {
   const list = listLoadedPlugins();
   const cfg = readConfigFromFile();
+
+  // Fail-closed when `plugins list --json` failed for a real reason
+  // (config corruption, permission denied, plugin load crash, etc., as
+  // distinct from "old runtime doesn't know the subcommand"). In that
+  // state the OpenClaw runtime cannot reliably report what's loaded,
+  // and trusting cfg.entries alone risks silently allowing dual-active
+  // states to slip through bind/quickstart/remove-account. Surface as
+  // `broken` so the user is prompted to run install (or fix OpenClaw).
+  if (!list.supported && list.error !== null) {
+    return {
+      kind: "broken",
+      details: `cannot determine install state: \`openclaw plugins list --json\` failed (${list.error})`,
+    };
+  }
 
   // Priority order: ClawHub (target) → npm-legacy → dmwork-legacy → broken → none
   if (isHealthyInstall(PLUGIN_ID)) {

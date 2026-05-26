@@ -183,6 +183,33 @@ describe("listLoadedPlugins", () => {
 
     const result = listLoadedPlugins();
     expect(result.supported).toBe(false);
+    expect(result.error).toBeNull();
+  });
+
+  it("reports a real error (e.g. EACCES) via `error` field, not unsupported", async () => {
+    // Distinguishes "old OpenClaw doesn't recognise the subcommand"
+    // (supported=false, error=null) from genuine errors (config corruption,
+    // permission, plugin load crash) where the runtime cannot reliably
+    // tell us what's loaded.
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("EACCES: permission denied") as any;
+      err.stderr = "EACCES: permission denied";
+      throw err;
+    });
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/permission denied/i);
+  });
+
+  it("reports parse failure via `error`, not as old-runtime", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue("usage: openclaw plugins list ...");
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/no JSON|JSON/);
   });
 
   it("reports supported=false on old OpenClaw without `plugins list --json`", async () => {
@@ -202,6 +229,7 @@ describe("listLoadedPlugins", () => {
 
     const result = listLoadedPlugins();
     expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/no JSON/);
   });
 
   it("reports supported=false when JSON has no plugins array", async () => {
@@ -210,6 +238,7 @@ describe("listLoadedPlugins", () => {
 
     const result = listLoadedPlugins();
     expect(result.supported).toBe(false);
+    expect(result.error).toMatch(/missing.*plugins.*array/i);
   });
 
   it("filters out entries with missing id", async () => {
@@ -1070,6 +1099,12 @@ describe("detectInstallState", () => {
       if (argsArr[0] === "config" && argsArr[1] === "file") {
         return "/home/user/.openclaw/openclaw.json";
       }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        // Old OpenClaw — not supported (caller falls back to cfg.entries)
+        const e = new Error("error: unknown command 'list'") as any;
+        e.stderr = "error: unknown command 'list'";
+        throw e;
+      }
       if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
         throw new Error("error: unknown command 'inspect'");
       }
@@ -1184,6 +1219,49 @@ describe("detectInstallState", () => {
     expect(state.kind).toBe("broken");
     if (state.kind === "broken") {
       expect(state.details).toContain("openclaw-channel-octo");
+    }
+  });
+
+  it("fail-closed when `plugins list --json` errors for a real reason (not unsupported)", async () => {
+    // Regression for codex review: when the OpenClaw runtime is in a
+    // failure state (config corruption, permission denied, plugin load
+    // crash, partial JSON), `plugins list --json` cannot reliably report
+    // what's loaded. Trusting cfg.entries alone risks silently allowing
+    // a dual-active state to slip through bind/quickstart/remove-account.
+    // detectInstallState must surface this as `broken` so the user is
+    // prompted to repair OpenClaw before any further config writes.
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") {
+        return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        const e = new Error("EACCES: permission denied") as any;
+        e.stderr = "EACCES: permission denied, open '/home/user/.openclaw/openclaw.json'";
+        throw e;
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    // Even with a healthy-looking cfg, the list-failed signal must
+    // dominate.
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { octo: { enabled: true } },
+        installs: { octo: { version: "1.0.12", installPath: "~/.openclaw/extensions/octo" } },
+      },
+    }));
+    vi.mocked(existsSync).mockReturnValue(true);
+
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("broken");
+    if (state.kind === "broken") {
+      expect(state.details).toMatch(/plugins list/);
+      expect(state.details).toMatch(/permission denied/i);
     }
   });
 });
