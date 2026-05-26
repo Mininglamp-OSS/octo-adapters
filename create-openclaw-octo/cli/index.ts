@@ -16,12 +16,12 @@ import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
 import { ensureOpenClawCompat, NPM_PACKAGE_NAME, PLUGIN_ID } from "./utils.js";
 import { getOpenClawVersionStrict, resolvePluginState } from "./openclaw-cli.js";
-import { PLUGIN_VERSION } from "../src/version.js";
+import { PLUGIN_VERSION } from "./version.js";
 
 const program = new Command();
 
 program
-  .name("openclaw-channel-octo")
+  .name("create-openclaw-octo")
   .description("Octo channel plugin CLI for OpenClaw")
   .version(PLUGIN_VERSION);
 
@@ -53,7 +53,7 @@ program
     const g = "\x1b[32m";
     const r = "\x1b[0m";
 
-    console.log(`${b}openclaw-channel-octo-cli:${r} ${g}${PLUGIN_VERSION}${r}`);
+    console.log(`${b}create-openclaw-octo:${r} ${g}${PLUGIN_VERSION}${r}`);
     console.log(`${b}openclaw:${r} ${g}${openclawVersion}${r}`);
     console.log(`${b}installed plugin id:${r} ${g}${PLUGIN_ID}${r} (ClawHub)`);
     console.log(`${b}installed plugin version:${r} ${g}${installedVersion}${r}`);

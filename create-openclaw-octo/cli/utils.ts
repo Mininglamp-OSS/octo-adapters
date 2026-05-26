@@ -2,9 +2,8 @@
  * CLI utilities: version checking, accountId validation, readline prompts,
  * and string `channels.<id>.<...>` config-path helpers.
  *
- * Pure constants and runtime-safe helpers live in `src/constants.ts` and are
- * re-exported from here for convenience to CLI code. Runtime code (`src/*`)
- * should import directly from `src/constants.ts` and never from this file.
+ * Pure constants and runtime-safe helpers live in `./constants.ts` and are
+ * re-exported from here for convenience to CLI code.
  */
 
 import { createInterface } from "node:readline";
@@ -16,10 +15,10 @@ import {
   stripChannelPrefix,
   getChannelConfig, getChannelConfigFor,
   ensureChannelConfigObject,
-} from "../src/constants.js";
+} from "./constants.js";
 
 // ---------------------------------------------------------------------------
-// Re-exports from src/constants.ts (so existing CLI imports keep working)
+// Re-exports from ./constants.ts (so existing CLI imports keep working)
 // ---------------------------------------------------------------------------
 
 export {

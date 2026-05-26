@@ -7,9 +7,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "outDir": "dist",
+    "rootDir": ".",
     "declaration": true,
     "sourceMap": true
   },
-  "include": ["index.ts", "src/**/*.ts", "cli/**/*.ts"],
+  "include": ["cli/**/*.ts"],
   "exclude": ["node_modules", "dist", "**/*.test.ts"]
 }

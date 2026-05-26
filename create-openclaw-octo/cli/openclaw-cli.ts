@@ -8,7 +8,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { CHANNEL_ID, PLUGIN_ID, NPM_PACKAGE_NAME, LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID } from "../src/constants.js";
+import { CHANNEL_ID, PLUGIN_ID, NPM_PACKAGE_NAME, LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID } from "./constants.js";
 
 /**
  * Find the user's globally installed openclaw, skipping the npx environment.
