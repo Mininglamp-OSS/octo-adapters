@@ -489,6 +489,81 @@ export function pluginsInspect(id: string): PluginInspectResult | null {
 }
 
 // ---------------------------------------------------------------------------
+// `openclaw plugins list --json` enumeration
+// ---------------------------------------------------------------------------
+//
+// `plugins list --json` is OpenClaw's authoritative report of "which plugin
+// ids the runtime currently knows about". Compared to the older signal
+// combination (cfg.plugins.entries + cfg.plugins.installs + extensions
+// directory + per-id `plugins inspect`):
+//
+//   - `cfg.plugins.installs` has been observed null on current OpenClaw
+//     schemas — install metadata moved into `plugins inspect <id>`.
+//   - `extensions/<id>` directory probe misses npm-installed plugins
+//     (npm-layout legacy plugins live under `npm/node_modules/<id>`).
+//   - `plugins inspect <id>` requires a known id, can't enumerate.
+//
+// `plugins list --json` returns each registered id with its rootDir
+// resolved by OpenClaw itself, so it covers both layouts uniformly and
+// is independent of any client-side path assumption (including custom
+// OPENCLAW_HOME on Windows / Linux).
+//
+// Old OpenClaw runtimes that don't recognise `plugins list --json` still
+// exist; in that case `listLoadedPlugins()` reports `supported: false`
+// and callers fall back to cfg.plugins.entries.
+// ---------------------------------------------------------------------------
+
+export interface PluginListEntry {
+  id: string;
+  status: string;
+  enabled: boolean;
+  source: string | null;
+  origin: string | null;
+  rootDir: string | null;
+}
+
+export interface PluginListResult {
+  /** True if OpenClaw produced parseable `plugins list --json` output. */
+  supported: boolean;
+  plugins: PluginListEntry[];
+}
+
+export function listLoadedPlugins(): PluginListResult {
+  let raw: string;
+  try {
+    raw = runOpenclaw(["plugins", "list", "--json"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch {
+    return { supported: false, plugins: [] };
+  }
+  const cleaned = stripStdoutNoise(raw);
+  const jsonStart = cleaned.indexOf("{");
+  if (jsonStart < 0) return { supported: false, plugins: [] };
+  let data: any;
+  try {
+    data = JSON.parse(cleaned.slice(jsonStart));
+  } catch {
+    return { supported: false, plugins: [] };
+  }
+  if (!Array.isArray(data?.plugins)) {
+    return { supported: false, plugins: [] };
+  }
+  const plugins: PluginListEntry[] = data.plugins
+    .map((p: any) => ({
+      id: typeof p?.id === "string" ? p.id : "",
+      status: typeof p?.status === "string" ? p.status : "",
+      enabled: Boolean(p?.enabled),
+      source: typeof p?.source === "string" ? p.source : null,
+      origin: typeof p?.origin === "string" ? p.origin : null,
+      rootDir: typeof p?.rootDir === "string" ? p.rootDir : null,
+    }))
+    .filter((p: PluginListEntry) => p.id.length > 0);
+  return { supported: true, plugins };
+}
+
+// ---------------------------------------------------------------------------
 // Unified plugin state detection (inspect + fallback)
 // ---------------------------------------------------------------------------
 
@@ -992,13 +1067,23 @@ export function detectScenario(): UpgradeScenario {
 }
 
 export function isHealthyInstall(pluginId: string = PLUGIN_ID): boolean {
+  const inspectOk = Boolean(pluginsInspect(pluginId)?.plugin);
+  if (inspectOk) return true;
+  // Fallback for OpenClaw runtimes without `plugins inspect`. The original
+  // fallback also AND'd with cfg.plugins.installs[id], but that field has
+  // been observed null on current OpenClaw schemas (install metadata moved
+  // into `plugins inspect <id> --json`), making the term effectively dead.
+  // Drop it; require dir + entries to call the install healthy.
+  // Note: this fallback is still extensions-layout only — npm-installed
+  // legacy plugins (LEGACY_PLUGIN_ID, NPM_PACKAGE_NAME) will return false
+  // here. detectInstallState catches that via listLoadedPlugins() +
+  // cfg.plugins.entries instead, so isHealthyInstall is only the source
+  // of truth for ClawHub/extensions-layout ids.
   const cfg = readConfigFromFile();
   const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
   const hasDir = existsSync(resolve(extDir, pluginId));
   const hasEntries = Boolean(cfg?.plugins?.entries?.[pluginId]);
-  const hasInstalls = Boolean(cfg?.plugins?.installs?.[pluginId]);
-  const inspectOk = Boolean(pluginsInspect(pluginId)?.plugin);
-  return inspectOk || (hasDir && hasEntries && hasInstalls);
+  return hasDir && hasEntries;
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,42 +1114,56 @@ export type InstallState =
   | { kind: "broken"; details: string }
   | { kind: "none" };
 
-const LEGACY_NPM_RESIDUE_PATH = ".openclaw/npm/node_modules/openclaw-channel-octo";
+const LEGACY_NPM_RESIDUE_DIR = "npm/node_modules/openclaw-channel-octo";
 
 function hasLegacyNpmResidue(): boolean {
-  return existsSync(resolve(homedir(), LEGACY_NPM_RESIDUE_PATH));
+  // Derive the OpenClaw root from the live config-file path so users with
+  // a non-default install root (custom OPENCLAW_HOME, npm --prefix, Windows
+  // custom layout, etc.) are covered. Cosmetic-only signal — drives the
+  // residue warn line but never the block decision.
+  const root = getConfigFilePathSafe().replace(/openclaw\.json$/, "");
+  return existsSync(resolve(root, LEGACY_NPM_RESIDUE_DIR));
 }
 
 /**
- * Whether the legacy npm-installed `openclaw-channel-octo` is still registered
- * in OpenClaw's plugin entries (i.e., OpenClaw still attempts to load it on
- * startup). Both legacy npm v1.x and current ClawHub octo register channel
- * id "octo", so a healthy ClawHub install plus a still-registered legacy npm
- * install double-register the channel — install.ts treats this as a hard
- * cleanup error after install. detectInstallState surfaces it before
- * bind/quickstart/remove-account write any config so the user is prompted
- * to migrate first instead of silently writing into a duplicated channel.
+ * Whether a legacy plugin id is still registered with OpenClaw. Two signals
+ * in priority order:
  *
- * Signal source: cfg.plugins.entries[NPM_PACKAGE_NAME]. Note that
- * cfg.plugins.installs has been observed null on current OpenClaw schemas
- * (install metadata moved into `plugins inspect <id> --json`), so installs
- * cannot be used as a registration signal. Tracked in #82 for the broader
- * detection-layer cleanup.
+ *   1. `plugins list --json` (preferred, when supported by the runtime) —
+ *      OpenClaw's own report of "which plugin ids I'm trying to load".
+ *      Independent of cfg schema and client-side path assumptions.
+ *   2. `cfg.plugins.entries[id]` (fallback) — for older OpenClaw versions
+ *      that don't support `plugins list --json`. cfg.plugins.installs is
+ *      not used because it has been observed null on current schemas.
+ *
+ * Used by `detectInstallState` to detect dual-active states (ClawHub octo
+ * healthy AND a legacy id still registered) — both register channel "octo"
+ * (or, for dmwork-era ids, the dmwork channel), so any subsequent config
+ * write would land in a duplicated/half-migrated state.
  */
-function isLegacyNpmStillRegistered(cfg: Record<string, any> | null): boolean {
-  return Boolean(cfg?.plugins?.entries?.[NPM_PACKAGE_NAME]);
+function isPluginRegistered(
+  id: string,
+  list: PluginListResult,
+  cfg: Record<string, any> | null,
+): boolean {
+  if (list.supported) {
+    return list.plugins.some((p) => p.id === id);
+  }
+  return Boolean(cfg?.plugins?.entries?.[id]);
 }
 
 export function detectInstallState(): InstallState {
+  const list = listLoadedPlugins();
+  const cfg = readConfigFromFile();
+
   // Priority order: ClawHub (target) → npm-legacy → dmwork-legacy → broken → none
   if (isHealthyInstall(PLUGIN_ID)) {
     const state = resolvePluginState(PLUGIN_ID);
-    const cfg = readConfigFromFile();
     return {
       kind: "octo-clawhub",
       version: state.version,
       npmResidue: hasLegacyNpmResidue(),
-      legacyNpmActive: isLegacyNpmStillRegistered(cfg),
+      legacyNpmActive: isPluginRegistered(NPM_PACKAGE_NAME, list, cfg),
       // Mirror install.ts detectScenario priority: very-legacy `dmwork`
       // artefacts (highest priority → `legacy-to-octo` migration) AND
       // intermediate `openclaw-channel-dmwork` rebrand artefacts (next
@@ -1074,7 +1173,10 @@ export function detectInstallState(): InstallState {
       // before bind/quickstart/remove-account write fresh channels.octo
       // data over an unfinished migration.
       legacyDmworkResidue:
-        hasVeryLegacyPluginArtifacts(cfg) || hasLegacyPluginArtifacts(cfg),
+        hasVeryLegacyPluginArtifacts(cfg) ||
+        hasLegacyPluginArtifacts(cfg) ||
+        isPluginRegistered(VERY_LEGACY_PLUGIN_ID, list, cfg) ||
+        isPluginRegistered(LEGACY_PLUGIN_ID, list, cfg),
     };
   }
   if (isHealthyInstall(NPM_PACKAGE_NAME)) {
@@ -1083,47 +1185,55 @@ export function detectInstallState(): InstallState {
       version: resolvePluginState(NPM_PACKAGE_NAME).version,
     };
   }
-  // Belt-and-suspenders for the npm 1.0.0 case: `isHealthyInstall` returns
-  // true only when `plugins inspect` works OR the install lives under
-  // `extensions/<id>/`. But v1 npm plugins live under
-  // `~/.openclaw/npm/node_modules/openclaw-channel-octo`, and on very old
-  // OpenClaw runtimes that don't support `plugins inspect`, the first check
-  // misses and this branch would mis-classify the install as "broken".
-  // If the config has matching entries/installs AND the npm path exists on
-  // disk, treat it as a legit legacy npm install.
-  {
-    const cfg = readConfigFromFile();
-    const hasEntries = Boolean(cfg?.plugins?.entries?.[NPM_PACKAGE_NAME]);
-    const hasInstalls = Boolean(cfg?.plugins?.installs?.[NPM_PACKAGE_NAME]);
-    if (hasEntries && hasInstalls && hasLegacyNpmResidue()) {
-      return {
-        kind: "octo-npm-legacy",
-        version: cfg?.plugins?.installs?.[NPM_PACKAGE_NAME]?.version ?? null,
-      };
-    }
+  // Belt-and-suspenders for the npm 1.0.0 case on old OpenClaw runtimes
+  // that don't support `plugins inspect`. Two paths to detect a registered
+  // legacy npm install:
+  //   (a) `plugins list --json` reports the id (modern OpenClaw)
+  //   (b) cfg.plugins.entries[id] AND the npm-layout install dir exists
+  //       (older OpenClaw without `plugins list`)
+  // We don't gate on cfg.plugins.installs[id] because that field has
+  // been observed null on current OpenClaw schemas.
+  if (isPluginRegistered(NPM_PACKAGE_NAME, list, cfg)) {
+    return {
+      kind: "octo-npm-legacy",
+      version: cfg?.plugins?.installs?.[NPM_PACKAGE_NAME]?.version ?? null,
+    };
   }
   // Dmwork-era: check BOTH the intermediate id (LEGACY_PLUGIN_ID =
   // "openclaw-channel-dmwork") AND the very-legacy id (VERY_LEGACY_PLUGIN_ID
-  // = "dmwork"). Without the LEGACY_PLUGIN_ID check, the intermediate
-  // dmwork build would fall through to the "broken" classifier because its
-  // config entry IS recognised as a leftover but no isHealthyInstall passes.
-  if (isHealthyInstall(LEGACY_PLUGIN_ID)) {
+  // = "dmwork"). Use the unified `isPluginRegistered` so npm-installed
+  // dmwork (which lives under `npm/node_modules/<id>`, not `extensions/<id>`)
+  // is also caught — `plugins list --json` reports it directly, and the
+  // cfg.entries fallback also covers it without relying on the
+  // extensions-only directory probe in isHealthyInstall.
+  if (
+    isHealthyInstall(LEGACY_PLUGIN_ID) ||
+    isPluginRegistered(LEGACY_PLUGIN_ID, list, cfg)
+  ) {
     return {
       kind: "dmwork-legacy",
-      version: resolvePluginState(LEGACY_PLUGIN_ID).version,
+      version:
+        resolvePluginState(LEGACY_PLUGIN_ID).version ??
+        cfg?.plugins?.installs?.[LEGACY_PLUGIN_ID]?.version ??
+        null,
     };
   }
-  if (isHealthyInstall(VERY_LEGACY_PLUGIN_ID)) {
+  if (
+    isHealthyInstall(VERY_LEGACY_PLUGIN_ID) ||
+    isPluginRegistered(VERY_LEGACY_PLUGIN_ID, list, cfg)
+  ) {
     return {
       kind: "dmwork-legacy",
-      version: resolvePluginState(VERY_LEGACY_PLUGIN_ID).version,
+      version:
+        resolvePluginState(VERY_LEGACY_PLUGIN_ID).version ??
+        cfg?.plugins?.installs?.[VERY_LEGACY_PLUGIN_ID]?.version ??
+        null,
     };
   }
 
-  // None of the three plugin ids are healthy. Surface "broken" only when
-  // there are leftover config entries pointing to one of them — otherwise
-  // it's a clean "not installed" state.
-  const cfg = readConfigFromFile();
+  // None of the three plugin ids are healthy or registered. Surface "broken"
+  // only when there are leftover config entries pointing to one of them —
+  // otherwise it's a clean "not installed" state.
   const entries = cfg?.plugins?.entries ?? {};
   const installs = cfg?.plugins?.installs ?? {};
   const knownIds = [PLUGIN_ID, NPM_PACKAGE_NAME, LEGACY_PLUGIN_ID, VERY_LEGACY_PLUGIN_ID];
