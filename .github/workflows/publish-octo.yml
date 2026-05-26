@@ -20,9 +20,9 @@ name: Publish create-openclaw-octo
 #   1. test          — npm ci + type-check + build + test
 #   2. publish_octo  — npm publish create-openclaw-octo
 #
-# Note: the previous npm package name `openclaw-channel-octo` is published once
-# more as a redirect-only shim from the openclaw-channel-octo-redirect/ subdir
-# (separate workflow). New users go to `npx -y create-openclaw-octo`.
+# Note: the previous npm package name `openclaw-channel-octo` will be republished
+# once as a redirect-only shim via a separate workflow that lands in a future PR.
+# New users go to `npx -y create-openclaw-octo`.
 
 on:
   push:
@@ -45,6 +45,8 @@ on:
 concurrency:
   group: publish-octo-${{ github.ref }}
   cancel-in-progress: false
+
+permissions: {}
 
 env:
   PKG_DIR: create-openclaw-octo

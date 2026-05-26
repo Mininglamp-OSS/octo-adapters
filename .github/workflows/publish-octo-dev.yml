@@ -35,6 +35,8 @@ concurrency:
   # in a weird state).
   cancel-in-progress: false
 
+permissions: {}
+
 env:
   PKG_DIR: create-openclaw-octo
 
