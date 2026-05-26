@@ -138,6 +138,53 @@ describe("listLoadedPlugins", () => {
     expect(result.plugins[0].id).toBe("octo");
   });
 
+  it("tolerates trailing log noise after JSON object via brace-matching", async () => {
+    // Some OpenClaw runtimes emit warnings AFTER the JSON object (e.g.
+    // gateway shutdown warnings on subsequent commands). A naive
+    // `JSON.parse(out.slice(start))` would fail because the slice includes
+    // the trailing log lines; brace-matching extracts just the balanced
+    // top-level object.
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(
+      JSON.stringify({ plugins: [{ id: "octo", status: "loaded", enabled: true }] }) +
+        "\n[plugins] reload complete\n" +
+        "Warning: deprecated config key X\n",
+    );
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(true);
+    expect(result.plugins).toHaveLength(1);
+    expect(result.plugins[0].id).toBe("octo");
+  });
+
+  it("brace-matching handles strings containing curly braces correctly", async () => {
+    // Defense against a flawed brace-counter: source paths can contain
+    // literal "}" or "{" inside string values. The matcher must respect
+    // string boundaries so it doesn't terminate the object prematurely.
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockReturnValue(JSON.stringify({
+      plugins: [
+        { id: "octo", status: "loaded", enabled: true, source: "/path/with/{braces}/in/it" },
+      ],
+    }));
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(true);
+    expect(result.plugins[0].source).toContain("{braces}");
+  });
+
+  it("identifies `unknown command` as unsupported (old OpenClaw)", async () => {
+    const { listLoadedPlugins } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("error: unknown command 'list'") as any;
+      err.stderr = "error: unknown command 'list'";
+      throw err;
+    });
+
+    const result = listLoadedPlugins();
+    expect(result.supported).toBe(false);
+  });
+
   it("reports supported=false on old OpenClaw without `plugins list --json`", async () => {
     const { listLoadedPlugins } = await loadModule();
     mockExecFileSync.mockImplementation(() => {
@@ -1048,6 +1095,55 @@ describe("detectInstallState", () => {
     expect(state.kind).toBe("octo-npm-legacy");
     if (state.kind === "octo-npm-legacy") {
       expect(state.version).toBe("1.0.0");
+    }
+  });
+
+  it("dmwork-legacy: both ids registered → classifier picks VERY_LEGACY first (priority 1 in detectScenario)", async () => {
+    // Regression for codex review on PR #83: when both `dmwork`
+    // (VERY_LEGACY_PLUGIN_ID) and `openclaw-channel-dmwork`
+    // (LEGACY_PLUGIN_ID) are registered with no healthy octo present,
+    // detectInstallState must mirror detectScenario()'s priority and
+    // report the very-legacy id's version. Otherwise the pre-flight
+    // surfaces a different version than the migration install.ts will
+    // actually run (legacy-to-octo, not rebrand).
+    const { existsSync, readFileSync } = await import("node:fs");
+    mockExecFileSync.mockImplementation((cmd, args) => {
+      const argsArr = args as string[];
+      if (argsArr[0] === "config" && argsArr[1] === "file") {
+        return "/home/user/.openclaw/openclaw.json";
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "list" && argsArr[2] === "--json") {
+        return JSON.stringify({
+          plugins: [
+            { id: "dmwork", status: "loaded", enabled: true },
+            { id: "openclaw-channel-dmwork", status: "loaded", enabled: true },
+          ],
+        });
+      }
+      if (argsArr[0] === "plugins" && argsArr[1] === "inspect") {
+        throw new Error("error: unknown command 'inspect'");
+      }
+      return "";
+    });
+    vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+      plugins: {
+        entries: { dmwork: { enabled: true }, "openclaw-channel-dmwork": { enabled: true } },
+        installs: {
+          dmwork: { version: "0.5.21", installPath: "~/.openclaw/extensions/dmwork" },
+          "openclaw-channel-dmwork": { version: "0.6.5", installPath: "~/.openclaw/npm/node_modules/openclaw-channel-dmwork" },
+        },
+      },
+    }));
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("dmwork-legacy");
+    if (state.kind === "dmwork-legacy") {
+      // Must pick the VERY_LEGACY (`dmwork`) version, not the LEGACY
+      // (`openclaw-channel-dmwork`) version — matches detectScenario()
+      // priority: `legacy-to-octo` migration runs first.
+      expect(state.version).toBe("0.5.21");
     }
   });
 

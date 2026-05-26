@@ -523,9 +523,54 @@ export interface PluginListEntry {
 }
 
 export interface PluginListResult {
-  /** True if OpenClaw produced parseable `plugins list --json` output. */
+  /**
+   * True if OpenClaw produced parseable `plugins list --json` output.
+   * False ONLY when the runtime doesn't recognise the subcommand — i.e.
+   * `unknown command` / `unrecognized command` in stderr/stdout. Other
+   * failure modes (config corruption, permission denied, partial JSON,
+   * etc.) propagate as exceptions; callers should treat these as
+   * truly-unknown registry state and fail closed where it matters.
+   */
   supported: boolean;
   plugins: PluginListEntry[];
+}
+
+/**
+ * Extract a complete top-level JSON object from a string by counting
+ * unescaped `{` / `}` outside of strings. Tolerates trailing log lines
+ * that survived `stripStdoutNoise` (a strict `JSON.parse(out.slice(start))`
+ * would fail). Returns null when no balanced object is found.
+ */
+function extractJsonObject(raw: string): string | null {
+  const start = raw.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) return raw.slice(start, i + 1);
+    }
+  }
+  return null;
 }
 
 export function listLoadedPlugins(): PluginListResult {
@@ -535,15 +580,37 @@ export function listLoadedPlugins(): PluginListResult {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
-  } catch {
+  } catch (err) {
+    // Distinguish "old runtime doesn't know this subcommand" from real
+    // errors (config corruption, permission, etc.). Only the former
+    // gets `supported: false`; everything else also reports
+    // `supported: false` for now, but with empty plugins — callers
+    // should rely on cfg.plugins.entries fallback. Future: if we want
+    // to surface a "registry truly unknown" state to callers, add a
+    // third field here. For now, fail-closed by returning an empty
+    // registry; detection paths that OR against cfg.entries will still
+    // catch artefacts.
+    const sources = [
+      (err as any)?.stderr?.toString?.(),
+      (err as any)?.stdout?.toString?.(),
+      (err as any)?.message,
+      String(err),
+    ];
+    const text = sources.filter(Boolean).join(" ");
+    if (/unknown command|unrecognized command/i.test(text)) {
+      return { supported: false, plugins: [] };
+    }
+    // Real error (not "old runtime") — still report supported: false so
+    // detectInstallState falls back to cfg.entries, which is the safest
+    // course when we genuinely can't tell what's loaded.
     return { supported: false, plugins: [] };
   }
   const cleaned = stripStdoutNoise(raw);
-  const jsonStart = cleaned.indexOf("{");
-  if (jsonStart < 0) return { supported: false, plugins: [] };
+  const jsonStr = extractJsonObject(cleaned);
+  if (jsonStr === null) return { supported: false, plugins: [] };
   let data: any;
   try {
-    data = JSON.parse(cleaned.slice(jsonStart));
+    data = JSON.parse(jsonStr);
   } catch {
     return { supported: false, plugins: [] };
   }
@@ -1214,25 +1281,19 @@ export function detectInstallState(): InstallState {
       version: cfg?.plugins?.installs?.[NPM_PACKAGE_NAME]?.version ?? null,
     };
   }
-  // Dmwork-era: check BOTH the intermediate id (LEGACY_PLUGIN_ID =
-  // "openclaw-channel-dmwork") AND the very-legacy id (VERY_LEGACY_PLUGIN_ID
-  // = "dmwork"). Use the unified `isPluginRegistered` so npm-installed
-  // dmwork (which lives under `npm/node_modules/<id>`, not `extensions/<id>`)
-  // is also caught — `plugins list --json` reports it directly, and the
+  // Dmwork-era: check VERY_LEGACY_PLUGIN_ID = "dmwork" FIRST, then
+  // LEGACY_PLUGIN_ID = "openclaw-channel-dmwork". This matches the
+  // priority order in install.ts detectScenario(): very-legacy is
+  // priority 1 (legacy-to-octo migration) above the rebrand priority 2
+  // (openclaw-channel-dmwork). When both are registered simultaneously,
+  // the dmwork-legacy state should report the very-legacy id's version
+  // so the user-facing prompt aligns with which migration install will
+  // actually run.
+  // Use the unified `isPluginRegistered` so npm-installed dmwork (which
+  // lives under `npm/node_modules/<id>`, not `extensions/<id>`) is also
+  // caught — `plugins list --json` reports it directly, and the
   // cfg.entries fallback also covers it without relying on the
   // extensions-only directory probe in isHealthyInstall.
-  if (
-    isHealthyInstall(LEGACY_PLUGIN_ID) ||
-    isPluginRegistered(LEGACY_PLUGIN_ID, list, cfg)
-  ) {
-    return {
-      kind: "dmwork-legacy",
-      version:
-        resolvePluginState(LEGACY_PLUGIN_ID).version ??
-        cfg?.plugins?.installs?.[LEGACY_PLUGIN_ID]?.version ??
-        null,
-    };
-  }
   if (
     isHealthyInstall(VERY_LEGACY_PLUGIN_ID) ||
     isPluginRegistered(VERY_LEGACY_PLUGIN_ID, list, cfg)
@@ -1242,6 +1303,18 @@ export function detectInstallState(): InstallState {
       version:
         resolvePluginState(VERY_LEGACY_PLUGIN_ID).version ??
         cfg?.plugins?.installs?.[VERY_LEGACY_PLUGIN_ID]?.version ??
+        null,
+    };
+  }
+  if (
+    isHealthyInstall(LEGACY_PLUGIN_ID) ||
+    isPluginRegistered(LEGACY_PLUGIN_ID, list, cfg)
+  ) {
+    return {
+      kind: "dmwork-legacy",
+      version:
+        resolvePluginState(LEGACY_PLUGIN_ID).version ??
+        cfg?.plugins?.installs?.[LEGACY_PLUGIN_ID]?.version ??
         null,
     };
   }
