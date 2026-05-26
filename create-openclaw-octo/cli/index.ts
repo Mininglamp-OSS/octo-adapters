@@ -14,7 +14,7 @@ import {
 } from "./doctor.js";
 import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
-import { ensureOpenClawCompat, NPM_PACKAGE_NAME, PLUGIN_ID, renderInstallStatusBanner } from "./utils.js";
+import { ensureOpenClawCompat, PLUGIN_ID, renderInstallStatusBanner } from "./utils.js";
 import { getOpenClawVersionStrict, resolvePluginState } from "./openclaw-cli.js";
 import { PLUGIN_VERSION } from "./version.js";
 
@@ -57,7 +57,6 @@ program
     console.log(`${b}openclaw:${r} ${g}${openclawVersion}${r}`);
     console.log(`${b}installed plugin id:${r} ${g}${PLUGIN_ID}${r} (ClawHub)`);
     console.log(`${b}installed plugin version:${r} ${g}${installedVersion}${r}`);
-    console.log(`${b}npm package:${r} ${g}${NPM_PACKAGE_NAME}${r}`);
     console.log();
     console.log(`${b}Environment:${r}`);
     console.log(`${b}OS:${r} ${g}${process.platform} ${process.arch}${r}`);
