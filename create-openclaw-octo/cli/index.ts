@@ -14,7 +14,7 @@ import {
 } from "./doctor.js";
 import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
-import { ensureOpenClawCompat, NPM_PACKAGE_NAME, PLUGIN_ID } from "./utils.js";
+import { ensureOpenClawCompat, NPM_PACKAGE_NAME, PLUGIN_ID, renderInstallStatusBanner } from "./utils.js";
 import { getOpenClawVersionStrict, resolvePluginState } from "./openclaw-cli.js";
 import { PLUGIN_VERSION } from "./version.js";
 
@@ -141,7 +141,6 @@ program
   .option("--fix", "Attempt to automatically fix issues", false)
   .option("--json", "Output JSON", false)
   .action(async (opts) => {
-    ensureOpenClawCompat();
     const result = await runDoctorChecks({
       reader: cliConfigReader,
       accountId: opts.accountId,
@@ -150,6 +149,13 @@ program
     if (opts.json) {
       console.log(JSON.stringify(result, null, 2));
     } else {
+      // Render upgrade-status banner first (only when there's actually an
+      // issue to surface — null on the healthy path).
+      const banner = renderInstallStatusBanner();
+      if (banner) {
+        console.error(banner);
+        console.error("");
+      }
       console.log(formatDoctorResult(result));
     }
   });

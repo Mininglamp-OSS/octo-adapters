@@ -2,19 +2,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ── runQuickstart error output tests ─────────────────────────────
 
-// Mock dependencies before importing runQuickstart
+// Mock dependencies before importing runQuickstart.
+// Note: `isHealthyInstall` is unused by quickstart since the PR3 wire-in
+// (pre-flight now goes through `enforceHealthyClawHubInstall`), but
+// keeping the mock for the other openclaw-cli surface that quickstart
+// does use (`readConfigFromFile`, `writeConfigAtomic`, `runOpenclaw`).
 vi.mock("./openclaw-cli.js", () => ({
-  isHealthyInstall: vi.fn(() => true),
   readConfigFromFile: vi.fn(() => ({})),
   writeConfigAtomic: vi.fn(),
   runOpenclaw: vi.fn(),
 }));
 
 vi.mock("./utils.js", () => ({
-  PLUGIN_ID: "openclaw-channel-octo",
   CHANNEL_ID: "octo",
   RECOMMENDED_DM_SCOPE: "octo",
-  ensureOpenClawCompat: vi.fn(),
+  enforceHealthyClawHubInstall: vi.fn(),
   ensureChannelConfigObject: (cfg: any, channelId = "octo") => {
     cfg.channels ??= {};
     cfg.channels[channelId] ??= {};
@@ -39,16 +41,14 @@ async function loadAndRun(opts: { apiKey: string; apiUrl: string }) {
   vi.resetModules();
 
   vi.doMock("./openclaw-cli.js", () => ({
-    isHealthyInstall: vi.fn(() => true),
     readConfigFromFile: vi.fn(() => ({})),
     writeConfigAtomic: vi.fn(),
     runOpenclaw: vi.fn(() => mockRunOpenclaw()),
   }));
   vi.doMock("./utils.js", () => ({
-    PLUGIN_ID: "openclaw-channel-octo",
     CHANNEL_ID: "octo",
     RECOMMENDED_DM_SCOPE: "octo",
-    ensureOpenClawCompat: vi.fn(),
+    enforceHealthyClawHubInstall: vi.fn(),
     ensureChannelConfigObject: (cfg: any, channelId = "octo") => {
       cfg.channels ??= {};
       cfg.channels[channelId] ??= {};

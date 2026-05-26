@@ -17,7 +17,7 @@ import {
   PLUGIN_ID,
   channelConfigPath,
   confirm,
-  ensureOpenClawCompat,
+  enforceHealthyClawHubInstall,
   validateAccountId,
 } from "./utils.js";
 
@@ -29,7 +29,7 @@ export interface RemoveAccountOptions {
 export async function runRemoveAccount(
   opts: RemoveAccountOptions,
 ): Promise<void> {
-  ensureOpenClawCompat();
+  enforceHealthyClawHubInstall();
 
   if (!validateAccountId(opts.accountId)) {
     console.error(

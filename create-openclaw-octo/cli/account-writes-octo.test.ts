@@ -13,14 +13,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mocks must be declared before importing the modules under test.
 // ---------------------------------------------------------------------------
 
-// Stub utils.js so ensureOpenClawCompat doesn't try to spawn `openclaw`.
+// Stub utils.js so enforceHealthyClawHubInstall doesn't try to spawn `openclaw`.
 // Re-export the real CHANNEL_ID/PLUGIN_ID/etc. via importOriginal so the
 // module under test sees the canonical helper behaviour for paths/objects.
 vi.mock("./utils.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./utils.js")>();
   return {
     ...actual,
-    ensureOpenClawCompat: vi.fn(),
+    enforceHealthyClawHubInstall: vi.fn(),
   };
 });
 
