@@ -1217,20 +1217,29 @@ function hasLegacyNpmResidue(): boolean {
 }
 
 /**
- * Whether a legacy plugin id is still registered with OpenClaw. Two signals
- * in priority order:
+ * Whether a legacy plugin id is still **actively registered** with OpenClaw
+ * — i.e. OpenClaw will load it on startup and call its setup() to
+ * register hooks / channels. Two signals in priority order:
  *
  *   1. `plugins list --json` (preferred, when supported by the runtime) —
  *      OpenClaw's own report of "which plugin ids I'm trying to load".
- *      Independent of cfg schema and client-side path assumptions.
+ *      We only count entries with `enabled === true`; entries that
+ *      OpenClaw lists as `disabled` (because the cfg has no entry but
+ *      disk-scan auto-discovered the files) DO NOT have setup() called
+ *      and therefore cannot register a channel id, so they cannot cause
+ *      duplicate channel registration with the new ClawHub octo plugin.
  *   2. `cfg.plugins.entries[id]` (fallback) — for older OpenClaw versions
  *      that don't support `plugins list --json`. cfg.plugins.installs is
  *      not used because it has been observed null on current schemas.
  *
  * Used by `detectInstallState` to detect dual-active states (ClawHub octo
- * healthy AND a legacy id still registered) — both register channel "octo"
- * (or, for dmwork-era ids, the dmwork channel), so any subsequent config
- * write would land in a duplicated/half-migrated state.
+ * healthy AND a legacy id still actively registered) — both would register
+ * channel "octo" (or, for dmwork-era ids, the dmwork channel), so any
+ * subsequent config write would land in a duplicated/half-migrated state.
+ *
+ * A disabled-only entry in `plugins list` (auto-discovered from disk
+ * residue without a corresponding cfg entry) is harmless and not flagged
+ * as registered.
  */
 function isPluginRegistered(
   id: string,
@@ -1238,7 +1247,7 @@ function isPluginRegistered(
   cfg: Record<string, any> | null,
 ): boolean {
   if (list.supported) {
-    return list.plugins.some((p) => p.id === id);
+    return list.plugins.some((p) => p.id === id && p.enabled);
   }
   return Boolean(cfg?.plugins?.entries?.[id]);
 }
@@ -1919,36 +1928,55 @@ export function cleanupStaleWorkspaceIfEmpty(channelId: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * True if the very-legacy plugin id "dmwork" has any presence —
- * extension dir, plugins.entries, plugins.installs, or plugins.allow.
+ * True if the very-legacy plugin id "dmwork" is still active — i.e.
+ * OpenClaw will load it on startup or it owns config data we need to
+ * migrate.
+ *
+ * Active signals:
+ *   - cfg.plugins.entries[id]    — OpenClaw's load registry
+ *   - cfg.plugins.installs[id]   — install metadata (older schemas)
+ *
+ * Inert signals (intentionally NOT checked):
+ *   - extensions/<id>/ directory — without a cfg entry OpenClaw won't
+ *     load it on startup; auto-discovered entries default to disabled
+ *     and never call setup() / channel.register(...). No duplicate
+ *     channel registration risk. Cosmetic disk residue.
+ *   - cfg.plugins.allow[id]      — pure allowlist entry without a
+ *     corresponding entry/install is dead-letter, never loaded.
  *
  * Predates `openclaw-channel-dmwork`. Detection takes priority over rebrand.
  */
 export function hasVeryLegacyPluginArtifacts(cfg: Record<string, any> | null): boolean {
-  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
-  const hasDir = existsSync(resolve(extDir, VERY_LEGACY_PLUGIN_ID));
   const hasEntry = Boolean(cfg?.plugins?.entries?.[VERY_LEGACY_PLUGIN_ID]);
   const hasInstall = Boolean(cfg?.plugins?.installs?.[VERY_LEGACY_PLUGIN_ID]);
-  const inAllow = Array.isArray(cfg?.plugins?.allow) &&
-    cfg.plugins.allow.includes(VERY_LEGACY_PLUGIN_ID);
-  return hasDir || hasEntry || hasInstall || inAllow;
+  return hasEntry || hasInstall;
 }
 
 /**
- * True if the intermediate plugin id "openclaw-channel-dmwork" has any
- * presence — covers full installs as well as residual config-only state.
+ * True if the intermediate plugin id "openclaw-channel-dmwork" is still
+ * active — i.e. OpenClaw will load it, or there's data on the
+ * dmwork channel that needs migration to channel=octo.
+ *
+ * Active signals:
+ *   - cfg.plugins.entries[id]              — OpenClaw load registry
+ *   - cfg.plugins.installs[id]             — install metadata
+ *   - cfg.channels.dmwork                  — channel data (accounts, settings)
+ *   - cfg.bindings[*].match.channel=dmwork — routing rules pointing at it
+ *
+ * Inert signals (intentionally NOT checked):
+ *   - extensions/<id>/ directory — without a cfg entry OpenClaw won't
+ *     auto-enable it; auto-discovered entries default to disabled and
+ *     never call setup() / channel.register("dmwork", ...). No
+ *     duplicate channel registration risk. Cosmetic disk residue.
+ *   - cfg.plugins.allow[id]      — allowlist alone is dead-letter.
  *
  * Triggers the rebrand migration path.
  */
 export function hasLegacyPluginArtifacts(cfg: Record<string, any> | null): boolean {
-  const extDir = getConfigFilePathSafe().replace(/openclaw\.json$/, "extensions");
-  const hasDir = existsSync(resolve(extDir, LEGACY_PLUGIN_ID));
   const hasEntry = Boolean(cfg?.plugins?.entries?.[LEGACY_PLUGIN_ID]);
   const hasInstall = Boolean(cfg?.plugins?.installs?.[LEGACY_PLUGIN_ID]);
-  const inAllow = Array.isArray(cfg?.plugins?.allow) &&
-    cfg.plugins.allow.includes(LEGACY_PLUGIN_ID);
   const hasChannel = Boolean(cfg?.channels?.[LEGACY_CHANNEL_ID]);
   const hasBindings = Array.isArray(cfg?.bindings) &&
     (cfg.bindings as any[]).some((b: any) => b?.match?.channel === LEGACY_CHANNEL_ID);
-  return hasDir || hasEntry || hasInstall || inAllow || hasChannel || hasBindings;
+  return hasEntry || hasInstall || hasChannel || hasBindings;
 }
