@@ -847,6 +847,107 @@ describe("detectOpenClawState", () => {
 });
 
 // ---------------------------------------------------------------------------
+// hasLegacyPluginArtifacts / hasVeryLegacyPluginArtifacts — direct unit
+// coverage for the residue-detection helpers used by detectInstallState
+// (octo-clawhub.legacyDmworkResidue) and detectScenario (rebrand priority).
+//
+// These need to count only ACTIVE residue (cfg state OpenClaw will read
+// at startup) — not inert disk residue / orphaned allowlist entries that
+// have no behavioural effect.
+// ---------------------------------------------------------------------------
+
+describe("hasLegacyPluginArtifacts", () => {
+  it("entries.openclaw-channel-dmwork → true", async () => {
+    const { hasLegacyPluginArtifacts } = await loadModule();
+    expect(hasLegacyPluginArtifacts({
+      plugins: { entries: { "openclaw-channel-dmwork": { enabled: true } } },
+    })).toBe(true);
+  });
+
+  it("installs.openclaw-channel-dmwork → true", async () => {
+    const { hasLegacyPluginArtifacts } = await loadModule();
+    expect(hasLegacyPluginArtifacts({
+      plugins: { installs: { "openclaw-channel-dmwork": { version: "0.6.4" } } },
+    })).toBe(true);
+  });
+
+  it("channels.dmwork → true (data needs migration)", async () => {
+    const { hasLegacyPluginArtifacts } = await loadModule();
+    expect(hasLegacyPluginArtifacts({
+      channels: { dmwork: { accounts: { bot1: { botToken: "x" } } } },
+    })).toBe(true);
+  });
+
+  it("bindings(channel=dmwork) → true (routing needs migration)", async () => {
+    const { hasLegacyPluginArtifacts } = await loadModule();
+    expect(hasLegacyPluginArtifacts({
+      bindings: [{ match: { channel: "dmwork" }, accountId: "x", agent: "main" }],
+    })).toBe(true);
+  });
+
+  it("plugins.allow only (no entry/install/channel/binding) → false", async () => {
+    // Allowlist alone is dead-letter — without a matching entry OpenClaw
+    // doesn't load it. Not a critical residue.
+    const { hasLegacyPluginArtifacts } = await loadModule();
+    expect(hasLegacyPluginArtifacts({
+      plugins: { allow: ["openclaw-channel-dmwork"] },
+    })).toBe(false);
+  });
+
+  it("empty cfg with disk residue (mocked) → false (cosmetic only)", async () => {
+    // Real-world Mac/Win scenario after rebrand uninstall:
+    // ~/.openclaw/extensions/openclaw-channel-dmwork/ remains on disk
+    // but cfg has no entry/install/channel/binding for it. OpenClaw's
+    // disk-scan auto-adds a disabled entry (which never calls setup()).
+    // No channel registration, no migration needed → not critical residue.
+    const { hasLegacyPluginArtifacts } = await loadModule();
+    const { existsSync } = await import("node:fs");
+    vi.mocked(existsSync).mockReturnValue(true);  // disk dir exists
+    expect(hasLegacyPluginArtifacts({})).toBe(false);
+  });
+
+  it("null cfg → false", async () => {
+    const { hasLegacyPluginArtifacts } = await loadModule();
+    expect(hasLegacyPluginArtifacts(null)).toBe(false);
+  });
+});
+
+describe("hasVeryLegacyPluginArtifacts", () => {
+  it("entries.dmwork → true", async () => {
+    const { hasVeryLegacyPluginArtifacts } = await loadModule();
+    expect(hasVeryLegacyPluginArtifacts({
+      plugins: { entries: { dmwork: { enabled: true } } },
+    })).toBe(true);
+  });
+
+  it("installs.dmwork → true", async () => {
+    const { hasVeryLegacyPluginArtifacts } = await loadModule();
+    expect(hasVeryLegacyPluginArtifacts({
+      plugins: { installs: { dmwork: { version: "0.5.21" } } },
+    })).toBe(true);
+  });
+
+  it("plugins.allow only → false (dead-letter)", async () => {
+    const { hasVeryLegacyPluginArtifacts } = await loadModule();
+    expect(hasVeryLegacyPluginArtifacts({
+      plugins: { allow: ["dmwork"] },
+    })).toBe(false);
+  });
+
+  it("empty cfg with disk residue (mocked) → false (cosmetic only)", async () => {
+    const { hasVeryLegacyPluginArtifacts } = await loadModule();
+    const { existsSync } = await import("node:fs");
+    vi.mocked(existsSync).mockReturnValue(true);
+    expect(hasVeryLegacyPluginArtifacts({})).toBe(false);
+  });
+
+  it("null cfg → false", async () => {
+    const { hasVeryLegacyPluginArtifacts } = await loadModule();
+    expect(hasVeryLegacyPluginArtifacts(null)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // detectInstallState — also kept BEFORE the `getConfigFilePathSafe` block for
 // the same `vi.doMock` re-binding reason called out at line 560.
 // ---------------------------------------------------------------------------
@@ -874,13 +975,22 @@ describe("detectInstallState", () => {
     legacyNpmInList?: boolean;
     legacyDmworkInList?: boolean;
     veryLegacyDmworkInList?: boolean;
+    /**
+     * Disabled-only list entries — what OpenClaw produces when disk-scan
+     * auto-discovers a residual plugin file but cfg has no entry for it.
+     * Such entries do NOT have setup() called → cannot register a channel,
+     * so they should NOT count as "active" by isPluginRegistered.
+     */
+    legacyNpmInListDisabled?: boolean;
+    legacyDmworkInListDisabled?: boolean;
+    veryLegacyDmworkInListDisabled?: boolean;
   }) {
     return async () => {
       const { existsSync, readFileSync } = await import("node:fs");
-      const mkListEntry = (id: string) => ({
+      const mkListEntry = (id: string, enabled = true) => ({
         id,
-        status: "loaded",
-        enabled: true,
+        status: enabled ? "loaded" : "disabled",
+        enabled,
         source: `/home/user/.openclaw/extensions/${id}/dist/index.js`,
         origin: "global",
         rootDir: `/home/user/.openclaw/extensions/${id}`,
@@ -891,6 +1001,9 @@ describe("detectInstallState", () => {
         if (opts.legacyNpmInList) plugins.push(mkListEntry("openclaw-channel-octo"));
         if (opts.legacyDmworkInList) plugins.push(mkListEntry("openclaw-channel-dmwork"));
         if (opts.veryLegacyDmworkInList) plugins.push(mkListEntry("dmwork"));
+        if (opts.legacyNpmInListDisabled) plugins.push(mkListEntry("openclaw-channel-octo", false));
+        if (opts.legacyDmworkInListDisabled) plugins.push(mkListEntry("openclaw-channel-dmwork", false));
+        if (opts.veryLegacyDmworkInListDisabled) plugins.push(mkListEntry("dmwork", false));
         return JSON.stringify({ plugins });
       })();
       mockExecFileSync.mockImplementation((cmd, args) => {
@@ -1262,6 +1375,63 @@ describe("detectInstallState", () => {
     if (state.kind === "broken") {
       expect(state.details).toMatch(/plugins list/);
       expect(state.details).toMatch(/permission denied/i);
+    }
+  });
+
+  // ── disabled / disk-only residue should NOT be reported as critical ──
+  // Mac/Windows real-machine evidence: after install the OpenClaw runtime
+  // auto-discovers leftover plugin files via disk scan and lists them as
+  // disabled (no cfg entry). Such entries do NOT have setup() called, so
+  // they cannot register a channel — no duplicate channel risk. Doctor
+  // should not report ✗ Unfinished migration in this state.
+
+  it("octo-clawhub: legacy NPM_PACKAGE_NAME in plugins list as DISABLED → legacyNpmActive=false", async () => {
+    // Real-world scenario: user upgraded from npm 1.0.0 → ClawHub octo.
+    // OpenClaw's `plugins uninstall` left the npm/node_modules dir on disk;
+    // gateway restart auto-discovered the file and listed it as `disabled`.
+    // The cfg has no entry for it → setup() not called → channel "octo"
+    // not registered by the legacy plugin → no dual-active risk.
+    await setupOctoClawHub({
+      pluginsListSupported: true,
+      legacyNpmInListDisabled: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyNpmActive).toBe(false);
+      expect(state.legacyDmworkResidue).toBe(false);
+    }
+  });
+
+  it("octo-clawhub: LEGACY_PLUGIN_ID in plugins list as DISABLED → legacyDmworkResidue=false", async () => {
+    // Real-world scenario observed on Mac after dmwork rebrand: residual
+    // `~/.openclaw/extensions/openclaw-channel-dmwork/` from an earlier
+    // stock install is auto-discovered after rebrand uninstall, listed
+    // as `disabled` because cfg has no entry. Harmless (won't load).
+    await setupOctoClawHub({
+      pluginsListSupported: true,
+      legacyDmworkInListDisabled: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyDmworkResidue).toBe(false);
+      expect(state.legacyNpmActive).toBe(false);
+    }
+  });
+
+  it("octo-clawhub: VERY_LEGACY_PLUGIN_ID in plugins list as DISABLED → legacyDmworkResidue=false", async () => {
+    await setupOctoClawHub({
+      pluginsListSupported: true,
+      veryLegacyDmworkInListDisabled: true,
+    })();
+    const { detectInstallState } = await loadModule();
+    const state = detectInstallState();
+    expect(state.kind).toBe("octo-clawhub");
+    if (state.kind === "octo-clawhub") {
+      expect(state.legacyDmworkResidue).toBe(false);
     }
   });
 });
