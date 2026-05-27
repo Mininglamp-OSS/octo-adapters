@@ -20,6 +20,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { execFileSync } from "node:child_process";
+import { pathEndsWith } from "./__test_utils__/path.js";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
@@ -440,7 +441,7 @@ describe("runInstall — update scenario", () => {
     });
     mockExistsSync.mockImplementation((path) => {
       // pretend extensions/octo exists so isHealthyInstall("octo") returns true
-      return String(path).endsWith("extensions/octo");
+      return pathEndsWith(path, "extensions/octo");
     });
 
     const { runInstall } = await loadInstall();
@@ -531,7 +532,7 @@ describe("runInstall — update scenario", () => {
         try { Object.assign(state, JSON.parse(String(data))); } catch { /* ignore */ }
       }
     });
-    mockExistsSync.mockImplementation((path) => String(path).endsWith("extensions/octo"));
+    mockExistsSync.mockImplementation((path) => pathEndsWith(path, "extensions/octo"));
 
     const { runInstall } = await loadInstall();
 

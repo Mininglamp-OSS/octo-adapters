@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
+import { pathEndsWith, RESOLVED_CFG_PATH } from "./__test_utils__/path.js";
 
 // Mock child_process at module level
 vi.mock("node:child_process", () => ({
@@ -939,9 +940,8 @@ describe("detectInstallState", () => {
       }
       vi.mocked(readFileSync).mockReturnValue(JSON.stringify(cfg));
       vi.mocked(existsSync).mockImplementation((p: unknown) => {
-        const path = String(p);
-        if (path.endsWith("/extensions/octo")) return true;
-        if (path.endsWith(".openclaw/npm/node_modules/openclaw-channel-octo")) {
+        if (pathEndsWith(p, "/extensions/octo")) return true;
+        if (pathEndsWith(p, ".openclaw/npm/node_modules/openclaw-channel-octo")) {
           return Boolean(opts.npmDirResidue);
         }
         return false;
@@ -1123,7 +1123,7 @@ describe("detectInstallState", () => {
       },
     }));
     vi.mocked(existsSync).mockImplementation((p: unknown) =>
-      String(p).endsWith("/extensions/openclaw-channel-octo"),
+      pathEndsWith(p, "/extensions/openclaw-channel-octo"),
     );
     const { detectInstallState } = await loadModule();
     const state = detectInstallState();
@@ -1313,6 +1313,11 @@ describe("getConfigFilePathSafe (Windows relative path)", () => {
     const { getConfigFilePathSafe } = await import("./openclaw-cli.js");
     const result = getConfigFilePathSafe();
 
-    expect(result).toBe("/home/user/.openclaw/openclaw.json");
+    // RESOLVED_CFG_PATH = path.resolve("/home/user/.openclaw/openclaw.json"),
+    // which on POSIX returns the input unchanged but on Windows prefixes
+    // a drive letter and converts to backslashes. Either way, the production
+    // contract (already-absolute paths come back unchanged after normalize)
+    // holds.
+    expect(result).toBe(RESOLVED_CFG_PATH);
   });
 });
