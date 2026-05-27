@@ -1,24 +1,37 @@
 import path from "node:path";
+import { homedir } from "node:os";
 
 /**
  * The POSIX-style fake config file path that test mocks return for
  * `runOpenclaw(["config", "file"])`. Use this in mock implementations
  * (the value is fed into production code, which then normalises it via
- * `getConfigFilePathSafe` → `path.resolve`).
+ * `getConfigFilePathSafe` → `normalizeConfigPath`).
  */
 export const FAKE_CFG_PATH = "/home/user/.openclaw/openclaw.json";
 
 /**
- * The OS-resolved form of FAKE_CFG_PATH after `path.resolve`. Use this
- * when asserting against arguments passed to spies (copyFileSync,
- * writeFileSync, etc.) — production code normalises every incoming
- * config path via `getConfigFilePathSafe`, so spies see the resolved
- * form, not the POSIX input.
+ * The OS-resolved form of FAKE_CFG_PATH after `normalizeConfigPath`.
+ * Use this when asserting against arguments passed to spies
+ * (copyFileSync, writeFileSync, etc.) — production code normalises
+ * every incoming config path, so spies see the resolved form, not the
+ * POSIX input.
  *
- *   Linux/macOS:  /home/user/.openclaw/openclaw.json
- *   Windows:      C:\home\user\.openclaw\openclaw.json
+ * Mirrors `cli/openclaw-cli.ts:170-180 normalizeConfigPath`:
+ *   - if `path.resolve(p) === p` it's already absolute → return as-is
+ *   - else resolve relative to `os.homedir()` (the production fallback)
+ *
+ * On POSIX (Linux/macOS) this returns the input unchanged. On Windows
+ * `path.resolve("/home/user/...")` does NOT equal the input (Node
+ * prepends a drive letter) so the homedir branch fires — yielding e.g.
+ * `C:\home\user\.openclaw\openclaw.json` on a runner whose homedir is
+ * on the C: drive, regardless of the cwd drive. This is critical on
+ * GitHub Actions Windows runners where cwd is on D: but homedir is
+ * on C:.
  */
-export const RESOLVED_CFG_PATH = path.resolve(FAKE_CFG_PATH);
+export const RESOLVED_CFG_PATH = (() => {
+  if (path.resolve(FAKE_CFG_PATH) === FAKE_CFG_PATH) return FAKE_CFG_PATH;
+  return path.resolve(homedir(), FAKE_CFG_PATH);
+})();
 
 /**
  * Path-separator-agnostic suffix matcher. Use in `existsSync` / `rmSync`
