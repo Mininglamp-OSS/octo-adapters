@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync, writeFileSync, copyFileSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { FAKE_CFG_PATH, RESOLVED_CFG_PATH } from "./__test_utils__/path.js";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
@@ -43,7 +44,7 @@ describe("saveChannelConfigFromFile", () => {
 
   it("should read channels.octo with real secrets from file", async () => {
     const { saveChannelConfigFromFile } = await loadModule();
-    mockExecFileSync.mockReturnValue("/home/user/.openclaw/openclaw.json");
+    mockExecFileSync.mockReturnValue(FAKE_CFG_PATH);
     mockReadFileSync.mockReturnValue(JSON.stringify(SAMPLE_CONFIG));
 
     const saved = saveChannelConfigFromFile();
@@ -55,7 +56,7 @@ describe("saveChannelConfigFromFile", () => {
 
   it("should return null when channels.octo does not exist", async () => {
     const { saveChannelConfigFromFile } = await loadModule();
-    mockExecFileSync.mockReturnValue("/home/user/.openclaw/openclaw.json");
+    mockExecFileSync.mockReturnValue(FAKE_CFG_PATH);
     mockReadFileSync.mockReturnValue(JSON.stringify({ channels: {} }));
 
     expect(saveChannelConfigFromFile()).toBeNull();
@@ -63,7 +64,7 @@ describe("saveChannelConfigFromFile", () => {
 
   it("should return null when file read fails", async () => {
     const { saveChannelConfigFromFile } = await loadModule();
-    mockExecFileSync.mockReturnValue("/home/user/.openclaw/openclaw.json");
+    mockExecFileSync.mockReturnValue(FAKE_CFG_PATH);
     mockReadFileSync.mockImplementation(() => { throw new Error("ENOENT"); });
 
     expect(saveChannelConfigFromFile()).toBeNull();
@@ -77,7 +78,7 @@ describe("restoreChannelConfigToFile", () => {
 
   it("should write channels.octo back to file with backup", async () => {
     const { restoreChannelConfigToFile } = await loadModule();
-    mockExecFileSync.mockReturnValue("/home/user/.openclaw/openclaw.json");
+    mockExecFileSync.mockReturnValue(FAKE_CFG_PATH);
     mockReadFileSync.mockReturnValue(JSON.stringify({ channels: {}, plugins: {} }));
 
     const dmworkConfig = SAMPLE_CONFIG.channels.octo;
@@ -85,8 +86,8 @@ describe("restoreChannelConfigToFile", () => {
 
     // Should create backup
     expect(mockCopyFileSync).toHaveBeenCalledWith(
-      "/home/user/.openclaw/openclaw.json",
-      "/home/user/.openclaw/openclaw.json.bak",
+      RESOLVED_CFG_PATH,
+      `${RESOLVED_CFG_PATH}.bak`,
     );
 
     // Should write merged config
@@ -106,7 +107,7 @@ describe("config preserve on install --force failure", () => {
     mockExecFileSync.mockImplementation((cmd, args) => {
       const argsArr = args as string[];
       if (argsArr[0] === "config" && argsArr[1] === "file") {
-        return "/home/user/.openclaw/openclaw.json";
+        return FAKE_CFG_PATH;
       }
       if (argsArr[0] === "plugins" && argsArr[1] === "install") {
         throw new Error("network error during install");
@@ -149,7 +150,7 @@ describe("config preserve on uninstall failure", () => {
     mockExecFileSync.mockImplementation((cmd, args) => {
       const argsArr = args as string[];
       if (argsArr[0] === "config" && argsArr[1] === "file") {
-        return "/home/user/.openclaw/openclaw.json";
+        return FAKE_CFG_PATH;
       }
       if (argsArr[0] === "plugins" && argsArr[1] === "uninstall") {
         throw new Error("uninstall partially failed");

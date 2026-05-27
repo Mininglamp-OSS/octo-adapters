@@ -13,6 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { execFileSync } from "node:child_process";
+import { pathIncludes, pathMatch } from "./__test_utils__/path.js";
 
 vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
@@ -90,14 +91,14 @@ async function applyFsMocks(state: FakeFsState) {
   });
   vi.mocked(fs.existsSync).mockImplementation((path: any) => {
     const p = String(path);
-    if (p.includes("/extensions/")) {
+    if (pathIncludes(p, "/extensions/")) {
       // Match `/extensions/<id>` — return true if in extDirs
-      const m = p.match(/\/extensions\/([^/]+)$/);
+      const m = pathMatch(p, /\/extensions\/([^/]+)$/);
       if (m && state.extDirs.has(m[1])) return true;
       return false;
     }
-    if (p.includes("/workspace/")) {
-      const m = p.match(/\/workspace\/([^/]+)$/);
+    if (pathIncludes(p, "/workspace/")) {
+      const m = pathMatch(p, /\/workspace\/([^/]+)$/);
       if (m && state.workspaceDirs.has(m[1])) return true;
       return false;
     }
@@ -106,9 +107,9 @@ async function applyFsMocks(state: FakeFsState) {
   });
   vi.mocked(fs.rmSync).mockImplementation((path: any) => {
     const p = String(path);
-    const m = p.match(/\/extensions\/([^/]+)$/);
+    const m = pathMatch(p, /\/extensions\/([^/]+)$/);
     if (m) state.extDirs.delete(m[1]);
-    const wm = p.match(/\/workspace\/([^/]+)$/);
+    const wm = pathMatch(p, /\/workspace\/([^/]+)$/);
     if (wm) state.workspaceDirs.delete(wm[1]);
   });
 }
