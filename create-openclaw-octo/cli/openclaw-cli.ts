@@ -7,7 +7,7 @@
 import { execFileSync, execSync } from "node:child_process";
 import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
 import { CHANNEL_ID, PLUGIN_ID, NPM_PACKAGE_NAME, LEGACY_PLUGIN_ID, LEGACY_CHANNEL_ID, VERY_LEGACY_PLUGIN_ID } from "./constants.js";
 
 /**
@@ -941,6 +941,83 @@ export function removeChannelConfigFromFile(channelId: string = CHANNEL_ID): voi
     }
   } catch {
     // best effort
+  }
+}
+
+/**
+ * Best-effort cleanup of a stale plugin entry from `~/.openclaw/npm/package.json`.
+ *
+ * Background: when OpenClaw uninstalls a plugin that was originally installed
+ * via the npm-legacy path (`openclaw plugins install <bare-name>`, which
+ * materialises in `~/.openclaw/npm/node_modules/<pkg>/`), the underlying
+ * `node_modules/<pkg>/` directory is removed, but the entry under
+ * `~/.openclaw/npm/package.json` `dependencies` is NOT pruned. The manifest
+ * therefore still lists the package as a dependency.
+ *
+ * If any subsequent flow re-runs `npm install` against that manifest (doctor
+ * repair, manual user command, host-side plugin pull, etc.), the stale
+ * version resurrects in `node_modules`, gets discovered by OpenClaw at the
+ * next gateway restart, and re-registers — surfacing weeks after what the
+ * user thought was a successful upgrade.
+ *
+ * This helper removes the named package from `dependencies` (and
+ * `devDependencies` / `peerDependencies` if present) and writes the manifest
+ * back atomically. Best-effort — silently no-ops when the manifest is
+ * missing, malformed, or doesn't list the package.
+ *
+ * See issue #94.
+ */
+export function cleanNpmPackageJsonResidue(packageName: string): void {
+  const SECTIONS = ["dependencies", "devDependencies", "peerDependencies"] as const;
+  let pkgJsonPath: string | null = null;
+  let pkg: Record<string, any> | null = null;
+
+  // Phase 1 — read + parse + plan. All failures here collapse to a silent
+  // no-op: a missing manifest (the user never used the npm-legacy layout) or
+  // a malformed manifest (something else owns it) is not actionable for the
+  // caller and not the residue case we're trying to fix.
+  try {
+    const openclawHomeDir = dirname(getConfigFilePathSafe());
+    pkgJsonPath = resolve(openclawHomeDir, "npm", "package.json");
+    if (!existsSync(pkgJsonPath)) return;
+
+    const raw = readFileSync(pkgJsonPath, "utf-8");
+    pkg = JSON.parse(raw) as Record<string, any>;
+  } catch {
+    return;
+  }
+
+  let changed = false;
+  for (const section of SECTIONS) {
+    const deps = pkg[section];
+    if (deps && typeof deps === "object" && !Array.isArray(deps) && packageName in deps) {
+      delete deps[packageName];
+      changed = true;
+      // Drop the section entirely if it becomes empty, to keep the manifest tidy.
+      if (Object.keys(deps).length === 0) delete pkg[section];
+    }
+  }
+
+  if (!changed) return;
+
+  // Phase 2 — write. Failures here are different: the residue is real and
+  // we just failed to evict it. Warn the user so they can clean up manually
+  // (or at least know to watch for the v1.0.0 plugin resurrecting later),
+  // but don't throw — the broader install/uninstall flow has already
+  // completed everything else successfully and shouldn't fail over a
+  // best-effort cleanup. See PR #91 codex review MINOR #2.
+  try {
+    const tmpPath = pkgJsonPath + ".tmp";
+    writeFileSync(tmpPath, JSON.stringify(pkg, null, 2) + "\n", "utf-8");
+    renameSync(tmpPath, pkgJsonPath);
+  } catch (err) {
+    console.warn(
+      [
+        `Warning: could not prune "${packageName}" from ${pkgJsonPath} (${(err as Error).message ?? String(err)}).`,
+        `  The dependency entry remains in the npm manifest even though the package has been uninstalled.`,
+        `  If a later \`npm install\` resurrects the old version, remove the entry manually and re-run install.`,
+      ].join("\n"),
+    );
   }
 }
 

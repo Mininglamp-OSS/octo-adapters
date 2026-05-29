@@ -483,6 +483,109 @@ describe("runInstall — update scenario", () => {
     expect(didCallGatewayRestart(calls)).toBe(true);
   });
 
+  it("legacy npm cleanup also prunes the package from ~/.openclaw/npm/package.json (issue #94)", async () => {
+    // End-to-end coverage that `runInstall()` actually invokes the
+    // manifest-residue cleanup after a successful legacy npm uninstall.
+    // Without this assertion, the helper unit tests would keep passing
+    // even if the call site in install.ts were dropped.
+    const fs = await import("node:fs");
+    const mockReadFileSync = vi.mocked(fs.readFileSync);
+    const mockExistsSync = vi.mocked(fs.existsSync);
+    const mockWriteFileSync = vi.mocked(fs.writeFileSync);
+    const mockRenameSync = vi.mocked(fs.renameSync);
+
+    mockReadFileSync.mockImplementation((path) => {
+      const p = String(path);
+      if (p.endsWith("openclaw.json")) {
+        return JSON.stringify({
+          plugins: {
+            entries: {
+              "openclaw-channel-octo": { enabled: true },
+              octo: { enabled: true },
+            },
+            installs: {
+              "openclaw-channel-octo": { source: "npm", version: "1.0.0" },
+              octo: { source: "clawhub", version: "1.0.7" },
+            },
+            allow: ["openclaw-channel-octo", "octo"],
+          },
+        });
+      }
+      if (p.endsWith("package.json")) {
+        // Mirror the manifest shape OpenClaw leaves behind after a Path B
+        // (npm-legacy) install — `node_modules/openclaw-channel-octo/` has
+        // been removed but the dependency entry persists.
+        return JSON.stringify({
+          name: "openclaw-managed",
+          private: true,
+          dependencies: {
+            "openclaw-channel-octo": "^1.0.0",
+          },
+        });
+      }
+      return "{}";
+    });
+    // Both the ClawHub plugin extension dir AND the npm/package.json need to
+    // appear to exist so isHealthyInstall("octo") returns true and the
+    // residue helper proceeds past its existsSync guard.
+    mockExistsSync.mockImplementation((path) => {
+      return (
+        pathEndsWith(path, "extensions/octo") ||
+        String(path).endsWith("package.json")
+      );
+    });
+
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.5.7\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        const id = a[2];
+        if (id === "openclaw-channel-octo") {
+          return JSON.stringify({
+            plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true },
+          });
+        }
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "1.0.7",
+          latestVersion: "1.0.7",
+          enabled: true,
+        });
+      }
+      if (a[0] === "plugins" && (a[1] === "uninstall" || a[1] === "disable")) return "";
+      if (a[0] === "gateway" && a[1] === "restart") return "";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    // The cleaned manifest must be staged to a `.tmp` sibling and then
+    // promoted via rename — this is the atomic-write contract of
+    // cleanNpmPackageJsonResidue.
+    const manifestTmpWrites = mockWriteFileSync.mock.calls.filter((c) =>
+      String(c[0]).endsWith("package.json.tmp"),
+    );
+    expect(manifestTmpWrites.length).toBeGreaterThan(0);
+
+    const writtenManifest = JSON.parse(String(manifestTmpWrites[0][1]));
+    // The stale dep entry must be gone. Other top-level fields (name,
+    // private) must survive; the now-empty dependencies section may either
+    // be dropped or present-but-empty depending on helper internals — we
+    // assert the contract that matters (the entry is gone).
+    expect(writtenManifest.dependencies?.["openclaw-channel-octo"]).toBeUndefined();
+    expect(writtenManifest.name).toBe("openclaw-managed");
+    expect(writtenManifest.private).toBe(true);
+
+    // And the tmp file must have been promoted into place.
+    const manifestRenames = mockRenameSync.mock.calls.filter((c) =>
+      String(c[0]).endsWith("package.json.tmp") && String(c[1]).endsWith("package.json"),
+    );
+    expect(manifestRenames.length).toBeGreaterThan(0);
+  });
+
   it("legacy npm cleanup preserves channels.octo + bindings(channel=octo) (P0-2 regression)", async () => {
     // PR #37 review P0-2: `openclaw plugins uninstall openclaw-channel-octo`
     // ALSO removes channels.octo as a side effect (both plugins own channel

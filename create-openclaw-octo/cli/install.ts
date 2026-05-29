@@ -36,6 +36,7 @@ import {
   pluginsInspect,
   pluginsInstall,
   pluginsUninstall,
+  cleanNpmPackageJsonResidue,
   pluginsUpdate,
   readConfigFromFile,
   removeBindingsFromFile,
@@ -294,6 +295,14 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       }
       try {
         pluginsUninstall(NPM_PACKAGE_NAME, true);
+
+        // OpenClaw's uninstall removes the node_modules/<pkg>/ directory but
+        // leaves a stale `dependencies."openclaw-channel-octo": "^1.0.0"` entry
+        // in `~/.openclaw/npm/package.json`. Any later `npm install` against
+        // that manifest (doctor repair, manual command, host pull) would
+        // resurrect the v1.0.0 plugin weeks after this upgrade — see #94.
+        // Prune the manifest entry now, while we still own the migration.
+        cleanNpmPackageJsonResidue(NPM_PACKAGE_NAME);
 
         // RESTORE channels.octo + bindings (openclaw uninstall removed them as
         // a side effect; we kept a snapshot above)

@@ -1587,3 +1587,165 @@ describe("getConfigFilePathSafe (Windows relative path)", () => {
     expect(result).toBe(RESOLVED_CFG_PATH);
   });
 });
+
+// ---------------------------------------------------------------------------
+// cleanNpmPackageJsonResidue — issue #94 regression coverage
+//
+// OpenClaw's `plugins uninstall` removes ~/.openclaw/npm/node_modules/<pkg>/
+// but leaves the entry under ~/.openclaw/npm/package.json `dependencies`,
+// which lets a later `npm install` resurrect the old plugin. This helper
+// prunes the manifest entry; here we lock down the cases that matter.
+// ---------------------------------------------------------------------------
+
+describe("cleanNpmPackageJsonResidue", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function setupManifest(initial: Record<string, any> | null): {
+    existsSync: any;
+    readFileSync: any;
+    writeFileSync: any;
+    renameSync: any;
+  } {
+    return {
+      existsSync: vi.fn((p: any) => {
+        const path = String(p);
+        // openclaw.json absent → getConfigFilePathSafe falls back to
+        // <homedir>/.openclaw/openclaw.json; the npm/package.json sibling is
+        // what we toggle on `initial !== null`.
+        if (path.endsWith("package.json")) return initial !== null;
+        return false;
+      }),
+      readFileSync: vi.fn(() => JSON.stringify(initial ?? {})),
+      writeFileSync: vi.fn(),
+      renameSync: vi.fn(),
+    };
+  }
+
+  async function loadWithMocks(initial: Record<string, any> | null) {
+    const mocks = setupManifest(initial);
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...actual,
+        existsSync: mocks.existsSync,
+        readFileSync: mocks.readFileSync,
+        writeFileSync: mocks.writeFileSync,
+        copyFileSync: vi.fn(),
+        renameSync: mocks.renameSync,
+      };
+    });
+    const mod = await import("./openclaw-cli.js");
+    return { mod, ...mocks };
+  }
+
+  it("removes the package from dependencies and writes the manifest atomically", async () => {
+    const { mod, writeFileSync, renameSync } = await loadWithMocks({
+      name: "openclaw-managed",
+      private: true,
+      dependencies: {
+        "openclaw-channel-octo": "^1.0.0",
+        "some-other-dep": "^2.0.0",
+      },
+    });
+    mod.cleanNpmPackageJsonResidue("openclaw-channel-octo");
+
+    expect(writeFileSync).toHaveBeenCalledTimes(1);
+    expect(renameSync).toHaveBeenCalledTimes(1);
+    const [tmpPath, content] = writeFileSync.mock.calls[0] as [string, string];
+    expect(tmpPath).toMatch(/package\.json\.tmp$/);
+    const written = JSON.parse(content);
+    expect(written.dependencies).not.toHaveProperty("openclaw-channel-octo");
+    expect(written.dependencies).toHaveProperty("some-other-dep");
+    // Other top-level fields preserved.
+    expect(written.name).toBe("openclaw-managed");
+    expect(written.private).toBe(true);
+  });
+
+  it("removes the package from devDependencies and peerDependencies too", async () => {
+    const { mod, writeFileSync } = await loadWithMocks({
+      devDependencies: { "openclaw-channel-octo": "^1.0.0" },
+      peerDependencies: { "openclaw-channel-octo": "^1.0.0" },
+    });
+    mod.cleanNpmPackageJsonResidue("openclaw-channel-octo");
+
+    expect(writeFileSync).toHaveBeenCalledTimes(1);
+    const written = JSON.parse(writeFileSync.mock.calls[0][1] as string);
+    expect(written).not.toHaveProperty("devDependencies");
+    expect(written).not.toHaveProperty("peerDependencies");
+  });
+
+  it("deletes a now-empty dependencies section instead of leaving an empty object", async () => {
+    const { mod, writeFileSync } = await loadWithMocks({
+      dependencies: { "openclaw-channel-octo": "^1.0.0" },
+    });
+    mod.cleanNpmPackageJsonResidue("openclaw-channel-octo");
+
+    const written = JSON.parse(writeFileSync.mock.calls[0][1] as string);
+    expect(written).not.toHaveProperty("dependencies");
+  });
+
+  it("is a no-op when the package is absent (no write, no rename)", async () => {
+    const { mod, writeFileSync, renameSync } = await loadWithMocks({
+      dependencies: { "some-other-dep": "^2.0.0" },
+    });
+    mod.cleanNpmPackageJsonResidue("openclaw-channel-octo");
+
+    expect(writeFileSync).not.toHaveBeenCalled();
+    expect(renameSync).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when the manifest file does not exist", async () => {
+    const { mod, writeFileSync, renameSync, readFileSync } =
+      await loadWithMocks(null);
+    mod.cleanNpmPackageJsonResidue("openclaw-channel-octo");
+
+    expect(readFileSync).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
+    expect(renameSync).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op (and does not throw) when the manifest is malformed JSON", async () => {
+    // Pre-prime with valid JSON to satisfy setupManifest's mock, then
+    // override readFileSync to return garbage.
+    const { mod, writeFileSync, renameSync, readFileSync } = await loadWithMocks({
+      dependencies: { "openclaw-channel-octo": "^1.0.0" },
+    });
+    readFileSync.mockReturnValue("{ this is not valid json");
+
+    expect(() =>
+      mod.cleanNpmPackageJsonResidue("openclaw-channel-octo"),
+    ).not.toThrow();
+    expect(writeFileSync).not.toHaveBeenCalled();
+    expect(renameSync).not.toHaveBeenCalled();
+  });
+
+  it("warns (but does not throw) when manifest write fails — keeps caller's main flow intact", async () => {
+    // Codex review (MINOR #2): silent IO failure would leave the residue in
+    // place while install reports success. Warn loudly so the user knows to
+    // clean up manually.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { mod, writeFileSync } = await loadWithMocks({
+        dependencies: { "openclaw-channel-octo": "^1.0.0" },
+      });
+      writeFileSync.mockImplementation(() => {
+        throw new Error("EACCES: permission denied");
+      });
+
+      expect(() =>
+        mod.cleanNpmPackageJsonResidue("openclaw-channel-octo"),
+      ).not.toThrow();
+
+      expect(warnSpy).toHaveBeenCalled();
+      const warning = warnSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(warning).toMatch(/openclaw-channel-octo/);
+      expect(warning).toMatch(/EACCES|permission denied/);
+      expect(warning).toMatch(/manually/);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
