@@ -846,6 +846,76 @@ export function getOpenClawVersion(): string | null {
   }
 }
 
+/**
+ * Discriminated probe result for `openclaw --version`. Used by
+ * `detectOpenClawState()` so version-gate failures can surface accurate
+ * guidance instead of folding "missing binary" and "binary present but
+ * unrunnable" into the same "openclaw not found" message — see issue #93.
+ *
+ * - `ok`: binary on PATH, version parsed.
+ * - `missing`: `ENOENT` — no such file. Suggest `npm i -g openclaw`.
+ * - `probe-failed`: binary found and spawned, but `--version` threw or
+ *   produced unparseable output. Suggest `which openclaw` / inspect the
+ *   resolved path / check permissions, NOT a reinstall.
+ */
+export type OpenClawProbeResult =
+  | { kind: "ok"; version: string; resolvedPath: string }
+  | { kind: "missing" }
+  | { kind: "probe-failed"; reason: string; resolvedPath: string };
+
+export function getOpenClawProbeState(): OpenClawProbeResult {
+  const resolvedPath = getOpenClawBin();
+  let out: string;
+  try {
+    out = runOpenclaw(["--version"], {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      // ENOENT from execFileSync ambiguously means either "the binary file
+      // itself doesn't exist" OR "the binary exists but its shebang
+      // interpreter is missing" (e.g. `#!/missing/node` on POSIX). The
+      // remediation differs sharply:
+      //   - file missing → `npm i -g openclaw`
+      //   - interpreter missing → install/repair the runtime; reinstalling
+      //     openclaw won't help
+      // Disambiguate by checking whether the resolved path is itself a
+      // concrete file on disk. If it is, this is a probe failure (likely
+      // bad shebang), not a missing binary. See PR #101 review.
+      const resolvedExists =
+        resolvedPath !== "openclaw" && existsSync(resolvedPath);
+      if (resolvedExists) {
+        return {
+          kind: "probe-failed",
+          reason: `${err?.message ?? "ENOENT"} (binary exists at ${resolvedPath} — likely a missing shebang interpreter or broken wrapper)`,
+          resolvedPath,
+        };
+      }
+      return { kind: "missing" };
+    }
+    // Anything else means the spawn / probe itself failed (EACCES,
+    // broken shim crashing on launch, sandboxed FS denying execute, etc.).
+    return {
+      kind: "probe-failed",
+      reason: err?.message ?? String(err),
+      resolvedPath,
+    };
+  }
+  const match = out.match(/(\d{4}\.\d+\.\d+)/);
+  if (!match) {
+    // Binary ran but its output didn't contain a recognisable version.
+    // Treat as probe-failed too — caller can't trust any version-based
+    // routing decision.
+    return {
+      kind: "probe-failed",
+      reason: `openclaw --version output did not match the expected YYYY.M.PATCH format (got: ${JSON.stringify(out.slice(0, 200))})`,
+      resolvedPath,
+    };
+  }
+  return { kind: "ok", version: match[1], resolvedPath };
+}
+
 export function getOpenClawVersionStrict(): string | null {
   try {
     const out = runOpenclaw(["--version"], {
@@ -1575,7 +1645,26 @@ export function detectInstallState(): InstallState {
 export type OpenClawState =
   | { kind: "ok"; version: string }
   | { kind: "warn"; version: string; reason: string }
-  | { kind: "block"; version: string | null; reason: string };
+  | {
+      kind: "block";
+      version: string | null;
+      reason: string;
+      /**
+       * Tag the failure mode so callers can render the right remediation:
+       *
+       * - `"missing"`: openclaw binary not found on PATH → `npm i -g openclaw`.
+       * - `"probe-failed"`: binary present (`resolvedPath` is set) but
+       *   `--version` failed or produced unparseable output. Common causes:
+       *   permission error, corrupted shim, missing node interpreter, wrapper
+       *   that crashes on `--version`. Reinstalling is the wrong remediation
+       *   — caller should suggest `which openclaw` / check permissions /
+       *   inspect the resolved path. See issue #93.
+       * - `"too-old"`: binary works, just below the technical hard floor.
+       */
+      failureKind?: "missing" | "probe-failed" | "too-old";
+      /** Resolved path of the openclaw binary, if any was found. */
+      resolvedPath?: string;
+    };
 
 /**
  * Hard floor: below this `openclaw plugins install clawhub:<spec>` does
@@ -1620,19 +1709,32 @@ export function compareOpenClawVersion(a: string, b: string): -1 | 0 | 1 {
 }
 
 export function detectOpenClawState(): OpenClawState {
-  const v = getOpenClawVersion();
-  if (!v) {
+  const probe = getOpenClawProbeState();
+  if (probe.kind === "missing") {
     return {
       kind: "block",
       version: null,
       reason: "OpenClaw is not installed or not on PATH",
+      failureKind: "missing",
     };
   }
+  if (probe.kind === "probe-failed") {
+    return {
+      kind: "block",
+      version: null,
+      reason: `OpenClaw at ${probe.resolvedPath} failed to run: ${probe.reason}`,
+      failureKind: "probe-failed",
+      resolvedPath: probe.resolvedPath,
+    };
+  }
+  const v = probe.version;
   if (compareOpenClawVersion(v, OPENCLAW_PEER_MIN) < 0) {
     return {
       kind: "block",
       version: v,
       reason: `OpenClaw ${v} is too old (need >= ${OPENCLAW_PEER_MIN})`,
+      failureKind: "too-old",
+      resolvedPath: probe.resolvedPath,
     };
   }
   if (compareOpenClawVersion(v, OPENCLAW_RECOMMENDED) < 0) {
