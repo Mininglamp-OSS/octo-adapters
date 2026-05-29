@@ -248,6 +248,22 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       runDeadlockRepair(spec, quiet, tagLabel);
       didChange = true;
       break;
+    case "octo-npm-legacy":
+      // Legacy npm install of openclaw-channel-octo@1.x — register fresh
+      // ClawHub install over the top. `oldNpmSnapshot` (captured at the top
+      // of runInstall) takes care of uninstalling the legacy plugin after
+      // the new install verifies healthy, so the user-visible sequence here
+      // is just "Detected legacy npm install... Installing ClawHub octo".
+      // Routing the user through runDeadlockRepair() would emit a scary
+      // "Detected config deadlock" log even though this is a known and
+      // recoverable state. See #92.
+      console.log(
+        `Detected legacy npm install of ${NPM_PACKAGE_NAME}. Installing ClawHub octo${tagLabel}...`,
+      );
+      pluginsInstall(spec, quiet, opts.force);
+      console.log("Plugin installed successfully.");
+      didChange = true;
+      break;
     case "fresh":
       console.log(`Installing Octo plugin${tagLabel}...`);
       pluginsInstall(spec, quiet, opts.force);
