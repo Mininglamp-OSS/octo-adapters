@@ -151,6 +151,33 @@ describe("ensureOpenClawCompat", () => {
     expect(() => ensureOpenClawCompat({ requireClawHubProtocol: false })).toThrow(/__exit__:1/);
   });
 
+  it("blocks with probe-failure guidance (not 'reinstall') when openclaw is on PATH but cannot be run (issue #93)", async () => {
+    // openclaw IS installed (resolvedPath present) but failed to invoke —
+    // permission error, broken shim, missing node, etc. The fix steers the
+    // user toward `which openclaw` / chmod / inspecting the resolved path
+    // instead of the misleading "openclaw not found, npm i -g openclaw"
+    // message they used to see.
+    const { ensureOpenClawCompat } = await loadWithDetect({
+      kind: "block",
+      version: null,
+      reason: "OpenClaw at /usr/local/bin/openclaw failed to run: EACCES: permission denied",
+      failureKind: "probe-failed",
+      resolvedPath: "/usr/local/bin/openclaw",
+    } as any);
+
+    expect(() => ensureOpenClawCompat()).toThrow(/__exit__:1/);
+    const message = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    // Must point at the resolved path, not suggest a reinstall.
+    expect(message).toMatch(/failed to run/i);
+    expect(message).toMatch(/\/usr\/local\/bin\/openclaw/);
+    expect(message).toMatch(/which openclaw/);
+    expect(message).toMatch(/permission|chmod \+x/);
+    // Anti-assertion: must NOT recommend `npm i -g openclaw` here
+    // (that's the remediation for the truly-missing branch, and was the
+    // pre-fix misleading message).
+    expect(message).not.toMatch(/npm i -g openclaw/);
+  });
+
   it("warns but does not exit when below recommended floor", async () => {
     const { ensureOpenClawCompat } = await loadWithDetect({
       kind: "warn",
@@ -174,5 +201,127 @@ describe("ensureOpenClawCompat", () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(errorSpy).not.toHaveBeenCalled();
     expect(warnSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// enforceHealthyClawHubInstall + renderInstallStatusBanner — probe-failed branch
+//
+// PR #101 review (yujiawei + lml2468): the discriminated `failureKind` from
+// detectOpenClawState was only consumed by ensureOpenClawCompat(). The two
+// other surfaces — enforceHealthyClawHubInstall (gates bind / quickstart /
+// remove-account) and renderInstallStatusBanner (feeds doctor) — kept
+// rendering "Upgrade: npm i -g openclaw@latest" for probe-failed states,
+// which is the exact misleading remediation issue #93 was filed about.
+// These tests lock down the new probe-failed branch on both surfaces.
+// ---------------------------------------------------------------------------
+
+describe("enforceHealthyClawHubInstall — probe-failed branch (issue #93 / PR #101 review)", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let detectSpy: any;
+
+  beforeEach(() => {
+    vi.resetModules();
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
+      throw new Error(`__exit__:${code ?? 0}`);
+    }) as never);
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    detectSpy?.mockRestore?.();
+  });
+
+  it("renders 'which openclaw' guidance (not 'npm i -g openclaw') for probe-failed block", async () => {
+    const cliMod = await import("./openclaw-cli.js");
+    detectSpy = vi.spyOn(cliMod, "detectOpenClawState").mockReturnValue({
+      kind: "block",
+      version: null,
+      reason: "OpenClaw at /usr/local/bin/openclaw failed to run: EACCES: permission denied",
+      failureKind: "probe-failed",
+      resolvedPath: "/usr/local/bin/openclaw",
+    } as any);
+    const utils = await import("./utils.js");
+
+    expect(() => utils.enforceHealthyClawHubInstall()).toThrow(/__exit__:1/);
+    const out = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(out).toMatch(/which openclaw/);
+    expect(out).toMatch(/\/usr\/local\/bin\/openclaw/);
+    expect(out).toMatch(/failed to run/i);
+    // Anti-assertion: must NOT recommend reinstall, the wrong remediation
+    // for a present-but-unrunnable binary.
+    expect(out).not.toMatch(/npm i -g openclaw/);
+  });
+
+  it("still renders 'npm i -g openclaw@latest' for missing / too-old blocks (existing behaviour preserved)", async () => {
+    const cliMod = await import("./openclaw-cli.js");
+    detectSpy = vi.spyOn(cliMod, "detectOpenClawState").mockReturnValue({
+      kind: "block",
+      version: null,
+      reason: "OpenClaw is not installed or not on PATH",
+      failureKind: "missing",
+    } as any);
+    const utils = await import("./utils.js");
+
+    expect(() => utils.enforceHealthyClawHubInstall()).toThrow(/__exit__:1/);
+    const out = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(out).toMatch(/npm i -g openclaw@latest/);
+  });
+});
+
+describe("renderInstallStatusBanner — probe-failed branch (issue #93 / PR #101 review)", () => {
+  let detectOpenClawStateSpy: any;
+  let detectInstallStateSpy: any;
+
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    detectOpenClawStateSpy?.mockRestore?.();
+    detectInstallStateSpy?.mockRestore?.();
+  });
+
+  it("renders 'which openclaw' hint (not 'Upgrade: npm i -g openclaw') for probe-failed block", async () => {
+    const cliMod = await import("./openclaw-cli.js");
+    detectOpenClawStateSpy = vi.spyOn(cliMod, "detectOpenClawState").mockReturnValue({
+      kind: "block",
+      version: null,
+      reason: "OpenClaw at /usr/local/bin/openclaw failed to run: EACCES: permission denied",
+      failureKind: "probe-failed",
+      resolvedPath: "/usr/local/bin/openclaw",
+    } as any);
+    detectInstallStateSpy = vi.spyOn(cliMod, "detectInstallState").mockReturnValue({
+      kind: "none",
+    } as any);
+    const utils = await import("./utils.js");
+
+    const banner = utils.renderInstallStatusBanner();
+    expect(banner).not.toBeNull();
+    expect(banner).toMatch(/failed to run/i);
+    expect(banner).toMatch(/which openclaw/);
+    expect(banner).toMatch(/\/usr\/local\/bin\/openclaw/);
+    // Anti-assertion: probe-failed must not steer the user toward reinstall.
+    expect(banner).not.toMatch(/Upgrade: npm i -g openclaw/);
+  });
+
+  it("still renders 'Upgrade: npm i -g openclaw@latest' for missing / too-old blocks", async () => {
+    const cliMod = await import("./openclaw-cli.js");
+    detectOpenClawStateSpy = vi.spyOn(cliMod, "detectOpenClawState").mockReturnValue({
+      kind: "block",
+      version: null,
+      reason: "OpenClaw is not installed or not on PATH",
+      failureKind: "missing",
+    } as any);
+    detectInstallStateSpy = vi.spyOn(cliMod, "detectInstallState").mockReturnValue({
+      kind: "none",
+    } as any);
+    const utils = await import("./utils.js");
+
+    const banner = utils.renderInstallStatusBanner();
+    expect(banner).toMatch(/Upgrade: npm i -g openclaw@latest/);
   });
 });

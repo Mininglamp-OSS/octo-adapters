@@ -125,7 +125,31 @@ export function ensureOpenClawCompat(
 ): void {
   const state = detectOpenClawState();
   if (state.kind === "block") {
-    if (state.version === null) {
+    // Probe-failed: binary exists but couldn't be invoked. Common causes
+    // are permission errors, broken shims, missing node interpreter, or
+    // a wrapper that crashes on `--version`. Reinstalling is the wrong
+    // remediation here — point the user at the resolved path and the
+    // most likely failure modes. See issue #93.
+    if (state.failureKind === "probe-failed") {
+      console.error(
+        [
+          `Error: ${state.reason}`,
+          "",
+          "openclaw is on PATH but failed to run. Likely causes:",
+          "  - missing execute permission (try: chmod +x " + (state.resolvedPath ?? "<openclaw>") + ")",
+          "  - broken shim or missing node interpreter",
+          "  - sandboxed filesystem denying execute on this path",
+          "",
+          "Inspect with:",
+          "  which openclaw          # confirm the resolved path",
+          "  openclaw --version      # see the raw failure",
+          "",
+          "Re-running the install is unlikely to help if it was previously working.",
+        ].join("\n"),
+      );
+      process.exit(1);
+    }
+    if (state.failureKind === "missing" || state.version === null) {
       console.error(
         [
           "Error: openclaw not found. Install it first:",
@@ -300,6 +324,24 @@ export function enforceHealthyClawHubInstall(): void {
 
   // OpenClaw too old or missing → hard block (plugin can't load at all)
   if (openclaw.kind === "block") {
+    // Probe-failed: binary exists but failed to invoke. Surface the
+    // resolved path and likely causes — `npm i -g openclaw@latest` is the
+    // wrong remediation here (re-installing into the same broken location).
+    // Mirrors the discriminated rendering in `ensureOpenClawCompat()`.
+    // See issue #93 / PR #101 review.
+    if (openclaw.failureKind === "probe-failed") {
+      printUpgradeNotice({
+        status: "block",
+        title: openclaw.reason,
+        body:
+          "openclaw is on PATH but failed to run. Likely causes: missing execute " +
+          "permission, broken shim or missing node interpreter, sandboxed filesystem.",
+        command: `which openclaw    # confirm path; chmod +x ${openclaw.resolvedPath ?? "<openclaw>"} if a permission issue`,
+        followup:
+          "Re-installing the package is unlikely to help if openclaw was previously working.",
+      });
+      process.exit(1);
+    }
     printUpgradeNotice({
       status: "block",
       title: openclaw.reason,
@@ -405,7 +447,17 @@ export function renderInstallStatusBanner(): string | null {
 
   if (openclaw.kind === "block") {
     lines.push(`✗ ${openclaw.reason}`);
-    lines.push("  Upgrade: npm i -g openclaw@latest");
+    // Differentiate probe-failed from missing/too-old. Suggesting
+    // `npm i -g openclaw@latest` for a binary that exists but can't be run
+    // (broken shebang / EACCES / sandboxed execute) sends users down the
+    // wrong remediation path. See #93 / PR #101 review.
+    if (openclaw.failureKind === "probe-failed") {
+      lines.push(
+        `  Run: which openclaw    # confirm path${openclaw.resolvedPath ? `; chmod +x ${openclaw.resolvedPath} if a permission issue` : ""}`,
+      );
+    } else {
+      lines.push("  Upgrade: npm i -g openclaw@latest");
+    }
   } else if (openclaw.kind === "warn") {
     lines.push(`⚠ ${openclaw.reason}`);
     lines.push("  Recommended: npm i -g openclaw@latest");

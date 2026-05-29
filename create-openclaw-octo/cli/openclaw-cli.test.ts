@@ -890,6 +890,84 @@ describe("detectOpenClawState", () => {
     if (state.kind === "block") {
       expect(state.version).toBeNull();
       expect(state.reason).toMatch(/not installed|not on PATH/i);
+      expect(state.failureKind).toBe("missing");
+    }
+  });
+
+  it("block with failureKind=probe-failed when binary EXISTS at resolved path but ENOENT is thrown (e.g. missing shebang interpreter — PR #101 review)", async () => {
+    // POSIX edge case: execFileSync reports `ENOENT` not only when the
+    // binary itself is missing, but ALSO when the binary exists and its
+    // shebang interpreter is missing (e.g. `#!/missing/node`). The naive
+    // implementation collapsed both into `missing` → "openclaw not found"
+    // → "npm i -g openclaw", which is the wrong remediation when the
+    // openclaw shim is fine but the runtime under it is broken.
+    //
+    // Distinguish by checking whether the resolved path is a concrete file.
+    // If it is, ENOENT means probe-failed (likely bad shebang); only when
+    // there's no resolved path on disk do we report missing.
+    const fs = await import("node:fs");
+    const childProcess = await import("node:child_process");
+
+    // Make `which -a openclaw` (called from findGlobalOpenclaw at module
+    // load) return an absolute path, so the module-level `OPENCLAW`
+    // constant points at it.
+    vi.mocked(childProcess.execSync).mockReturnValue("/usr/local/bin/openclaw\n");
+    // existsSync returns true for that path → the binary "exists" on disk.
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    // But when we try to actually run `openclaw --version`, we get ENOENT
+    // (the shebang interpreter is missing).
+    vi.mocked(childProcess.execFileSync).mockImplementation(() => {
+      const err = new Error(
+        "spawn /usr/local/bin/openclaw ENOENT: shebang interpreter '/missing/node' not found",
+      ) as any;
+      err.code = "ENOENT";
+      throw err;
+    });
+
+    const { detectOpenClawState } = await loadModule();
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("block");
+    if (state.kind === "block") {
+      expect(state.failureKind).toBe("probe-failed");
+      expect(state.resolvedPath).toBe("/usr/local/bin/openclaw");
+      expect(state.reason).toMatch(/binary exists at/);
+      expect(state.reason).toMatch(/shebang interpreter|broken wrapper/);
+    }
+  });
+
+  it("block with failureKind=probe-failed when openclaw is on PATH but spawn fails (e.g. EACCES)", async () => {
+    // Issue #93 regression: permission errors / broken shims / sandboxed
+    // execute denials must NOT collapse into the "openclaw not found"
+    // branch. The probe layer reports the failure verbatim and
+    // detectOpenClawState surfaces it as a distinct failureKind so
+    // callers (ensureOpenClawCompat) can render the right remediation.
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(() => {
+      const err = new Error("EACCES: permission denied, open '/usr/local/bin/openclaw'") as any;
+      err.code = "EACCES";
+      throw err;
+    });
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("block");
+    if (state.kind === "block") {
+      expect(state.failureKind).toBe("probe-failed");
+      expect(state.reason).toMatch(/failed to run/i);
+      expect(state.reason).toMatch(/EACCES|permission denied/);
+      expect(state.resolvedPath).toBeDefined();
+    }
+  });
+
+  it("block with failureKind=probe-failed when --version output is unparseable (e.g. broken wrapper prints garbage)", async () => {
+    const { detectOpenClawState } = await loadModule();
+    mockExecFileSync.mockImplementation(
+      () => "Segmentation fault\nopenclaw: error before init\n" as any,
+    );
+    const state = detectOpenClawState();
+    expect(state.kind).toBe("block");
+    if (state.kind === "block") {
+      expect(state.failureKind).toBe("probe-failed");
+      expect(state.reason).toMatch(/did not match the expected/i);
+      expect(state.resolvedPath).toBeDefined();
     }
   });
 
@@ -902,6 +980,7 @@ describe("detectOpenClawState", () => {
       expect(state.version).toBe("2026.3.13");
       expect(state.reason).toContain("2026.3.13");
       expect(state.reason).toContain("2026.3.22");
+      expect(state.failureKind).toBe("too-old");
     }
   });
 
