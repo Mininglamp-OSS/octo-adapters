@@ -7,7 +7,12 @@
  */
 
 import { createInterface } from "node:readline";
-import { getOpenClawVersion, getOpenClawVersionStrict, detectInstallState, detectOpenClawState } from "./openclaw-cli.js";
+import {
+  detectInstallState,
+  detectOpenClawState,
+  OPENCLAW_PEER_MIN,
+  OPENCLAW_RECOMMENDED,
+} from "./openclaw-cli.js";
 import {
   PLUGIN_ID, CHANNEL_ID,
   NPM_PACKAGE_NAME, CLAWHUB_INSTALL_SPEC,
@@ -34,7 +39,6 @@ export {
 // CLI-only constants
 // ---------------------------------------------------------------------------
 
-export const MIN_OPENCLAW_VERSION = "2026.4.15";
 export const RECOMMENDED_DM_SCOPE = "per-account-channel-peer";
 
 // ---------------------------------------------------------------------------
@@ -57,46 +61,111 @@ export function channelConfigPathFor(channelId: string, ...parts: string[]): str
 // ---------------------------------------------------------------------------
 
 /**
- * Compare two semver-like version strings. Returns -1, 0, or 1.
+ * Caller intent for `ensureOpenClawCompat()`.
  *
- * Intentionally date-only: assumes inputs of the shape `2026.4.15` (matching
- * OpenClaw's `YYYY.M.PATCH` versioning). Prerelease suffixes (`2026.4.15-rc.1`)
- * would Number()-cast to NaN and break ordering. If MIN_OPENCLAW_VERSION ever
- * needs prerelease handling, switch this to `semver.compare`.
+ * `requireClawHubProtocol`: caller will dispatch through `openclaw plugins
+ * install clawhub:<spec>`, which only exists on OpenClaw v2026.3.22+
+ * (upstream commit 91b2800241). Setting this to `true` adds a hard floor:
+ * versions below `OPENCLAW_PEER_MIN` exit with a friendly upgrade message
+ * before any config is touched, instead of letting OpenClaw bail mid-flow
+ * with `unsupported npm spec: protocol specs are not allowed`.
+ *
+ * Defaults to `false` so commands that don't reach the `clawhub:` path
+ * (uninstall, `install --from <local-tarball>`, bind, etc.) still work on
+ * older OpenClaw — they'll see a softer warning instead of a hard abort.
  */
-function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const va = pa[i] ?? 0;
-    const vb = pb[i] ?? 0;
-    if (va < vb) return -1;
-    if (va > vb) return 1;
-  }
-  return 0;
+export interface EnsureOpenClawCompatOptions {
+  requireClawHubProtocol?: boolean;
 }
 
 /**
- * Check that openclaw is available. Exits if not found.
- * Warns (but continues) if version is below recommended minimum.
+ * Decide whether an install spec resolves through `openclaw plugins
+ * install clawhub:<…>` (which requires OpenClaw v2026.3.22+).
+ *
+ * - undefined / empty → default install path uses `clawhub:octo`.
+ * - any spec starting with `clawhub:` → goes through the same `clawhub:`
+ *   plugin install machinery and inherits the same version requirement
+ *   (regression for PR #91 review: `--from clawhub:octo` previously
+ *   bypassed the hard gate and ended up failing partway into migration).
+ * - everything else (npm bare names, file paths, file://, http(s) URLs,
+ *   local tarballs) → does NOT require `clawhub:` and is allowed on
+ *   older OpenClaw with a softer warning.
  */
-export function ensureOpenClawCompat(): void {
-  let version: string | null = null;
-  try {
-    version = getOpenClawVersionStrict();
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-  if (!version) {
-    console.error(
-      "Error: openclaw not found. Install it first: npm i -g openclaw",
-    );
-    process.exit(1);
-  }
-  if (compareVersions(version, MIN_OPENCLAW_VERSION) < 0) {
+export function requiresClawHubProtocol(installSpec?: string): boolean {
+  if (!installSpec) return true;
+  return installSpec.startsWith("clawhub:");
+}
+
+/**
+ * Check that openclaw is available and version-compatible. Behaviour
+ * depends on `opts.requireClawHubProtocol`:
+ *
+ * - openclaw missing: always exit 1 with install guidance.
+ * - openclaw < `OPENCLAW_PEER_MIN`:
+ *     - `requireClawHubProtocol === true`: exit 2 with upgrade guidance,
+ *       before any config mutation. (Why: `clawhub:` spec was introduced
+ *       in v2026.3.22; older runtimes throw `unsupported npm spec`
+ *       partway through migration.)
+ *     - otherwise: warn that clawhub-based ops are unavailable, but allow
+ *       the caller to proceed (uninstall, --from local tarball, etc.).
+ * - openclaw < `OPENCLAW_RECOMMENDED`: warn, allow.
+ * - openclaw >= `OPENCLAW_RECOMMENDED`: silent.
+ *
+ * Delegates to `detectOpenClawState()` so this function and the rest of
+ * the CLI agree on a single version-policy source of truth — see
+ * `openclaw-cli.ts`. Previously this function maintained a parallel
+ * `MIN_OPENCLAW_VERSION` constant + local `compareVersions()` helper plus
+ * a soft-warn-only path; that meant install proceeded past 4 steps of
+ * config mutation before dying at step 5 with a raw stack trace on truly
+ * incompatible versions (e.g. < 2026.3.22 has no `clawhub:` protocol
+ * support). See issue #90.
+ */
+export function ensureOpenClawCompat(
+  opts: EnsureOpenClawCompatOptions = {},
+): void {
+  const state = detectOpenClawState();
+  if (state.kind === "block") {
+    if (state.version === null) {
+      console.error(
+        [
+          "Error: openclaw not found. Install it first:",
+          "",
+          "  npm i -g openclaw",
+        ].join("\n"),
+      );
+      process.exit(1);
+    }
+    if (opts.requireClawHubProtocol) {
+      console.error(
+        [
+          `Error: ${state.reason}.`,
+          "",
+          `Required:    OpenClaw >= ${OPENCLAW_PEER_MIN}`,
+          `Recommended: OpenClaw >= ${OPENCLAW_RECOMMENDED}`,
+          "",
+          "Run:",
+          "  openclaw update",
+          "",
+          "Then re-run this command.",
+        ].join("\n"),
+      );
+      process.exit(2);
+    }
+    // Caller doesn't need the clawhub: protocol path: surface the version
+    // shortfall as a warning so e.g. uninstall and `install --from` still
+    // work on pre-2026.3.22 hosts.
     console.warn(
-      `Warning: OpenClaw ${version} is older than recommended ${MIN_OPENCLAW_VERSION}. Some features may not work correctly. Consider upgrading.`,
+      [
+        `Warning: ${state.reason}.`,
+        `(clawhub:-based install is unavailable on this OpenClaw version.`,
+        ` Local-tarball install (--from) and uninstall remain available.)`,
+      ].join("\n"),
+    );
+    return;
+  }
+  if (state.kind === "warn") {
+    console.warn(
+      `Warning: ${state.reason}. Consider upgrading: openclaw update`,
     );
   }
 }
