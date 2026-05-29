@@ -543,6 +543,102 @@ describe("pluginsInstall 3-layer degradation", () => {
     expect(lastArgs).not.toContain("--force");
     expect(lastArgs).not.toContain("--dangerously-force-unsafe-install");
   });
+
+  it("should rewrap ClawHub timeout into a friendly error with upgrade guidance", async () => {
+    const { pluginsInstall } = await loadModule();
+    const upstream = new Error("Command failed: openclaw plugins install clawhub:octo\nClawHub request timed out after 30000ms");
+    (upstream as any).stderr = Buffer.from("ClawHub request timed out after 30000ms");
+    mockExecFileSync.mockImplementation(() => {
+      throw upstream;
+    });
+    let caught: unknown;
+    try {
+      pluginsInstall("clawhub:octo", true, true);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeDefined();
+    expect((caught as Error).message).toMatch(/ClawHub install of "clawhub:octo" timed out/);
+    expect((caught as Error).message).toMatch(/openclaw update/);
+    expect((caught as Error).message).toMatch(/2026\.5\.22/);
+    // Original error preserved on `cause` so callers / loggers can inspect it.
+    expect((caught as { cause?: unknown }).cause).toBe(upstream);
+    // No degradation — timeout is not a "unsupported option" signal.
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("should pass through non-timeout, non-option errors unchanged", async () => {
+    const { pluginsInstall } = await loadModule();
+    const upstream = new Error("ENOENT: openclaw not found on PATH");
+    mockExecFileSync.mockImplementation(() => {
+      throw upstream;
+    });
+    expect(() => pluginsInstall("clawhub:octo", true)).toThrow("ENOENT: openclaw not found on PATH");
+  });
+
+  it("should rewrap ClawHub timeout even when it surfaces only on the bare-install fallback after degradation", async () => {
+    // Two unsupported-option errors degrade through the attempts list;
+    // the third (bare install) finally succeeds in reaching the network
+    // and times out. The rewrap must still trigger and the user must NOT
+    // see the raw "ClawHub request timed out" stderr first.
+    const { pluginsInstall } = await loadModule();
+    const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      mockExecFileSync
+        .mockImplementationOnce(() => {
+          const err = new Error("unknown option");
+          (err as any).stderr = Buffer.from(
+            "error: unknown option '--dangerously-force-unsafe-install'",
+          );
+          throw err;
+        })
+        .mockImplementationOnce(() => {
+          const err = new Error("unknown option");
+          (err as any).stderr = Buffer.from("error: unknown option '--force'");
+          throw err;
+        })
+        .mockImplementationOnce(() => {
+          const err = new Error(
+            "Command failed: openclaw plugins install clawhub:octo\nClawHub request timed out after 30000ms",
+          );
+          (err as any).stderr = Buffer.from(
+            "ClawHub request timed out after 30000ms\n",
+          );
+          (err as any).stdout = Buffer.from(
+            "Resolving clawhub:octo…\n",
+          );
+          throw err;
+        });
+
+      let caught: unknown;
+      try {
+        // quiet=false to verify replay-suppression for the timeout path.
+        pluginsInstall("clawhub:octo", false, true);
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(mockExecFileSync).toHaveBeenCalledTimes(3);
+      expect((caught as Error).message).toMatch(/ClawHub install of "clawhub:octo" timed out/);
+      expect((caught as Error).message).toMatch(/openclaw update/);
+      expect((caught as Error).message).toMatch(/2026\.5\.22/);
+
+      // Captured stderr from the timeout (raw "ClawHub request timed out…")
+      // must NOT have been replayed to the user — that's the whole point
+      // of the rewrap.
+      const stderrCalls = stderrSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(stderrCalls).not.toMatch(/ClawHub request timed out/);
+
+      // Progress stdout from the timed-out attempt is still allowed
+      // through (informative, not the noisy banner we're suppressing).
+      const stdoutCalls = stdoutSpy.mock.calls.map((c) => String(c[0])).join("");
+      expect(stdoutCalls).toMatch(/Resolving clawhub:octo/);
+    } finally {
+      stderrSpy.mockRestore();
+      stdoutSpy.mockRestore();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -797,19 +893,19 @@ describe("detectOpenClawState", () => {
     }
   });
 
-  it("block when version < OPENCLAW_PEER_MIN (2026.4.15)", async () => {
+  it("block when version < OPENCLAW_PEER_MIN (2026.3.22)", async () => {
     const { detectOpenClawState } = await loadModule();
-    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.3.10 (abc1234)\n" as any);
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.3.13 (abc1234)\n" as any);
     const state = detectOpenClawState();
     expect(state.kind).toBe("block");
     if (state.kind === "block") {
-      expect(state.version).toBe("2026.3.10");
-      expect(state.reason).toContain("2026.3.10");
-      expect(state.reason).toContain("2026.4.15");
+      expect(state.version).toBe("2026.3.13");
+      expect(state.reason).toContain("2026.3.13");
+      expect(state.reason).toContain("2026.3.22");
     }
   });
 
-  it("warn when peer-min <= version < recommended (2026.5.18)", async () => {
+  it("warn when peer-min <= version < recommended (2026.5.22)", async () => {
     const { detectOpenClawState } = await loadModule();
     mockExecFileSync.mockImplementation(() => "OpenClaw 2026.4.20 (abc1234)\n" as any);
     const state = detectOpenClawState();
@@ -817,24 +913,24 @@ describe("detectOpenClawState", () => {
     if (state.kind === "warn") {
       expect(state.version).toBe("2026.4.20");
       expect(state.reason).toContain("2026.4.20");
-      expect(state.reason).toContain("2026.5.18");
+      expect(state.reason).toContain("2026.5.22");
     }
   });
 
   it("warn at exact peer-min (boundary)", async () => {
     const { detectOpenClawState } = await loadModule();
-    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.4.15 (abc1234)\n" as any);
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.3.22 (abc1234)\n" as any);
     const state = detectOpenClawState();
     expect(state.kind).toBe("warn");
   });
 
   it("ok at exact recommended (boundary)", async () => {
     const { detectOpenClawState } = await loadModule();
-    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.5.18 (abc1234)\n" as any);
+    mockExecFileSync.mockImplementation(() => "OpenClaw 2026.5.22 (abc1234)\n" as any);
     const state = detectOpenClawState();
     expect(state.kind).toBe("ok");
     if (state.kind === "ok") {
-      expect(state.version).toBe("2026.5.18");
+      expect(state.version).toBe("2026.5.22");
     }
   });
 

@@ -302,6 +302,30 @@ function isUnsupportedOptionError(err: unknown): boolean {
   );
 }
 
+/**
+ * Check if an error indicates a ClawHub fetch timeout.
+ *
+ * Observed on OpenClaw 4.x behind corporate HTTP proxies: the internal
+ * ClawHub HTTP dispatcher does not honor `http_proxy` / `EnvHttpProxyAgent`,
+ * and the hard-coded 30s budget is not enough. Upstream message:
+ *
+ *   "ClawHub request timed out after 30000ms"
+ *
+ * We catch this in `pluginsInstall()` and rewrap with actionable guidance.
+ * 5.x reportedly fixes the underlying dispatcher; we recommend upgrading.
+ */
+function isClawHubTimeoutError(err: unknown): boolean {
+  const sources = [
+    (err as any)?.stderr?.toString?.(),
+    (err as any)?.stdout?.toString?.(),
+    (err as any)?.message,
+    String(err),
+  ];
+  return sources.some(
+    (s) => s && /ClawHub request timed out/i.test(s),
+  );
+}
+
 function isPluginNotInstalledError(err: unknown): boolean {
   const sources = [
     (err as any)?.stderr?.toString?.(),
@@ -346,6 +370,44 @@ export function pluginsInstall(spec: string, quiet?: boolean, force?: boolean): 
     } catch (err) {
       if (isUnsupportedOptionError(err) && i < attempts.length - 1) {
         continue; // try next degradation level
+      }
+      // Recognize OpenClaw's ClawHub fetch timeout (observed on OpenClaw 4.x
+      // behind corporate proxies — internal dispatcher does not honor
+      // http_proxy / EnvHttpProxyAgent, and the hard-coded 30s budget is
+      // not enough). Rewrap with actionable guidance instead of letting the
+      // raw "ClawHub request timed out after 30000ms" reach the caller's
+      // stack trace. Run BEFORE replaying captured stdout/stderr so the
+      // user only sees the friendly message, not raw "ClawHub request timed
+      // out after 30000ms" first.
+      if (isClawHubTimeoutError(err)) {
+        // Surface progress stdout (e.g. "Downloading...") if any, but skip
+        // stderr because that's where the raw timeout banner lives.
+        if (!quiet) {
+          const stdout = (err as any)?.stdout?.toString?.();
+          if (stdout) process.stdout.write(stdout);
+        }
+        const friendly = new Error(
+          [
+            `ClawHub install of "${spec}" timed out.`,
+            "",
+            "Common causes:",
+            "  - OpenClaw 4.x ClawHub fetch is unreliable behind corporate HTTP proxies",
+            "    (the internal dispatcher ignores http_proxy / NODE_USE_ENV_PROXY).",
+            "    Upstream fixed this in 5.x.",
+            "  - Slow link to clawhub.ai (registry / artifact CDN).",
+            "",
+            "Try:",
+            "  openclaw update                       # upgrade to OpenClaw >= 2026.5.22",
+            "  npx -y create-openclaw-octo install   # retry",
+          ].join("\n"),
+        );
+        // Preserve the original error chain for callers / loggers that need it.
+        // Note: the top-level CLI catch in `cli/index.ts` only prints
+        // `err.message` so the original stderr in `cause` is not leaked to
+        // end users; debug builds (OPENCLAW_OCTO_DEBUG=1) still see the
+        // chain.
+        (friendly as { cause?: unknown }).cause = err;
+        throw friendly;
       }
       // Final attempt failed: replay captured output, then throw
       if (!quiet) {
@@ -1388,16 +1450,22 @@ export type OpenClawState =
   | { kind: "block"; version: string | null; reason: string };
 
 /**
- * Lower bound from package.json peerDependency. Below this the plugin
- * literally cannot register — block.
+ * Hard floor: below this `openclaw plugins install clawhub:<spec>` does
+ * not exist (the `clawhub:` protocol was introduced in OpenClaw v2026.3.22
+ * via upstream commit 91b2800241 "feat: add native clawhub install flows"),
+ * so install will throw `unsupported npm spec: protocol specs are not
+ * allowed` partway through migration. Block at entry instead.
  */
-export const OPENCLAW_PEER_MIN = "2026.4.15";
+export const OPENCLAW_PEER_MIN = "2026.3.22";
 
 /**
- * Recommended floor — version we test against, includes runtime fixes for
- * issue #56 race conditions etc. Below this we warn but allow.
+ * Recommended floor — version we test against. v2026.5.22 includes the
+ * `plugin-sdk-native-resolver.ts` fix (upstream PR #85298) which gives
+ * deterministic resolution for our `openclaw/plugin-sdk/*` subpath imports,
+ * plus better ClawHub fetch reliability behind corporate proxies (observed
+ * during real-world testing). Below this we warn but still allow.
  */
-export const OPENCLAW_RECOMMENDED = "2026.5.18";
+export const OPENCLAW_RECOMMENDED = "2026.5.22";
 
 /**
  * Compare two YYYY.M.PATCH-style versions per integer-segment ordering.

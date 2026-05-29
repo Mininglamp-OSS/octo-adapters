@@ -14,7 +14,7 @@ import {
 } from "./doctor.js";
 import { runUninstall } from "./uninstall.js";
 import { runRemoveAccount } from "./remove-account.js";
-import { ensureOpenClawCompat, PLUGIN_ID, renderInstallStatusBanner } from "./utils.js";
+import { PLUGIN_ID, renderInstallStatusBanner } from "./utils.js";
 import { getOpenClawVersionStrict, resolvePluginState } from "./openclaw-cli.js";
 import { PLUGIN_VERSION } from "./version.js";
 
@@ -182,7 +182,36 @@ program
   });
 
 export function main(argv?: readonly string[]): void {
-  program.parse(argv);
+  // parseAsync + top-level catch so unhandled errors from any sub-command
+  // surface as a clean message instead of a Node stack trace. Two side
+  // benefits:
+  //   (a) `pluginsInstall()` rewraps ClawHub timeouts with friendly text
+  //       (issue #90) and stashes the raw error in `Error.cause`. Without
+  //       a top-level handler, Node's default unhandled-rejection printer
+  //       walks the cause chain and re-emits the raw upstream stderr —
+  //       which can carry sensitive content. Logging only `err.message`
+  //       keeps `cause` available to programmatic callers / debug runs
+  //       without leaking it to terminal output.
+  //   (b) Plain `Error` thrown from sub-commands no longer prints stack
+  //       frames in normal use; set `OPENCLAW_OCTO_DEBUG=1` to see the
+  //       full chain when debugging.
+  program.parseAsync(argv as string[] | undefined).catch((err: unknown) => {
+    // Defensively handle non-Error rejections (e.g. `Promise.reject(null)`,
+    // `Promise.reject("string")`). Without this guard, reading `err.message`
+    // / `err.cause` on a primitive would throw inside the handler.
+    if (err instanceof Error) {
+      const e = err as Error & { cause?: unknown };
+      if (process.env.OPENCLAW_OCTO_DEBUG) {
+        console.error(e.stack ?? e.message);
+        if (e.cause !== undefined) console.error("Caused by:", e.cause);
+      } else {
+        console.error(e.message);
+      }
+    } else {
+      console.error(String(err));
+    }
+    process.exit(1);
+  });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

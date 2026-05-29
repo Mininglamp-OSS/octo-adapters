@@ -56,6 +56,7 @@ import {
   PLUGIN_ID,
   VERY_LEGACY_PLUGIN_ID,
   ensureOpenClawCompat,
+  requiresClawHubProtocol,
 } from "./utils.js";
 
 export function getLatestClawHubVersion(): string | null {
@@ -116,7 +117,15 @@ export interface InstallOptions {
 }
 
 export async function runInstall(opts: InstallOptions): Promise<void> {
-  ensureOpenClawCompat();
+  // The default install path dispatches via `openclaw plugins install
+  // clawhub:octo`, which requires the `clawhub:` protocol introduced in
+  // OpenClaw v2026.3.22. `--from` accepts arbitrary install specs (local
+  // tarball, file://, http(s), bare npm name, **and** `clawhub:...`); the
+  // version gate must consider the actual spec, not just whether `--from`
+  // was passed — otherwise `--from clawhub:octo` on older OpenClaw would
+  // sneak past the gate and only fail partway through migration.
+  // See issue #90 + PR #91 review.
+  ensureOpenClawCompat({ requireClawHubProtocol: requiresClawHubProtocol(opts.from) });
 
   // ---------------------------------------------------------------------------
   // v2.0.0 npm→ClawHub migration: detect (NOT yet uninstall) any pre-2.0 npm
