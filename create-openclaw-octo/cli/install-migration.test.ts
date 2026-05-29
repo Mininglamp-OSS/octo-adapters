@@ -1048,3 +1048,166 @@ describe("--from <spec> log tag propagates into migration paths (issue #95)", ()
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// octo-npm-legacy scenario — issue #92 regression
+//
+// Path B: a host that has the legacy npm-installed openclaw-channel-octo@1.x
+// plugin. That plugin registers channel id "octo" via setup(), so
+// `cfg.channels.octo` is populated. Without #92's fix the classifier saw
+// "channels.octo without ClawHub octo plugin" and returned "deadlock",
+// which made install print `Detected config deadlock (channels.octo
+// exists but no plugin)` even though this is the well-understood Path B
+// upgrade — scary log for an entirely recoverable state. The fix is to
+// branch on the legacy npm plugin's active-install evidence first and
+// route through a `fresh`-style install (with the `oldNpmSnapshot`
+// post-install cleanup machinery handling the actual replacement).
+// ---------------------------------------------------------------------------
+
+describe("runInstall — octo-npm-legacy scenario (Path B upgrade, issue #92)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("classifies as octo-npm-legacy (not deadlock) and does NOT print the scary deadlock log", async () => {
+    const state = setupFs({
+      cfg: {
+        plugins: {
+          entries: { "openclaw-channel-octo": { enabled: true } },
+          installs: { "openclaw-channel-octo": { source: "npm", version: "1.0.0" } },
+          allow: ["openclaw-channel-octo"],
+        },
+        channels: {
+          octo: { accounts: { mybot: { botToken: "bf_xxx", apiUrl: "https://im.example.com" } } },
+        },
+        bindings: [
+          { agentId: "agent1", match: { channel: "octo", accountId: "mybot" } },
+        ],
+      },
+      extDirs: [],
+    });
+    await applyFsMocks(state);
+
+    mockOpenclawCli({
+      inspect: {
+        "openclaw-channel-octo": { plugin: { id: "openclaw-channel-octo", version: "1.0.0", enabled: true } },
+      },
+    });
+
+    const origExecImpl = mockExecFileSync.getMockImplementation();
+    mockExecFileSync.mockImplementation((cmd: any, args: any) => {
+      const a = args as string[];
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "clawhub", version: "1.0.1" };
+        state.extDirs.add("octo");
+        return "";
+      }
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo") {
+        if (state.cfg.plugins.entries["octo"]) {
+          return JSON.stringify({ plugin: { id: "octo", version: "1.0.1", enabled: true } });
+        }
+      }
+      return origExecImpl!(cmd, args, undefined as any) as any;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { runInstall } = await loadInstall();
+      await runInstall({ force: false, dev: false });
+
+      const lines = logSpy.mock.calls.map((c) => c.join(" "));
+      const deadlockLine = lines.find((l) => /Detected config deadlock/.test(l));
+      expect(deadlockLine).toBeUndefined();
+
+      const npmLegacyLine = lines.find((l) =>
+        /Detected legacy npm install of openclaw-channel-octo/.test(l),
+      );
+      expect(npmLegacyLine).toBeDefined();
+
+      const installCall = calledOps().find((op) =>
+        /^plugins install clawhub:octo/.test(op),
+      );
+      expect(installCall).toBeDefined();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("stale openclaw-channel-octo cfg entry WITHOUT an active npm install routes to deadlock repair, NOT to octo-npm-legacy (PR #100 review)", async () => {
+    // PR #100 review (lml2468): the initial fix keyed `octo-npm-legacy` on
+    // cfg.entries / cfg.installs alone. Stale config is real — old OpenClaw
+    // runtimes can retain `openclaw-channel-octo` entries long after the
+    // plugin's node_modules/ dir is gone. Hosts in that state with a
+    // legitimate `channels.octo` deadlock would skip runDeadlockRepair
+    // (which removes channel/bindings before install) and call
+    // pluginsInstall() with them still present. The fix is the shared
+    // `isNpmLegacyActivelyInstalled()` helper which requires active
+    // evidence (inspect / plugins list / cfg+disk both present).
+    const state = setupFs({
+      cfg: {
+        plugins: {
+          entries: { "openclaw-channel-octo": { enabled: true } },
+          installs: { "openclaw-channel-octo": { source: "npm", version: "1.0.0" } },
+          allow: [],
+        },
+        channels: {
+          octo: { accounts: { mybot: { botToken: "bf_xxx" } } },
+        },
+        bindings: [
+          { agentId: "agent1", match: { channel: "octo", accountId: "mybot" } },
+        ],
+      },
+      // Critically: NO openclaw-channel-octo entry under `~/.openclaw/npm/`.
+      extDirs: [],
+    });
+    await applyFsMocks(state);
+
+    mockOpenclawCli({
+      // No openclaw-channel-octo in inspect map → not a healthy install.
+      // No `plugins list` mock either → falls through to the unsupported
+      // branch, exercising the cfg-fallback path of
+      // isNpmLegacyActivelyInstalled. With no npm install dir on disk the
+      // fallback returns false, so we should drop through to deadlock.
+      inspect: {},
+    });
+
+    const origExecImpl = mockExecFileSync.getMockImplementation();
+    mockExecFileSync.mockImplementation((cmd: any, args: any) => {
+      const a = args as string[];
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs["octo"] = { source: "clawhub", version: "1.0.1" };
+        state.extDirs.add("octo");
+        return "";
+      }
+      if (a[0] === "plugins" && a[1] === "list") {
+        const err: any = new Error("unknown command 'list'");
+        err.stderr = "unknown command 'list'";
+        throw err;
+      }
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo") {
+        if (state.cfg.plugins.entries["octo"]) {
+          return JSON.stringify({ plugin: { id: "octo", version: "1.0.1", enabled: true } });
+        }
+      }
+      return origExecImpl!(cmd, args, undefined as any) as any;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { runInstall } = await loadInstall();
+      await runInstall({ force: false, dev: false });
+
+      const lines = logSpy.mock.calls.map((c) => c.join(" "));
+      const deadlockLine = lines.find((l) => /Detected config deadlock/.test(l));
+      expect(deadlockLine).toBeDefined();
+      const npmLegacyLine = lines.find((l) =>
+        /Detected legacy npm install of openclaw-channel-octo/.test(l),
+      );
+      expect(npmLegacyLine).toBeUndefined();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});

@@ -1256,6 +1256,7 @@ export type UpgradeScenario =
   | "update"          // octo healthy installed
   | "fresh"           // nothing relevant present
   | "deadlock"        // channels.octo exists but plugin missing
+  | "octo-npm-legacy" // legacy npm-installed openclaw-channel-octo@1.x present; install fresh and let post-install cleanup uninstall it
   | "broken";         // octo partial install
 
 export function detectScenario(): UpgradeScenario {
@@ -1282,6 +1283,24 @@ export function detectScenario(): UpgradeScenario {
 
   if (isHealthy) return "update";
   if (hasNewPartial) return "broken";
+
+  // Priority: legacy npm-installed openclaw-channel-octo@1.x (Path B).
+  // This plugin registers channel id "octo" via setup(), so `cfg.channels.octo`
+  // is populated even though the ClawHub `octo` plugin id is absent. Without
+  // this check the next branch would misclassify the state as "deadlock"
+  // (channels.octo without plugin) and the user would see a scary
+  // `Detected config deadlock` log during install — when in reality this is
+  // a known recoverable upgrade path. The `oldNpmSnapshot` machinery in
+  // runInstall() already handles uninstalling the legacy npm plugin after
+  // the fresh ClawHub install verifies healthy; we just need to route here
+  // so the install runs `fresh`-style without the deadlock detour.
+  //
+  // Active-install evidence is required (`isNpmLegacyActivelyInstalled`) —
+  // a stale `cfg.entries.openclaw-channel-octo` left over from a previous
+  // uninstall **must not** route here, or we'd bypass the legitimate
+  // deadlock repair for hosts that happen to retain that residue alongside
+  // a real `channels.octo` deadlock. See #92, PR #100 review.
+  if (isNpmLegacyActivelyInstalled()) return "octo-npm-legacy";
 
   // Priority: channels.octo without plugin → deadlock (config exists but no plugin)
   if (cfg?.channels?.[CHANNEL_ID]) return "deadlock";
@@ -1353,6 +1372,38 @@ function hasLegacyNpmResidue(): boolean {
   // residue warn line but never the block decision.
   const root = getConfigFilePathSafe().replace(/openclaw\.json$/, "");
   return existsSync(resolve(root, LEGACY_NPM_RESIDUE_DIR));
+}
+
+/**
+ * Whether the legacy npm-installed `openclaw-channel-octo@1.x` plugin is
+ * **actually active** on this host, not just listed in stale config.
+ *
+ * Source of truth, in priority order:
+ *   1. `isHealthyInstall(NPM_PACKAGE_NAME)` — plugin is healthy via inspect
+ *      or the 3-artifact fallback. The strongest signal.
+ *   2. `plugins list --json` (modern OpenClaw) — runtime registry reports
+ *      the id with `enabled` true.
+ *   3. cfg.entries[NPM_PACKAGE_NAME] **AND** the npm-layout install
+ *      directory exists on disk (old OpenClaw without `plugins list`).
+ *      Both artefacts are required: a stale cfg entry with no directory
+ *      is residue, not an active install.
+ *
+ * Mirrors the matrix used in `detectInstallState()` so both callers agree
+ * on what counts as an active Path B install (issue #92, PR #100 review).
+ */
+export function isNpmLegacyActivelyInstalled(
+  list?: PluginListResult,
+  cfg?: Record<string, any> | null,
+): boolean {
+  if (isHealthyInstall(NPM_PACKAGE_NAME)) return true;
+  const pluginList = list ?? listLoadedPlugins();
+  if (pluginList.supported) {
+    return pluginList.plugins.some((p) => p.id === NPM_PACKAGE_NAME && p.enabled);
+  }
+  const config = cfg ?? readConfigFromFile();
+  return (
+    Boolean(config?.plugins?.entries?.[NPM_PACKAGE_NAME]) && hasLegacyNpmResidue()
+  );
 }
 
 /**
