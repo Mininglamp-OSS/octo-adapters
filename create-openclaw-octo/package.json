@@ -20,6 +20,14 @@
   "dependencies": {
     "commander": "^12.1.0"
   },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.22"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.9.3",
