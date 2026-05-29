@@ -176,14 +176,14 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
     case "legacy-to-octo":
     case "legacy":
       // Phase B: full migration from very-legacy "dmwork" plugin id to octo.
-      runLegacyToOctoMigration(spec, quiet, opts.force);
+      runLegacyToOctoMigration(spec, quiet, opts.force, tagLabel);
       didChange = true;
       break;
     case "rebrand":
     case "legacy-warn":
       // Phase B: full migration from openclaw-channel-dmwork to the ClawHub
       // octo plugin (plugin id = "octo", installed to ~/.openclaw/extensions/octo/).
-      runRebrandMigration(spec, quiet, opts.force);
+      runRebrandMigration(spec, quiet, opts.force, tagLabel);
       didChange = true;
       break;
     case "update": {
@@ -245,7 +245,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       break;
     }
     case "deadlock":
-      runDeadlockRepair(spec, quiet);
+      runDeadlockRepair(spec, quiet, tagLabel);
       didChange = true;
       break;
     case "fresh":
@@ -359,10 +359,17 @@ interface MigrationContext {
   spec: string;
   quiet: boolean;
   force?: boolean;
+  /**
+   * Display suffix for the install log line, e.g. ` (from /tmp/octo.tgz)`.
+   * Passed by `runInstall()` when the user gave `--from <spec>`, so operators
+   * debugging a migration run can confirm from the log which spec was actually
+   * used. Optional to keep callers that don't have a label simple. See #95.
+   */
+  tagLabel?: string;
 }
 
 function runMigration(ctx: MigrationContext): void {
-  const { legacyPluginId, scenarioLabel, spec, quiet, force } = ctx;
+  const { legacyPluginId, scenarioLabel, spec, quiet, force, tagLabel = "" } = ctx;
   console.log(`Detected ${scenarioLabel}. Starting migration...`);
 
   // -------------------------------------------------------------------------
@@ -454,7 +461,7 @@ function runMigration(ctx: MigrationContext): void {
   const octoAlreadyHealthy = octoSnapshot.installed && isHealthyInstall(PLUGIN_ID);
   if (!octoAlreadyHealthy) {
     try {
-      console.log(`  Installing ${PLUGIN_ID}...`);
+      console.log(`  Installing ${PLUGIN_ID}${tagLabel}...`);
       pluginsInstall(spec, quiet, force);
     } catch (err) {
       rollback(`pluginsInstall(${PLUGIN_ID}) threw: ${(err as Error).message}`);
@@ -627,23 +634,25 @@ function normalizeChannelConfig(raw: Record<string, unknown>): Record<string, un
   return cloned;
 }
 
-export function runRebrandMigration(spec: string, quiet: boolean, force?: boolean): void {
+export function runRebrandMigration(spec: string, quiet: boolean, force?: boolean, tagLabel?: string): void {
   runMigration({
     legacyPluginId: LEGACY_PLUGIN_ID,
     scenarioLabel: "rebrand",
     spec,
     quiet,
     force,
+    tagLabel,
   });
 }
 
-export function runLegacyToOctoMigration(spec: string, quiet: boolean, force?: boolean): void {
+export function runLegacyToOctoMigration(spec: string, quiet: boolean, force?: boolean, tagLabel?: string): void {
   runMigration({
     legacyPluginId: VERY_LEGACY_PLUGIN_ID,
     scenarioLabel: "legacy-to-octo",
     spec,
     quiet,
     force,
+    tagLabel,
   });
 }
 
@@ -651,7 +660,7 @@ export function runLegacyToOctoMigration(spec: string, quiet: boolean, force?: b
 // Deadlock repair: channels.octo exists but plugin missing.
 // (Distinct from rebrand — there's no legacy plugin/channel to migrate.)
 // ---------------------------------------------------------------------------
-function runDeadlockRepair(spec: string, quiet: boolean): void {
+function runDeadlockRepair(spec: string, quiet: boolean, tagLabel: string = ""): void {
   console.log(`Detected config deadlock (channels.${CHANNEL_ID} exists but no plugin).`);
 
   const configPath = getConfigFilePathSafe();
@@ -678,7 +687,7 @@ function runDeadlockRepair(spec: string, quiet: boolean): void {
   }
 
   try {
-    console.log(`  Installing ${PLUGIN_ID}...`);
+    console.log(`  Installing ${PLUGIN_ID}${tagLabel}...`);
     // P2 (PR #37): pass force=true to be consistent with other recovery paths
     // (broken / cleanup) — deadlock repair may leave a partial extension dir
     // from a previous crashed attempt that bare install would refuse to overwrite.

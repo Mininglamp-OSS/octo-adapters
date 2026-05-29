@@ -910,3 +910,141 @@ describe("runInstall — deadlock scenario (channels.octo without plugin)", () =
     expect(state.cfg.plugins.entries["octo"]?.enabled).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// --from <spec> log tagging across migration paths — issue #95 regression
+//
+// `--from` is propagated to `pluginsInstall(spec)` internally on every
+// path (rebrand / legacy-to-octo / deadlock), but the matching "Installing
+// octo..." log line previously dropped the spec suffix on migration paths
+// while keeping it on the simple update path. That made operators
+// debugging a `--from`-driven migration run unable to confirm from the
+// log which spec was actually used. The fix threads `tagLabel` through
+// `runMigration` and `runDeadlockRepair`.
+// ---------------------------------------------------------------------------
+
+describe("--from <spec> log tag propagates into migration paths (issue #95)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("rebrand migration logs 'Installing octo (from <spec>)'", async () => {
+    const state = setupFs({
+      cfg: {
+        plugins: {
+          entries: { "openclaw-channel-dmwork": { enabled: true } },
+          installs: { "openclaw-channel-dmwork": { source: "npm", version: "0.6.4" } },
+          allow: ["openclaw-channel-dmwork"],
+        },
+        channels: {
+          dmwork: {
+            accounts: { mybot: { botToken: "bf_xxx", apiUrl: "https://im.example.com" } },
+          },
+        },
+      },
+      extDirs: ["openclaw-channel-dmwork"],
+    });
+    await applyFsMocks(state);
+
+    mockOpenclawCli({
+      inspect: {
+        "openclaw-channel-dmwork": { plugin: { id: "openclaw-channel-dmwork", version: "0.6.4", enabled: true } },
+      },
+    });
+
+    // Make pluginsInstall(spec) succeed for any spec the user passes — we
+    // only care about the log line here.
+    const origExecImpl = mockExecFileSync.getMockImplementation();
+    mockExecFileSync.mockImplementation((cmd: any, args: any) => {
+      const a = args as string[];
+      if (a[0] === "plugins" && a[1] === "install") {
+        state.cfg.plugins ??= {};
+        state.cfg.plugins.entries ??= {};
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs ??= {};
+        state.cfg.plugins.installs["octo"] = { source: "local", version: "1.0.1" };
+        state.extDirs.add("octo");
+        return "";
+      }
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo") {
+        if (state.cfg.plugins?.entries?.["octo"]) {
+          return JSON.stringify({ plugin: { id: "octo", version: "1.0.1", enabled: true } });
+        }
+        // Pre-install: fall through so the default `mockOpenclawCli` says
+        // not-installed and runMigration takes the install branch.
+      }
+      return origExecImpl!(cmd, args, undefined as any) as any;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { runInstall } = await loadInstall();
+      await runInstall({ force: false, dev: false, from: "/tmp/my-local-octo.tgz" });
+
+      const lines = logSpy.mock.calls.map((c) => c.join(" "));
+      const installingLine = lines.find((l) => /Installing\s+octo/.test(l));
+      expect(installingLine).toBeDefined();
+      expect(installingLine).toMatch(/\(from \/tmp\/my-local-octo\.tgz\)/);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("rebrand migration log without --from omits the (from …) suffix", async () => {
+    const state = setupFs({
+      cfg: {
+        plugins: {
+          entries: { "openclaw-channel-dmwork": { enabled: true } },
+          installs: { "openclaw-channel-dmwork": { source: "npm", version: "0.6.4" } },
+          allow: ["openclaw-channel-dmwork"],
+        },
+        channels: {
+          dmwork: {
+            accounts: { mybot: { botToken: "bf_xxx", apiUrl: "https://im.example.com" } },
+          },
+        },
+      },
+      extDirs: ["openclaw-channel-dmwork"],
+    });
+    await applyFsMocks(state);
+
+    mockOpenclawCli({
+      inspect: {
+        "openclaw-channel-dmwork": { plugin: { id: "openclaw-channel-dmwork", version: "0.6.4", enabled: true } },
+      },
+    });
+
+    const origExecImpl = mockExecFileSync.getMockImplementation();
+    mockExecFileSync.mockImplementation((cmd: any, args: any) => {
+      const a = args as string[];
+      if (a[0] === "plugins" && a[1] === "install" && a[2] === "clawhub:octo") {
+        state.cfg.plugins ??= {};
+        state.cfg.plugins.entries ??= {};
+        state.cfg.plugins.entries["octo"] = { enabled: true };
+        state.cfg.plugins.installs ??= {};
+        state.cfg.plugins.installs["octo"] = { source: "clawhub", version: "1.0.1" };
+        state.extDirs.add("octo");
+        return "";
+      }
+      if (a[0] === "plugins" && a[1] === "inspect" && a[2] === "octo") {
+        if (state.cfg.plugins?.entries?.["octo"]) {
+          return JSON.stringify({ plugin: { id: "octo", version: "1.0.1", enabled: true } });
+        }
+      }
+      return origExecImpl!(cmd, args, undefined as any) as any;
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { runInstall } = await loadInstall();
+      await runInstall({ force: false, dev: false });
+
+      const lines = logSpy.mock.calls.map((c) => c.join(" "));
+      const installingLine = lines.find((l) => /Installing\s+octo/.test(l));
+      expect(installingLine).toBeDefined();
+      expect(installingLine).not.toMatch(/\(from /);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
