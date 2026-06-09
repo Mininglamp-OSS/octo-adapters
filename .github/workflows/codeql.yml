@@ -1,27 +1,24 @@
 name: CodeQL
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - '.github/ISSUE_TEMPLATE/**'
+  # Weekly deep scan only. CodeQL (cross-function SAST) is intentionally NOT run
+  # per-PR or per-push: this removes pre-merge and per-merge SAST entirely. The
+  # only remaining code-level SAST is this weekly scan + manual dispatch. Per-PR
+  # CI still runs osv-scanner (dependency CVEs) — that is SCA, not SAST. Detection
+  # latency for newly introduced code-level vulnerabilities is up to ~7 days;
+  # findings land in the Security tab.
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
   workflow_dispatch:
 
 permissions: {}
 
 concurrency:
-  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: codeql-${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   analyze:
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     uses: Mininglamp-OSS/.github/.github/workflows/reusable-codeql.yml@v1
     with:
       language: javascript-typescript
