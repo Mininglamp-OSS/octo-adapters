@@ -86,3 +86,31 @@ jobs:
 
       - name: Test
         run: npm test
+
+  ci-gate:
+    name: CI Gate
+    # Aggregate gate: always runs so the required status check ALWAYS reports,
+    # even when path-filtered/matrix jobs are skipped on docs-only PRs. This is
+    # the robust pattern for required checks over path-filtered or matrix CI
+    # (a skipped matrix job collapses to a single un-suffixed context, so the
+    # per-combo contexts can never be safely required directly). Fails iff a
+    # needed job failed or was cancelled; 'skipped'/'success' count as passing.
+    # Branch protection should require ONLY the "CI Gate" context for this repo.
+    if: ${{ always() }}
+    needs: [changes, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify upstream CI results
+        env:
+          RESULTS: ${{ join(needs.*.result, ',') }}
+        run: |
+          set -euo pipefail
+          echo "needed job results: ${RESULTS}"
+          IFS=',' read -ra items <<< "${RESULTS}"
+          for r in "${items[@]}"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "::error::CI Gate: a required job concluded '${r}'"
+              exit 1
+            fi
+          done
+          echo "CI Gate: all required jobs passed or were skipped"
