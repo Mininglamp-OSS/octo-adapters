@@ -17,8 +17,15 @@ All releases use [Semantic Versioning](https://semver.org) `MAJOR.MINOR.PATCH`:
 - **MINOR** — backward-compatible features
 - **PATCH** — backward-compatible fixes
 
-Pre-releases use a suffix (e.g. `-rc.1`) — not marked **Latest** (Track 1) and
-mapped to the npm `@next` dist-tag (Track 2).
+**Pre-release suffixes (e.g. `-rc.1`, `-beta.2`):**
+
+- **Track 2 (npm)** maps any pre-release suffix to the `@next` dist-tag — this is
+  implemented in `publish-octo.yml`.
+- **Track 1 (GitHub Release)** does **not** currently special-case pre-release
+  tags: the pinned `reusable-release-publish@v1` neither sets `prerelease` nor
+  `make_latest: false`, so a `-rc` tag would still publish as a **normal (Latest)**
+  GitHub Release. Until the reusable handles this, **use stable `vX.Y.Z` tags for
+  Track 1** and do not rely on `-rc` tags being treated as GitHub pre-releases.
 
 ## Track 1 — GitHub Release + changelog (unscoped `vX.Y.Z` tags)
 
@@ -59,8 +66,9 @@ and the unscoped `vX.Y.Z` tags do **not** publish to npm.
 > ⚠️ **Pushing a `create-openclaw-octo/v*` tag publishes to npm immediately.**
 > `.github/workflows/publish-octo.yml` runs on that tag push (test → build →
 > `npm publish`) — there is no separate manual gate; the tag push *is* the npm
-> release trigger. To rehearse, use the workflow's **manual dispatch** with
-> `dry_run: true` first.
+> release trigger. To rehearse, use the workflow's **manual dispatch** with the
+> version **without** the leading `v`, plus `dry_run: true` — e.g.
+> `tag: 1.2.0, dry_run: true`.
 
 - **dist-tag mapping:** `create-openclaw-octo/v1.2.0` → `@latest`; any
   pre-release suffix (e.g. `create-openclaw-octo/v1.2.0-rc.1`) → `@next`.
