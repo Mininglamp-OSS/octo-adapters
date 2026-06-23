@@ -106,7 +106,7 @@ program
 program
   .command("bind")
   .description("Configure a bot account and bind it to an agent")
-  .requiredOption("--bot-token <token>", "Bot token (starts with bf_)")
+  .requiredOption("--bot-token <token>", "Bot token (starts with bf_ or app_)")
   .requiredOption("--api-url <url>", "API server URL")
   .requiredOption("--account-id <id>", "Bot account ID")
   .requiredOption("--agent <agent>", "Agent identifier to bind to")

@@ -27,7 +27,7 @@ import {
   resolvePluginState,
   runCmd,
 } from "./openclaw-cli.js";
-import { PLUGIN_ID, CHANNEL_ID, RECOMMENDED_DM_SCOPE, channelConfigPath, getChannelConfig } from "./utils.js";
+import { PLUGIN_ID, CHANNEL_ID, RECOMMENDED_DM_SCOPE, channelConfigPath, getChannelConfig, isValidBotTokenPrefix } from "./utils.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -321,11 +321,11 @@ export async function runDoctorChecks(params: {
     const tokenVal = reader.get(tokenPath);
 
     if (tokenVal) {
-      if (params.inProcess && !tokenVal.startsWith("bf_")) {
+      if (params.inProcess && !isValidBotTokenPrefix(tokenVal)) {
         checks.push({
           name: `${label}: botToken format`,
           status: "WARN",
-          detail: "Does not start with bf_",
+          detail: "Does not start with bf_ or app_",
         });
       } else {
         checks.push({

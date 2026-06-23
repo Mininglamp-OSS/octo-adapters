@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { requiresClawHubProtocol, validateAccountId } from "./utils.js";
+import { requiresClawHubProtocol, validateAccountId, isValidBotTokenPrefix } from "./utils.js";
 
 describe("validateAccountId", () => {
   it("should accept valid IDs", () => {
@@ -16,6 +16,24 @@ describe("validateAccountId", () => {
     expect(validateAccountId("bot.name")).toBe(false);
     expect(validateAccountId("bot/name")).toBe(false);
     expect(validateAccountId("bot@name")).toBe(false);
+  });
+});
+
+describe("isValidBotTokenPrefix", () => {
+  it("accepts bf_ User Bot tokens", () => {
+    expect(isValidBotTokenPrefix("bf_0123456789abcdef")).toBe(true);
+  });
+
+  it("accepts app_ App Bot tokens", () => {
+    // App Bot tokens (Admin 后台「应用 Bot」) are DM-only server-side, but the
+    // CLI must let them bind — that boundary is the server's to enforce.
+    expect(isValidBotTokenPrefix("app_f33a87e108015aec1b6ad4410afebd82")).toBe(true);
+  });
+
+  it("rejects unknown prefixes", () => {
+    expect(isValidBotTokenPrefix("uk_0123456789abcdef")).toBe(false);
+    expect(isValidBotTokenPrefix("")).toBe(false);
+    expect(isValidBotTokenPrefix("0123456789")).toBe(false);
   });
 });
 
@@ -112,10 +130,9 @@ describe("ensureOpenClawCompat", () => {
   });
 
   it("warns (does not block) when openclaw is too old AND caller does not require clawhub: protocol", async () => {
-    // Regression for codex review MAJOR #2: ensureOpenClawCompat() was
-    // unconditionally hard-aborting on < OPENCLAW_PEER_MIN, breaking
-    // uninstall and `install --from <local-tarball>` paths that don't
-    // need the `clawhub:` protocol.
+    // Regression: ensureOpenClawCompat() was unconditionally hard-aborting
+    // on < OPENCLAW_PEER_MIN, breaking uninstall and `install --from
+    // <local-tarball>` paths that don't need the `clawhub:` protocol.
     const { ensureOpenClawCompat } = await loadWithDetect({
       kind: "block",
       version: "2026.3.13",
