@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.2] - 2026-06-24
+
+### Fixed
+
+- `bind` 命令现在同时接受 App Bot 的 `app_` token 和 User Bot 的 `bf_` token。
+  此前只放行 `bf_` 开头的 token,导致用户按 Admin 后台「连接指南」复制
+  `app_` 开头的 token 执行 `bind` 时直接报错、无法绑定。token 的能力边界
+  (App Bot 仅支持私聊,群聊与 thread 由服务端限制)由服务端决定,CLI 不再
+  替服务端预先拒绝。`doctor` 的 token 格式检查与 `--bot-token` 帮助文案
+  一并更新。
+
 ## [1.0.1] - 2026-05-26
 
 ### Changed
