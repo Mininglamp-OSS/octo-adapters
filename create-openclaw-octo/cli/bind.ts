@@ -14,6 +14,7 @@ import {
   ensureChannelConfigObject,
   enforceHealthyClawHubInstall,
   validateAccountId,
+  isValidBotTokenPrefix,
 } from "./utils.js";
 
 export interface BindOptions {
@@ -28,8 +29,8 @@ export async function runBind(opts: BindOptions): Promise<void> {
   enforceHealthyClawHubInstall();
 
   // 2. Validate params
-  if (!opts.botToken.startsWith("bf_")) {
-    console.error("Error: Bot token must start with 'bf_'.");
+  if (!isValidBotTokenPrefix(opts.botToken)) {
+    console.error("Error: Bot token must start with 'bf_' (BotFather /newbot) or 'app_' (Admin App Bot).");
     process.exit(1);
   }
   if (!validateAccountId(opts.accountId)) {

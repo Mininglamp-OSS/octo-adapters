@@ -71,7 +71,7 @@ describe("doctor checks (in-process mode)", () => {
     expect(scopeCheck?.status).toBe("PASS");
   });
 
-  it("should WARN when botToken does not start with bf_ in-process", async () => {
+  it("should WARN when botToken has an unrecognized prefix in-process", async () => {
     const reader = stubReader({
       channels: {
         octo: {
@@ -91,6 +91,30 @@ describe("doctor checks (in-process mode)", () => {
 
     const tokenCheck = result.checks.find((c) => c.name === "bad_bot: botToken format");
     expect(tokenCheck?.status).toBe("WARN");
+  });
+
+  it("should NOT warn on an app_ App Bot token in-process", async () => {
+    const reader = stubReader({
+      channels: {
+        octo: {
+          accounts: {
+            app_bot: { botToken: "app_f33a87e108015aec1b6ad4410afebd82", apiUrl: "http://localhost" },
+          },
+        },
+      },
+      session: { dmScope: "per-account-channel-peer" },
+    });
+
+    globalThis.fetch = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }));
+
+    const result = await runDoctorChecks({ reader, inProcess: true });
+
+    globalThis.fetch = vi.fn() as any;
+
+    const formatWarn = result.checks.find((c) => c.name === "app_bot: botToken format");
+    expect(formatWarn).toBeUndefined();
+    const tokenPass = result.checks.find((c) => c.name === "app_bot: botToken");
+    expect(tokenPass?.status).toBe("PASS");
   });
 
   it("should fallback to legacy flat config when no accounts", async () => {

@@ -204,6 +204,20 @@ export function validateAccountId(id: string): boolean {
   return ACCOUNT_ID_RE.test(id);
 }
 
+// Two token prefixes can bind a bot to an agent:
+//   bf_*  — User Bot (BotFather /newbot): full group + thread + OBO access.
+//   app_* — App Bot (Admin 后台「应用 Bot」): direct-message only.
+// The capability difference is enforced by octo-server (it routes bot_api
+// auth by prefix and rejects App Bot group/thread/OBO calls), so the CLI must
+// let either prefix bind rather than pre-rejecting app_ for being limited.
+const BOT_TOKEN_PREFIXES = ["bf_", "app_"] as const;
+
+/** True when the token carries a recognized bot-token prefix. */
+export function isValidBotTokenPrefix(token: string): boolean {
+  return BOT_TOKEN_PREFIXES.some((p) => token.startsWith(p));
+}
+
+
 // ---------------------------------------------------------------------------
 // Interactive detection
 // ---------------------------------------------------------------------------

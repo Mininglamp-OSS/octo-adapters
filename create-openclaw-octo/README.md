@@ -105,7 +105,7 @@ Bot accounts are stored in `~/.openclaw/openclaw.json` under `channels.octo.acco
 
 Configuration fields per account:
 
-- `botToken` (required): Bot token from BotFather (`bf_` prefix)
+- `botToken` (required): Bot token. Either a User Bot token from BotFather (`bf_` prefix, full group + thread access) or an App Bot token from the Octo admin console (`app_` prefix, direct-message only — server-enforced).
 - `apiUrl` (required): Octo server API URL
 - `wsUrl` (optional): WuKongIM WebSocket URL. Auto-detected if omitted.
 - `requireMention` (optional): Only respond when @mentioned in groups
