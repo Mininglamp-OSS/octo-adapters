@@ -256,6 +256,26 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       }
 
       if (currentVersion === targetVersion) {
+        // Source migration (revert path for the TEMPORARY bundled-tarball
+        // default): a plugin installed from the bundled tarball is recorded by
+        // OpenClaw with install.source === "archive", and `openclaw plugins
+        // update` refuses to update archive-source plugins. So once ClawHub is
+        // healthy and the default reverts to clawhub:octo, a same-version check
+        // would otherwise strand the user on the archive source forever. When
+        // the installed source is "archive" but we're now targeting a clawhub:
+        // spec, reinstall unconditionally to switch the source back to ClawHub,
+        // even though the version number is unchanged.
+        const installedSource = inspect?.install?.source;
+        if (installedSource === "archive" && spec.startsWith("clawhub:")) {
+          console.log(
+            `Octo plugin v${currentVersion} is at the target version but installed from a local archive. ` +
+            `Reinstalling from ClawHub to restore the registry source...`,
+          );
+          pluginsInstall(spec, quiet, true);
+          console.log(`Octo plugin source migrated to ClawHub (v${currentVersion}).`);
+          didChange = true;
+          break;
+        }
         console.log(`Octo plugin v${currentVersion} is already the target version${tagLabel}. No update needed.`);
         break;
       }

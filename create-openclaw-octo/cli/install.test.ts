@@ -343,6 +343,67 @@ describe("runInstall — update scenario", () => {
     expect(pluginsInstallSpec(calls)).toBe("clawhub:octo");
   });
 
+  // Source migration (revert path for the TEMPORARY bundled-tarball default):
+  // once ClawHub is healthy and the default reverts to clawhub:octo, a plugin
+  // previously installed from the bundled tarball (install.source === "archive")
+  // must be reinstalled from ClawHub even at the same version, so users are not
+  // stranded on the archive source (which `openclaw plugins update` refuses).
+  it("archive source at target version + clawhub spec: reinstalls to migrate source back to ClawHub", async () => {
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        const id = a[2];
+        if (id === "openclaw-channel-octo") throw new Error("not found");
+        // Installed from the bundled tarball → source "archive", already at 1.1.0.
+        return JSON.stringify({
+          plugin: { id: "octo", version: "1.1.0", latestVersion: "1.1.0", enabled: true },
+          install: { source: "archive", version: "1.1.0", installPath: "/x" },
+        });
+      }
+      if (a[0] === "plugins" && a[1] === "install") return "";
+      if (a[0] === "gateway" && a[1] === "restart") return "";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    const calls = getCalledArgs();
+    // Must reinstall despite same version, using the clawhub spec (source migration).
+    expect(didCallPluginsInstall(calls)).toBe(true);
+    expect(pluginsInstallSpec(calls)).toBe("clawhub:octo");
+  });
+
+  it("clawhub source at target version: no reinstall (source migration only triggers for archive)", async () => {
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        const id = a[2];
+        if (id === "openclaw-channel-octo") throw new Error("not found");
+        // Already on ClawHub source at the target version → nothing to do.
+        return JSON.stringify({
+          plugin: { id: "octo", version: "1.1.0", latestVersion: "1.1.0", enabled: true },
+          install: { source: "clawhub", version: "1.1.0", installPath: "/x" },
+        });
+      }
+      if (a[0] === "plugins" && a[1] === "install") return "";
+      if (a[0] === "gateway" && a[1] === "restart") return "";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    const calls = getCalledArgs();
+    expect(didCallPluginsInstall(calls)).toBe(false);
+  });
+
   it("already target version + entries.enabled=false: self-heals enabled, no install, no restart", async () => {
     // Regression: install used to early-return on already-at-target, bypassing
     // the self-heal that re-enables the plugin after OpenClaw major upgrades
