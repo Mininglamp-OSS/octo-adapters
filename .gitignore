@@ -9,6 +9,12 @@ src/**/*.d.ts
 .env
 .env.*
 *.tgz
+# TEMPORARY: track the bundled plugin tarball so publish workflows (clean tag
+# checkout) ship it inside the npm package. Without this exception it is caught
+# by *.tgz, npm pack omits it, and the bundled-default install silently falls
+# back to clawhub:octo. Remove with the bundled-tarball feature once ClawHub is
+# healthy again.
+!create-openclaw-octo/vendor/*.tgz
 .DS_Store
 .idea/
 .claude/

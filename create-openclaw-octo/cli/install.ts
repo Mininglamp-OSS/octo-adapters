@@ -232,6 +232,27 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
         break;
       }
 
+      // Source migration (revert path for the TEMPORARY bundled-tarball default),
+      // checked BEFORE any version lookup: a plugin installed from the bundled
+      // tarball is recorded by OpenClaw with install.source === "archive", and
+      // `openclaw plugins update` refuses to update archive-source plugins. Once
+      // ClawHub is healthy and the default reverts to clawhub:octo, we must
+      // reinstall from ClawHub to restore the registry source — regardless of
+      // version. Doing this before getLatestClawHubVersion() matters: when latest
+      // can't be resolved (no latestVersion + no clawhub CLI) the version branch
+      // below delegates to `openclaw plugins update`, which is exactly what skips
+      // archive sources — so an archive user would otherwise stay stranded.
+      if (spec.startsWith("clawhub:") && inspect?.install?.source === "archive") {
+        console.log(
+          `Octo plugin is installed from a local archive; reinstalling from ClawHub ` +
+          `to restore the registry source${tagLabel}...`,
+        );
+        pluginsInstall(spec, quiet, true);
+        console.log("Octo plugin source migrated to ClawHub.");
+        didChange = true;
+        break;
+      }
+
       const targetVersion = getLatestClawHubVersion();
 
       if (!targetVersion) {
@@ -256,26 +277,6 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       }
 
       if (currentVersion === targetVersion) {
-        // Source migration (revert path for the TEMPORARY bundled-tarball
-        // default): a plugin installed from the bundled tarball is recorded by
-        // OpenClaw with install.source === "archive", and `openclaw plugins
-        // update` refuses to update archive-source plugins. So once ClawHub is
-        // healthy and the default reverts to clawhub:octo, a same-version check
-        // would otherwise strand the user on the archive source forever. When
-        // the installed source is "archive" but we're now targeting a clawhub:
-        // spec, reinstall unconditionally to switch the source back to ClawHub,
-        // even though the version number is unchanged.
-        const installedSource = inspect?.install?.source;
-        if (installedSource === "archive" && spec.startsWith("clawhub:")) {
-          console.log(
-            `Octo plugin v${currentVersion} is at the target version but installed from a local archive. ` +
-            `Reinstalling from ClawHub to restore the registry source...`,
-          );
-          pluginsInstall(spec, quiet, true);
-          console.log(`Octo plugin source migrated to ClawHub (v${currentVersion}).`);
-          didChange = true;
-          break;
-        }
         console.log(`Octo plugin v${currentVersion} is already the target version${tagLabel}. No update needed.`);
         break;
       }
@@ -526,7 +527,16 @@ function runMigration(ctx: MigrationContext): void {
   // -------------------------------------------------------------------------
   // Step 5: install octo (skip if already healthy from a prior partial migration)
   // -------------------------------------------------------------------------
-  const octoAlreadyHealthy = octoSnapshot.installed && isHealthyInstall(PLUGIN_ID);
+  // TEMPORARY (bundled-tarball revert path): an octo installed from the bundled
+  // tarball is healthy but recorded with install.source === "archive". If this
+  // migration is reached after ClawHub is healthy again (spec is clawhub:), we
+  // must NOT treat an archive-source install as "already healthy, skip" — that
+  // would strand the user on the archive source (openclaw plugins update refuses
+  // archive). Force the reinstall so the source migrates back to ClawHub.
+  const octoInstalledFromArchive =
+    spec.startsWith("clawhub:") && pluginsInspect(PLUGIN_ID)?.install?.source === "archive";
+  const octoAlreadyHealthy =
+    octoSnapshot.installed && isHealthyInstall(PLUGIN_ID) && !octoInstalledFromArchive;
   if (!octoAlreadyHealthy) {
     try {
       console.log(`  Installing ${PLUGIN_ID}${tagLabel}...`);
