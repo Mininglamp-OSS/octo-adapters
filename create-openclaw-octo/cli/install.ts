@@ -549,7 +549,10 @@ function runMigration(ctx: MigrationContext): void {
   if (!octoAlreadyHealthy) {
     try {
       console.log(`  Installing ${PLUGIN_ID}${tagLabel}...`);
-      pluginsInstall(spec, quiet, force);
+      // Force when migrating an archive source back to ClawHub: the existing
+      // healthy octo dir would otherwise make a non-forced install refuse
+      // ("plugin already exists"), so the source would never switch.
+      pluginsInstall(spec, quiet, force || octoInstalledFromArchive);
     } catch (err) {
       rollback(`pluginsInstall(${PLUGIN_ID}) threw: ${(err as Error).message}`);
     }
