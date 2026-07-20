@@ -271,6 +271,78 @@ describe("runInstall — update scenario", () => {
     expect(didCallGatewayRestart(calls)).toBe(true);
   });
 
+  // TEMPORARY (ClawHub-outage bundled-tarball default): when the bundled plugin
+  // tarball is present in the package, the default install path (no --from) must
+  // install from that local tarball, not from `clawhub:octo`. The other tests in
+  // this file rely on the global existsSync mock returning false (so the bundled
+  // tarball is treated as absent and the spec falls back to clawhub:octo, which
+  // matches their assertions); here we opt a single path — the vendored tarball —
+  // into existsSync=true to exercise the bundled-default behavior.
+  it("bundled tarball present: default install uses the vendored tarball, not clawhub:octo", async () => {
+    const fs = await import("node:fs");
+    const mockExistsSync = vi.mocked(fs.existsSync);
+    mockExistsSync.mockImplementation((p) =>
+      pathEndsWith(p as string, "vendor/octo-1.1.0.tgz"),
+    );
+
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.5.21",
+          latestVersion: "0.6.0",
+          enabled: true,
+        });
+      }
+      if (a[0] === "plugins" && a[1] === "install") return "";
+      if (a[0] === "gateway" && a[1] === "restart") return "";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    const calls = getCalledArgs();
+    expect(didCallPluginsInstall(calls)).toBe(true);
+    const spec = pluginsInstallSpec(calls);
+    expect(spec).not.toBe("clawhub:octo");
+    expect(spec?.endsWith("vendor/octo-1.1.0.tgz")).toBe(true);
+
+    mockExistsSync.mockReturnValue(false);
+  });
+
+  it("bundled tarball absent: default install falls back to clawhub:octo", async () => {
+    // existsSync stays false (global default) → tarball treated as absent →
+    // defaultInstallSpec() must fall back to clawhub:octo (revert-safe path).
+    const { runInstall } = await loadInstall();
+
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === "config" && a[1] === "file") return "/home/user/.openclaw/openclaw.json";
+      if (a[0] === "--version") return "OpenClaw 2026.4.15\n";
+      if (a[0] === "plugins" && a[1] === "inspect") {
+        return inspectDispatch(a, {
+          id: "octo",
+          version: "0.5.21",
+          latestVersion: "0.6.0",
+          enabled: true,
+        });
+      }
+      if (a[0] === "plugins" && a[1] === "install") return "";
+      if (a[0] === "gateway" && a[1] === "restart") return "";
+      return "";
+    });
+
+    await runInstall({ force: false, dev: false });
+
+    const calls = getCalledArgs();
+    expect(pluginsInstallSpec(calls)).toBe("clawhub:octo");
+  });
+
   it("already target version + entries.enabled=false: self-heals enabled, no install, no restart", async () => {
     // Regression: install used to early-return on already-at-target, bypassing
     // the self-heal that re-enables the plugin after OpenClaw major upgrades

@@ -20,6 +20,7 @@
 
 import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   capturePluginState,
   cleanupBrokenInstall,
@@ -51,6 +52,7 @@ import {
 import {
   CHANNEL_ID,
   CLAWHUB_INSTALL_SPEC,
+  BUNDLED_PLUGIN_TARBALL,
   LEGACY_CHANNEL_ID,
   LEGACY_PLUGIN_ID,
   NPM_PACKAGE_NAME,
@@ -117,16 +119,42 @@ export interface InstallOptions {
   from?: string;
 }
 
+/**
+ * TEMPORARY: absolute path to the plugin tarball bundled in this CLI package.
+ * Compiled file lives at `dist/cli/install.js`; the tarball ships at the package
+ * root under `vendor/`, so go up two levels from `dist/cli/`. Returns null if
+ * the bundled tarball is missing (falls back to ClawHub). Remove once ClawHub
+ * is healthy and the default reverts to CLAWHUB_INSTALL_SPEC.
+ */
+function resolveBundledPluginTarball(): string | null {
+  try {
+    const here = fileURLToPath(import.meta.url);
+    const pkgRoot = resolve(here, "..", "..", "..");
+    const tarball = resolve(pkgRoot, "vendor", BUNDLED_PLUGIN_TARBALL);
+    return existsSync(tarball) ? tarball : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The install spec used when the caller passes no explicit `--from`.
+ * TEMPORARY: prefer the bundled tarball (npm/mirror-friendly, no ClawHub/GitHub
+ * network needed); fall back to ClawHub if the tarball is somehow absent.
+ */
+function defaultInstallSpec(): string {
+  return resolveBundledPluginTarball() ?? CLAWHUB_INSTALL_SPEC;
+}
+
 export async function runInstall(opts: InstallOptions): Promise<void> {
-  // The default install path dispatches via `openclaw plugins install
-  // clawhub:octo`, which requires the `clawhub:` protocol introduced in
-  // OpenClaw v2026.3.22. `--from` accepts arbitrary install specs (local
-  // tarball, file://, http(s), bare npm name, **and** `clawhub:...`); the
-  // version gate must consider the actual spec, not just whether `--from`
-  // was passed — otherwise `--from clawhub:octo` on older OpenClaw would
-  // sneak past the gate and only fail partway through migration.
+  // The install path dispatches via `openclaw plugins install <spec>`. Only the
+  // `clawhub:` protocol requires OpenClaw v2026.3.22+; a bundled local tarball
+  // (the current TEMPORARY default) or a `--from` path does not. Gate on the
+  // ACTUAL spec that will be used, not merely whether `--from` was passed —
+  // otherwise `--from clawhub:octo` on older OpenClaw would sneak past the gate.
   // See issue #90 + PR #91 review.
-  ensureOpenClawCompat({ requireClawHubProtocol: requiresClawHubProtocol(opts.from) });
+  const effectiveSpec = opts.from ?? defaultInstallSpec();
+  ensureOpenClawCompat({ requireClawHubProtocol: requiresClawHubProtocol(effectiveSpec) });
 
   // ---------------------------------------------------------------------------
   // v2.0.0 npm→ClawHub migration: detect (NOT yet uninstall) any pre-2.0 npm
@@ -165,7 +193,7 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       "For pre-release testing use --from <tarball>.",
     );
   }
-  const spec = opts.from ?? CLAWHUB_INSTALL_SPEC;
+  const spec = opts.from ?? defaultInstallSpec();
   const quiet = false;
   let didChange = false;
 
@@ -190,9 +218,13 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
       const inspect = pluginsInspect(PLUGIN_ID);
       const currentVersion = inspect?.plugin?.version ?? "unknown";
 
-      if (opts.force || opts.from) {
-        // --from skips version comparison: local tarball install is unconditional
-        // because the remote registry can't know the tarball's contents.
+      // A local tarball spec (--from, or the TEMPORARY bundled-tarball default)
+      // must install unconditionally: the remote ClawHub "latest" is unrelated to
+      // the tarball's contents, so version comparison against ClawHub would wrongly
+      // skip the install (e.g. bundled 1.1.0 while ClawHub latest is still 1.0.19).
+      // Only true `clawhub:` specs go through the version-compare path below.
+      const isLocalTarballSpec = !spec.startsWith("clawhub:");
+      if (opts.force || opts.from || isLocalTarballSpec) {
         console.log(`Force installing Octo plugin${tagLabel}...`);
         pluginsInstall(spec, quiet, true);
         console.log("Plugin installed successfully.");

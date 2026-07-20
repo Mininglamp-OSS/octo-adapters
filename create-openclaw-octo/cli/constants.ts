@@ -26,6 +26,16 @@ export const NPM_PACKAGE_NAME = "openclaw-channel-octo";
 /** Spec passed to `openclaw plugins install <spec>` to install from ClawHub. */
 export const CLAWHUB_INSTALL_SPEC = "clawhub:octo";
 
+/**
+ * TEMPORARY: while ClawHub is not serving the latest octo release, the default
+ * install path uses a plugin tarball bundled inside this CLI package instead of
+ * `clawhub:octo`. This keeps `npx create-openclaw-octo install` working against
+ * npm (mirror-friendly for regions without reliable GitHub/ClawHub access) with
+ * no extra flags. Resolve the absolute path via resolveBundledPluginTarball()
+ * in install.ts. Revert to CLAWHUB_INSTALL_SPEC once ClawHub is healthy again.
+ */
+export const BUNDLED_PLUGIN_TARBALL = "octo-1.1.0.tgz";
+
 // LEGACY-COMPAT: legacy identifiers used only by Phase B migration code and
 // Phase A's legacy-warn / dual-prefix compatibility paths.
 export const LEGACY_PLUGIN_ID = "openclaw-channel-dmwork";
