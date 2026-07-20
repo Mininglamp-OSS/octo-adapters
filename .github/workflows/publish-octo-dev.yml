@@ -56,6 +56,18 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm test
       - run: npm run build
+      # TEMPORARY (bundled-tarball default): dev publishes fire on every merge to
+      # main touching create-openclaw-octo/**, so guard here too — otherwise a
+      # broken gitignore/untracked tarball would silently ship bad @dev packages
+      # on the high-frequency path while the tag-push guard only catches it later.
+      # Remove with the bundled-tarball feature once ClawHub is healthy.
+      - name: assert bundled tarball is packed
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          grep -q "vendor/octo-.*\.tgz" /tmp/pack.txt || {
+            echo "::error::bundled plugin tarball missing from npm pack contents (vendor/octo-*.tgz). Is it tracked in git?"
+            exit 1
+          }
 
   publish_dev:
     name: publish create-openclaw-octo @dev
