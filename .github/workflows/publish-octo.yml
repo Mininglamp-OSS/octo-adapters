@@ -71,6 +71,19 @@ jobs:
         run: npm test
       - name: build
         run: npm run build
+      # TEMPORARY (bundled-tarball default): guard that the bundled plugin
+      # tarball is actually included in the published npm package. This runs
+      # from the CI git checkout (no untracked local files), so it catches the
+      # gitignore/untracked failure mode where `npm pack` silently omits the
+      # tarball and the default install falls back to clawhub:octo. Remove this
+      # guard together with the bundled-tarball feature once ClawHub is healthy.
+      - name: assert bundled tarball is packed
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          grep -q "vendor/octo-.*\.tgz" /tmp/pack.txt || {
+            echo "::error::bundled plugin tarball missing from npm pack contents (vendor/octo-*.tgz). Is it tracked in git?"
+            exit 1
+          }
 
   publish_octo:
     name: publish create-openclaw-octo

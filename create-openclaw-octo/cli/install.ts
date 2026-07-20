@@ -178,7 +178,8 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   }
 
   const scenario = detectScenario();
-  // Spec selection: --from > CLAWHUB_INSTALL_SPEC (default).
+  // Spec selection: --from > defaultInstallSpec() (TEMPORARY bundled tarball if
+  // present, else CLAWHUB_INSTALL_SPEC = "clawhub:octo").
   // v2.0.0+ installs via ClawHub (`clawhub:octo`) instead of npm.
   // --dev / --next: ClawHub dist-tag semantics differ from npm; not supported
   // in v2.0.0. Use --from with a local tarball for pre-release testing.
@@ -197,8 +198,15 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
   const quiet = false;
   let didChange = false;
 
-  // Display label for "(from <path>)" in log lines.
-  const tagLabel = opts.from ? ` (from ${opts.from})` : "";
+  // Display label for the install source in log lines. --from wins; otherwise,
+  // when the TEMPORARY bundled tarball is the effective default, label it as
+  // such so logs distinguish "installed the bundled tarball" from "fell back to
+  // clawhub:octo" (both take the no-`--from` path).
+  const tagLabel = opts.from
+    ? ` (from ${opts.from})`
+    : spec.startsWith("clawhub:")
+      ? ""
+      : " (from bundled tarball)";
 
   switch (scenario) {
     case "legacy-to-octo":
@@ -416,8 +424,9 @@ export async function runInstall(opts: InstallOptions): Promise<void> {
 //
 // Both rebrand (openclaw-channel-dmwork → ClawHub octo) and legacy-to-octo
 // (very-legacy "dmwork" → ClawHub octo) go through runMigration() with a
-// different `legacyPluginId` parameter. The target install spec is always
-// `CLAWHUB_INSTALL_SPEC` (= "clawhub:octo") and the post-install plugin id
+// different `legacyPluginId` parameter. The install spec is whatever the caller
+// resolved (the TEMPORARY bundled tarball by default, or CLAWHUB_INSTALL_SPEC
+// = "clawhub:octo" as fallback / after revert) and the post-install plugin id
 // is `PLUGIN_ID` (= "octo"). Channel config and bindings always live under
 // the same legacy channel id ("dmwork"), so data migration is identical.
 // ---------------------------------------------------------------------------
