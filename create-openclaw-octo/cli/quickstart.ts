@@ -11,6 +11,7 @@
 
 import {
   readConfigFromFile,
+  getConfigFilePathSafe,
   writeConfigAtomic,
   runOpenclaw,
 } from "./openclaw-cli.js";
@@ -20,10 +21,16 @@ import {
   ensureChannelConfigObject,
   enforceHealthyClawHubInstall,
 } from "./utils.js";
+import { writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { configureOctoMcp, resolveMcpUrlOption, validateMcpUrl } from './mcp-config.js';
+import { checkMcpConfig, refreshMcpGateway } from './mcp.js';
 
 export interface QuickstartOptions {
   apiKey: string;
   apiUrl: string;
+  mcpUrl?: string;
 }
 
 interface AgentInfo {
@@ -41,8 +48,10 @@ interface CreatedBot {
 }
 
 export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
+  opts = { ...opts, mcpUrl: resolveMcpUrlOption(opts.mcpUrl) };
   // 1. Pre-flight: enforce healthy ClawHub octo + recent OpenClaw (exits on legacy/missing/broken)
   enforceHealthyClawHubInstall();
+  if (opts.mcpUrl !== undefined) validateMcpUrl(opts.mcpUrl);
 
   // 2. Get all agents
   console.log("Fetching agent list...");
@@ -142,7 +151,8 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
 
   // 4. Write all config at once
   console.log("\nWriting configuration...");
-  const cfg: Record<string, any> = readConfigFromFile() || {};
+  const source = readConfigFromFile();
+  const cfg: Record<string, any> = structuredClone(source ?? {});
   const channelConfig = ensureChannelConfigObject(cfg);
   if (!cfg.session) cfg.session = {};
   if (!cfg.bindings) cfg.bindings = [];
@@ -174,8 +184,36 @@ export async function runQuickstart(opts: QuickstartOptions): Promise<void> {
     cfg.session.dmScope = RECOMMENDED_DM_SCOPE;
   }
 
-  writeConfigAtomic(cfg);
+  // A guarded write can reject a concurrent edit after remote credentials exist.
+  // Keep the operator's file intact and retain only the newly issued credentials.
+  function persist(createdConfig: Record<string, any>): void {
+    try { writeConfigAtomic(createdConfig, source ?? null); }
+    catch {
+      const recovery = join(dirname(getConfigFilePathSafe()), `octo-quickstart-recovery-${randomUUID()}.json`);
+      try {
+        writeFileSync(recovery, JSON.stringify({ apiUrl: opts.apiUrl, bots: successful }, null, 2), {mode: 0o600, flag: 'wx'});
+      } catch {
+        throw new Error('Bots were created, but configuration and recovery could not be saved. Do not rerun quickstart; recover the created Bots through BotFather before continuing.');
+      }
+      throw new Error(`Bots were created, but configuration was not saved. Credentials retained in ${recovery} (private file); restore these existing accounts after resolving the configuration conflict. Do not rerun quickstart.`);
+    }
+  }
+  let migrated: ReturnType<typeof configureOctoMcp>;
+  try { migrated = configureOctoMcp(cfg, opts.mcpUrl); }
+  catch {
+    persist(cfg);
+    throw new Error('Bots were created and their credentials saved, but MCP configuration needs correction. Use the mcp command after fixing bindings/policy; do not rerun quickstart.');
+  }
+  for (const warning of migrated.warnings ?? []) console.warn(warning);
+  // Persist newly issued credentials before network checks; never lose them on MCP downtime.
+  persist(migrated.config);
   console.log("Configuration written.");
+  try {
+    await checkMcpConfig(migrated.config);
+    refreshMcpGateway(migrated.config);
+  } catch {
+    throw new Error('Bots were created and credentials saved, but MCP verification or Gateway refresh did not complete. Fix the connection and run mcp; do not rerun quickstart or bind to create Bots again.');
+  }
 
   // 5. Wait for hot-reload
   console.log("Waiting for Octo channel to reload...");

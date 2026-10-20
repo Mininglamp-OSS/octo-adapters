@@ -17,6 +17,7 @@ import { runRemoveAccount } from "./remove-account.js";
 import { PLUGIN_ID, renderInstallStatusBanner } from "./utils.js";
 import { getOpenClawVersionStrict, resolvePluginState } from "./openclaw-cli.js";
 import { PLUGIN_VERSION } from "./version.js";
+import { runMcpMigration } from './mcp.js';
 
 const program = new Command();
 
@@ -68,6 +69,7 @@ program
 program
   .command("install")
   .description("Install or update the Octo plugin")
+  .option('--mcp-url <url>', 'Deployment-provided Octo MCP endpoint (streamable-http)')
   .option("--force", "Force reinstall", false)
   .option(
     "--next",
@@ -85,6 +87,7 @@ program
       dev: opts.dev,
       next: opts.next,
       from: opts.from,
+      mcpUrl: opts.mcpUrl,
     });
   });
 
@@ -92,6 +95,7 @@ program
 program
   .command("update")
   .description("Update the Octo plugin (alias for install)")
+  .option('--mcp-url <url>', 'Enable Octo MCP; omitted reuses existing service configuration')
   .option(
     "--next",
     "[v2.0.0+ no-op] Previously selected npm @next dist-tag. ClawHub installs use a single channel; use `install --from <tarball>` for pre-release testing.",
@@ -99,13 +103,14 @@ program
   )
   .addOption(new Option("--dev").hideHelp().default(false))
   .action(async (opts) => {
-    await runUpdate({ dev: opts.dev, next: opts.next });
+    await runUpdate({ dev: opts.dev, next: opts.next, mcpUrl: opts.mcpUrl });
   });
 
 // --- bind ---
 program
   .command("bind")
   .description("Configure a bot account and bind it to an agent")
+  .option('--mcp-url <url>', 'Octo MCP endpoint; omitted reuses the existing service')
   .requiredOption("--bot-token <token>", "Bot token (starts with bf_ or app_)")
   .requiredOption("--api-url <url>", "API server URL")
   .requiredOption("--account-id <id>", "Bot account ID")
@@ -116,19 +121,28 @@ program
       apiUrl: opts.apiUrl,
       accountId: opts.accountId,
       agent: opts.agent,
+      mcpUrl: opts.mcpUrl,
     });
   });
 
 // --- quickstart ---
+program.command('mcp')
+  .description('Configure or check MCP for existing Bot bindings without re-registering Bots')
+  .option('--mcp-url <url>', 'Deployment-provided Octo MCP endpoint')
+  .option('--check', 'Check configuration and protocol without writing settings', false)
+  .action(async opts => { await runMcpMigration({ mcpUrl: opts.mcpUrl, checkOnly: opts.check }); });
+
 program
   .command("quickstart")
   .description("Create bots for all agents and bind them (one-time setup)")
+  .option('--mcp-url <url>', 'Octo MCP endpoint; omitted reuses the existing service')
   .requiredOption("--api-key <key>", "User API key (starts with uk_)")
   .requiredOption("--api-url <url>", "API server URL")
   .action(async (opts) => {
     await runQuickstart({
       apiKey: opts.apiKey,
       apiUrl: opts.apiUrl,
+      mcpUrl: opts.mcpUrl,
     });
   });
 
