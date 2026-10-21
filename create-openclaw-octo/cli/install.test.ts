@@ -39,6 +39,8 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+vi.mock('./mcp.js', () => ({ runMcpMigration: vi.fn() }));
+import { runMcpMigration } from './mcp.js';
 const mockExecFileSync = vi.mocked(execFileSync);
 
 async function loadInstall() {
@@ -113,6 +115,18 @@ describe("runInstall — update scenario", () => {
     expect(didCallGatewayRestart(calls)).toBe(false);
   });
 
+  it('distinguishes completed plugin installation from failed MCP migration', async () => {
+    const { runInstall } = await loadInstall();
+    mockExecFileSync.mockImplementation((_cmd, args) => {
+      const a = args as string[];
+      if (a[0] === 'config' && a[1] === 'file') return '/home/user/.openclaw/openclaw.json';
+      if (a[0] === '--version') return 'OpenClaw 2026.4.15\n';
+      if (a[0] === 'plugins' && a[1] === 'inspect') return inspectDispatch(a, { id: 'octo', version: '0.6.0', latestVersion: '0.6.0', enabled: true });
+      return '';
+    });
+    vi.mocked(runMcpMigration).mockRejectedValueOnce(new Error('Octo MCP tools/list failed: HTTP 401.'));
+    await expect(runInstall({ mcpUrl: 'https://mcp.test/' })).rejects.toThrow(/plugin installation completed.*MCP migration.*HTTP 401/i);
+  });
   it("--force: installs with ClawHub spec, then restarts", async () => {
     const { runInstall } = await loadInstall();
 
@@ -675,5 +689,21 @@ describe("runInstall — update scenario", () => {
     expect(state.bindings[0].match.channel).toBe("octo");
     expect(state.bindings[0].match.accountId).toBe("mybot");
     expect(state.bindings[0].agentId).toBe("agent1");
+  });
+});
+
+describe('post-install sanitized cause', () => {
+  it.each([
+    ['Octo MCP has static credentials or another transport configuration; remove them before migration.', /mcp.servers.octo-mcp/],
+    ['Both octo-business and octo-mcp are configured; resolve the conflicting service entries before migration.', /conflicting.*service/i],
+  ])('retains safe actionable local categories: %s', async (message, expected) => {
+    const { PostInstallMcpError } = await loadInstall();
+    expect(new PostInstallMcpError(new Error(message as string)).message).toMatch(expected as RegExp);
+  });
+  it('drops unknown transport errors rather than exposing secrets', async () => {
+    const { PostInstallMcpError } = await loadInstall();
+    const error = new (PostInstallMcpError as any)(new Error('Octo MCP failed with Bearer bf_private at https://user:password@mcp.test/?token=secret'));
+    expect(error.message).not.toMatch(/bf_private|password|secret/);
+    expect(error.message).toMatch(/installation completed/i);
   });
 });

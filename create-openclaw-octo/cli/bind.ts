@@ -1,7 +1,7 @@
 /**
  * bind command: configure a single bot account and bind it to an agent.
  * Writes config atomically (no multiple `openclaw config set` calls).
- * Does NOT restart gateway — relies on channel hot-reload.
+ * Refreshes active Gateway connections when MCP is configured.
  */
 
 import {
@@ -9,19 +9,20 @@ import {
   writeConfigAtomic,
 } from "./openclaw-cli.js";
 import {
-  CHANNEL_ID,
-  RECOMMENDED_DM_SCOPE,
   ensureChannelConfigObject,
   enforceHealthyClawHubInstall,
   validateAccountId,
   isValidBotTokenPrefix,
 } from "./utils.js";
+import { prepareBotBinding } from './bind-config.js';
+import { checkMcpConfig, refreshMcpGateway } from './mcp.js';
 
 export interface BindOptions {
   botToken: string;
   apiUrl: string;
   accountId: string;
   agent: string;
+  mcpUrl?: string;
 }
 
 export async function runBind(opts: BindOptions): Promise<void> {
@@ -43,8 +44,11 @@ export async function runBind(opts: BindOptions): Promise<void> {
   }
 
   // 3. Read existing config + ensure channels.<CHANNEL_ID>.accounts exists
-  const cfg: Record<string, any> = readConfigFromFile() || {};
+  const source = readConfigFromFile();
+  const cfg = prepareBotBinding(source || {}, opts);
+  await checkMcpConfig(cfg, opts.accountId);
   const channelConfig = ensureChannelConfigObject(cfg);
+  const accountId = Object.keys(channelConfig.accounts).find(key => key.toLowerCase() === opts.accountId.toLowerCase())!;
 
   // 4. Register once, store full result for config + greeting
   let botName = "";
@@ -64,37 +68,15 @@ export async function runBind(opts: BindOptions): Promise<void> {
   } catch { /* best-effort */ }
 
   // 5. Write account config
-  const accountConfig: Record<string, string> = {
-    botToken: opts.botToken,
-    apiUrl: opts.apiUrl,
-  };
-  if (botName) accountConfig.name = botName;
-  channelConfig.accounts[opts.accountId] = accountConfig;
-
-  // 6. Set dmScope (multi-bot isolation)
-  if (!cfg.session) cfg.session = {};
-  if (!cfg.session.dmScope) {
-    cfg.session.dmScope = RECOMMENDED_DM_SCOPE;
-  }
-
-  // 7. Add or update binding
-  if (!cfg.bindings) cfg.bindings = [];
-  const existingIdx = (cfg.bindings as any[]).findIndex(
-    (b: any) => b.match?.channel === CHANNEL_ID && b.match?.accountId === opts.accountId,
-  );
-  if (existingIdx >= 0) {
-    cfg.bindings[existingIdx].agentId = opts.agent;
-  } else {
-    cfg.bindings.push({
-      agentId: opts.agent,
-      match: { channel: CHANNEL_ID, accountId: opts.accountId },
-    });
-  }
+  if (botName) channelConfig.accounts[accountId].name = botName;
 
   // 8. Atomic write
-  writeConfigAtomic(cfg);
+  writeConfigAtomic(cfg, source ?? null);
+
   const displayLabel = botName || opts.accountId;
   console.log(`Bot "${displayLabel}" (${opts.accountId}) configured and bound to agent "${opts.agent}".`);
+  try { refreshMcpGateway(cfg); }
+  catch (error) { console.warn(error instanceof Error ? error.message : 'Binding saved; verify the intended Gateway and restart it if needed.'); }
 
   // 9. Wait for channel hot-reload
   console.log("Waiting for Octo channel to reload...");

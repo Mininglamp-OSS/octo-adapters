@@ -20,6 +20,9 @@
 
 import { copyFileSync, existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
+import { runMcpMigration } from './mcp.js';
+import { OCTO_MCP_SERVER_NAME, resolveMcpUrlOption, validateMcpUrl } from './mcp-config.js';
+import { BUNDLED_MCP_URL } from './mcp-deployment.js';
 import {
   capturePluginState,
   cleanupBrokenInstall,
@@ -89,6 +92,7 @@ export function getLatestClawHubVersion(): string | null {
 }
 
 export interface InstallOptions {
+  mcpUrl?: string;
   force?: boolean;
   dev?: boolean;
   /**
@@ -117,7 +121,46 @@ export interface InstallOptions {
   from?: string;
 }
 
+/** Installation succeeded; callers must report MCP as a separate, incomplete stage. */
+export class PostInstallMcpError extends Error {
+  constructor(cause?: unknown) {
+    // Only emit local diagnostic categories, never arbitrary exception text,
+    // transport details, URLs, credentials or remote response bodies.
+    const message = cause instanceof Error ? cause.message : '';
+    const diagnostic = message.replace(/^Octo MCP account "[^"]*": /, '');
+    const http = /^Octo MCP (initialize|notifications\/initialized|tools\/list) failed: HTTP ([1-5][0-9]{2})\.$/.exec(diagnostic);
+    const detail = http ? `Protocol ${http[1]} failed: HTTP ${http[2]}.`
+      : /connection failed or timed out/i.test(message) ? 'MCP connection failed or timed out.'
+      : /invalid JSON|JSON-RPC|invalid tools catalog|requested result/i.test(message) ? 'MCP returned an invalid protocol response.'
+      : /pagination|tool count|too large/i.test(message) ? 'MCP discovery exceeded a catalog or pagination limit.'
+      : /configuration changed during validation/i.test(message) ? 'Configuration changed during validation; retry mcp against the current file.'
+      : /binding|Agent.*roster|ambiguous.*account/i.test(message) ? 'Check the configured Bot accounts and Agent bindings.'
+      : /policy|denied|tool filters|profile/i.test(message) ? 'MCP is excluded by configured tool policy or filters.'
+      : /static credentials or another transport configuration/.test(message) ? 'Remove static identity and transport overrides from mcp.servers.octo-mcp before migration.'
+      : /Both octo-business and octo-mcp are configured/.test(message) ? 'Resolve conflicting MCP service entries octo-business and octo-mcp before migration.'
+      : /MCP requires OpenClaw/.test(message) ? 'Octo MCP requires OpenClaw >= 2026.9.8 with native account resolution.'
+      : /credential|token|environment reference/i.test(message) ? 'Check the Bot credential configuration and environment.'
+      : 'Check MCP configuration and connectivity.';
+    super(`Plugin installation completed, but Octo MCP migration did not complete. ${detail} Run mcp after correcting the connection/configuration; do not rerun bind or quickstart to recreate Bots.`);
+    this.name = 'PostInstallMcpError';
+  }
+}
+
 export async function runInstall(opts: InstallOptions): Promise<void> {
+  opts = { ...opts, mcpUrl: resolveMcpUrlOption(opts.mcpUrl) };
+  if (opts.mcpUrl !== undefined) validateMcpUrl(opts.mcpUrl);
+  await runPluginInstall(opts);
+  const current = readConfigFromFile();
+  if (opts.mcpUrl !== undefined || BUNDLED_MCP_URL || current?.mcp?.servers?.[OCTO_MCP_SERVER_NAME]
+    || current?.mcp?.servers?.['octo-business']) {
+    try { await runMcpMigration({ mcpUrl: opts.mcpUrl, refreshGateway: false }); }
+    catch (error) { throw new PostInstallMcpError(error); }
+  } else {
+    console.log('Octo MCP deployment endpoint is not configured in this release; existing Bot connections are retained.');
+  }
+}
+
+async function runPluginInstall(opts: InstallOptions): Promise<void> {
   // The default install path dispatches via `openclaw plugins install
   // clawhub:octo`, which requires the `clawhub:` protocol introduced in
   // OpenClaw v2026.3.22. `--from` accepts arbitrary install specs (local

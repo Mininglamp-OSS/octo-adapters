@@ -1,9 +1,11 @@
+import { normalizeMcpAccountId } from './mcp-config.js';
 /**
  * openclaw CLI wrapper.
  * All openclaw invocations go through this module using execFileSync with
  * argument arrays to avoid shell-quoting issues.
  */
 
+import { isDeepStrictEqual } from "node:util";
 import { execFileSync, execSync } from "node:child_process";
 import { readFileSync, writeFileSync, copyFileSync, existsSync, rmSync, readdirSync, statSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
@@ -787,30 +789,47 @@ export function resolvePluginState(id: string): PluginResolvedState {
 // Gateway helpers
 // ---------------------------------------------------------------------------
 
-export function gatewayStatus(): { running: boolean } {
+export function gatewayStatus(): { running: boolean; stateUnknown?: boolean } {
   try {
     const out = runOpenclaw(["gateway", "status", "--json"], {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
     });
-    const jsonStart = out.indexOf("{");
-    if (jsonStart < 0) return { running: false };
-    // Find matching } to avoid trailing log noise
-    let depth = 0;
-    let end = -1;
-    for (let i = jsonStart; i < out.length; i++) {
-      if (out[i] === "{") depth++;
-      else if (out[i] === "}") { depth--; if (depth === 0) { end = i; break; } }
+    let data: any;
+    // CLI diagnostics may contain balanced, malformed or unfinished braces.
+    // Accept only a complete JSON object with Gateway status fields.
+    for (let start = out.indexOf("{"); start >= 0; start = out.indexOf("{", start + 1)) {
+      let depth = 0, quoted = false, escaped = false, end = -1;
+      for (let i = start; i < out.length; i++) {
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (out[i] === "\\") escaped = true;
+          else if (out[i] === '"') quoted = false;
+          continue;
+        }
+        if (out[i] === '"') { quoted = true; continue; }
+        if (out[i] === "{") depth++;
+        else if (out[i] === "}" && --depth === 0) { end = i; break; }
+      }
+      if (end < 0) continue;
+      try {
+        const candidate = JSON.parse(out.slice(start, end + 1));
+        if (typeof candidate.service?.runtime?.status === 'string'
+          || typeof candidate.health?.healthy === 'boolean' || typeof candidate.port?.status === 'string') {
+          data = candidate; break;
+        }
+      } catch { /* A braced log preamble is not the status payload. */ }
     }
-    if (end < 0) return { running: false };
-    const data = JSON.parse(out.slice(jsonStart, end + 1));
+    if (!data) return { running: false, stateUnknown: true };
     const runtimeRunning = data.service?.runtime?.status === "running";
     const healthy = data.health?.healthy === true;
     // Fallback: port is busy with an openclaw-gateway process = gateway is running
     const portBusy = data.port?.status === "busy";
-    return { running: runtimeRunning || healthy || portBusy };
+    if (runtimeRunning || healthy || portBusy) return { running: true };
+    if (["stopped", "inactive", "not-loaded"].includes(data.service?.runtime?.status)) return { running: false };
+    return { running: false, stateUnknown: true };
   } catch {
-    return { running: false };
+    return { running: false, stateUnknown: true };
   }
 }
 
@@ -1126,7 +1145,7 @@ export function removeOrphanedBindingsFromFile(
       if (b.match?.channel !== channel) return true; // keep bindings on other channels
       if (!validAccountIds) return false; // remove every binding on this channel
       // Keep only if accountId is in valid list (or no accountId specified)
-      return !b.match.accountId || validAccountIds.includes(b.match.accountId);
+      return !b.match.accountId || validAccountIds.some(id => normalizeMcpAccountId(id) === normalizeMcpAccountId(b.match.accountId));
     });
     writeConfigAtomic(cfg);
   } catch {
@@ -1307,8 +1326,19 @@ export function cleanupStaleStageDirectories(): string[] {
  * Write openclaw.json atomically: write to .tmp then rename.
  * Prevents gateway watcher from reading half-written/truncated JSON.
  */
-export function writeConfigAtomic(cfg: Record<string, any>): void {
+export function writeConfigAtomic(cfg: Record<string, any>, expected?: Record<string, any> | null): void {
   const configPath = getConfigFilePathSafe();
+  // No asynchronous work or host commands between this comparison and rename.
+  // A probe may take seconds; never overwrite a snapshot changed during it.
+  if (expected !== undefined) {
+    let current: unknown = null;
+    try { current = JSON.parse(readFileSync(configPath, "utf-8")); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('OpenClaw configuration cannot be verified; no changes written.');
+    }
+    if (!isDeepStrictEqual(current, expected)) throw new Error('OpenClaw configuration changed during validation; retry against the current configuration. No changes written.');
+    if (current !== null) copyFileSync(configPath, configPath + ".bak");
+  }
   const tmpPath = configPath + ".tmp";
   writeFileSync(tmpPath, JSON.stringify(cfg, null, 2), "utf-8");
   renameSync(tmpPath, configPath);

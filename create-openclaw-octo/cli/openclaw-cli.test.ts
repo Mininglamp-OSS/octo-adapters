@@ -29,6 +29,11 @@ async function loadModule() {
 }
 
 describe("gatewayStatus", () => {
+  it.each(['warning {not json}', 'warning {"message":"noise"}', 'warning {unfinished'])('skips braced preamble %s', async prefix => {
+    const { gatewayStatus } = await loadModule();
+    mockExecFileSync.mockReturnValue(prefix + '\n' + JSON.stringify({ service: { runtime: { status: 'running' } } }));
+    expect(gatewayStatus()).toEqual({ running: true });
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -46,6 +51,11 @@ describe("gatewayStatus", () => {
     expect(gatewayStatus()).toEqual({ running: true });
   });
 
+  it('parses braces and escaped quotes in JSON strings with log noise', async () => {
+    const { gatewayStatus } = await loadModule();
+    mockExecFileSync.mockReturnValue('log\n' + JSON.stringify({ message: 'brace } { \" text', service: { runtime: { status: 'running' } } }) + '\ntrailing log');
+    expect(gatewayStatus()).toEqual({ running: true });
+  });
   it("should detect stopped gateway", async () => {
     const { gatewayStatus } = await loadModule();
     mockExecFileSync.mockReturnValue(
@@ -64,8 +74,14 @@ describe("gatewayStatus", () => {
       throw new Error("command failed");
     });
 
-    expect(gatewayStatus()).toEqual({ running: false });
+    expect(gatewayStatus()).toEqual({ running: false, stateUnknown: true });
   });
+  it.each(['not JSON', '{}', '{"service":{"runtime":{"status":"unknown"}}}'])('reports unknown status for %s', async (output) => {
+    const { gatewayStatus } = await loadModule();
+    mockExecFileSync.mockReturnValue(output);
+    expect(gatewayStatus()).toEqual({ running: false, stateUnknown: true });
+  });
+
 });
 
 describe("pluginsInspect", () => {

@@ -1,3 +1,4 @@
+import { normalizeMcpAccountId } from './mcp-config.js';
 /**
  * doctor command: diagnose and optionally fix Octo plugin health.
  *
@@ -141,7 +142,7 @@ export async function runDoctorChecks(params: {
       } else if (octoBindings.length > 0 && configuredAccounts.length > 0) {
         // Check for bindings referencing non-existent accounts
         const orphaned = octoBindings.filter(
-          (b) => b.match?.accountId && !configuredAccounts.includes(b.match.accountId),
+          (b) => b.match?.accountId && !configuredAccounts.some(id => normalizeMcpAccountId(id) === normalizeMcpAccountId(b.match?.accountId)),
         );
         if (orphaned.length > 0) {
           removeOrphanedBindingsFromFile(CHANNEL_ID, configuredAccounts);
@@ -190,24 +191,21 @@ export async function runDoctorChecks(params: {
       // (only legacy/deadlock/broken) and passed PLUGIN_ID as install spec,
       // which broke after PLUGIN_ID's semantics changed from npm name to
       // ClawHub plugin id "octo".
+      const { runInstall, PostInstallMcpError } = await import("./install.js");
+      let mcpError: string | undefined;
       try {
-        const { runInstall } = await import("./install.js");
         await runInstall({ force: true });
-        pluginState = resolvePluginState(PLUGIN_ID);
-        checks.push({
-          name: "Plugin installed",
-          status: "FIXED",
-          detail: `Installed v${pluginState.version ?? "unknown"}`,
-        });
       } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        checks.push({
-          name: "Plugin installed",
-          status: "FAIL",
-          detail: `Auto-install failed: ${errMsg}`,
-        });
-        return summarize(checks);
+        if (err instanceof PostInstallMcpError) mcpError = err.message;
+        else {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          checks.push({ name: "Plugin installed", status: "FAIL", detail: `Auto-install failed: ${errMsg}` });
+          return summarize(checks);
+        }
       }
+      pluginState = resolvePluginState(PLUGIN_ID);
+      checks.push({ name: "Plugin installed", status: "FIXED", detail: `Installed v${pluginState.version ?? "unknown"}` });
+      if (mcpError) checks.push({ name: "Octo MCP", status: "WARN", detail: mcpError });
     } else {
       checks.push({
         name: "Plugin installed",
